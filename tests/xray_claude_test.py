@@ -727,6 +727,28 @@ def test_refs():
           and _re.fullmatch(r"\u2026 (w\d{3} )+fix #831 now (v\d{3} )*v\d{3} \u2026", s),
           ms)
 
+    # #478: the left cut moves to the next word start; 5-byte words and a
+    # 0-4 byte pad put the raw cut at every offset in a word (well under the
+    # #483 half-room limit)
+    bad = []
+    for pad in range(5):
+        put([{"type": "user", "cwd": "/home/demo/proj",
+              "timestamp": "2026-11-10T10:00:00Z",
+              "message": {"content": "start"}},
+             {"type": "assistant", "message": {"content": [
+                 {"type": "text", "text": " ".join("l%03d" % i for i in range(120)) +
+                     " " + "p" * pad + " fix #831 now " + long_r}]}}])
+        r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session",
+                "--full", "--json")
+        ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+        s = ms[0].get("sentence", "") if ms else ""
+        sp = (ms[0].get("span") or [0, 0]) if ms else [0, 0]
+        if not (len(ms) == 1 and _re.match(r"\u2026 l\d{3} ", s) and
+                s.encode()[sp[0]:sp[1]] == b"#831"):
+            bad.append((pad, s[:30]))
+    check("ref #478: a left cut inside a word starts at the next whole word",
+          not bad, bad)
+
     # (b) a ref over 400 bytes: --ref takes 256, but a relative path's key
     # is its absolute path (<= 1024), which the text may spell out: span
     # null, the sentence cut from its start, still <= 400 bytes
