@@ -13931,6 +13931,29 @@ xf_watch_open(struct xf *f)
 	return f->q < 0 ? -1 : 0;
 }
 
+/* The follow's runs, for its signal handler (#468) */
+static volatile sig_atomic_t xf_jobs[2];
+static const int xf_sigs[] = { SIGTERM, SIGINT, SIGHUP };
+
+/* The follow is ending: its runs (their command groups with them, as
+** xcmd's handler does) before it goes, then the signal's own end. */
+static void
+xf_sig(int sig)
+{
+	int b;
+
+	for (b = 0; b < 2; b++)
+		if (xf_jobs[b] > 0)
+		{
+			kill((pid_t)xf_jobs[b], SIGTERM);
+			while (waitpid((pid_t)xf_jobs[b], NULL, 0) < 0 &&
+			       errno == EINTR)
+				;
+		}
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
 /* Block b's command run (#461) over: SIGTERM (xcmd's handler takes the
 ** command's group with it), reaped, its pipe closed. */
 static void
@@ -13941,6 +13964,7 @@ xf_job_kill(struct xf *f, int b)
 		kill(f->job[b], SIGTERM);
 		while (waitpid(f->job[b], NULL, 0) < 0 && errno == EINTR)
 			;
+		xf_jobs[b] = 0;
 	}
 	if (f->jfd[b] >= 0)
 		close(f->jfd[b]);
@@ -14399,8 +14423,8 @@ xf_cmd_run(struct xf *f, int b, char **t)
 	return 0;
 }
 
-/* After a snapshot: the command now, in the loop (no run of it left
-** going); the next run its cadence after this one's end (#461). */
+/* A run that could not start as a job: the command now, in the loop; the
+** next run its cadence after this one's end (#461). */
 static void
 xf_cmd(struct xf *f, int b)
 {
@@ -14417,35 +14441,57 @@ xf_cmd(struct xf *f, int b)
 static int
 xf_job(struct xf *f, int b)
 {
-	int p[2];
+	int p[2], k;
 	pid_t pid;
+	sigset_t set, omask;
 
-	if (pipe(p) != 0)
+	/* a socket, not a pipe: the child sees our end close when we die,
+	** even by SIGKILL (#468) */
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, p) != 0)
 	{
 		xf_cmd(f, b);
 		return 1;
 	}
+	sigemptyset(&set);
+	for (k = 0; k < 3; k++)
+		sigaddset(&set, xf_sigs[k]);
+	sigprocmask(SIG_BLOCK, &set, &omask);	/* no run xf_sig misses */
 	if ((pid = fork()) == 0)
 	{
 		char *t;
 		const char *w;
 		size_t n;
-		ssize_t k;
+		ssize_t wr;
 		int ok;
 
+		setpgid(0, 0);	/* a terminal's ^C is the follow's to pass on */
 		close(p[0]);
 		if (f->conn >= 0)
 			close(f->conn);	/* the master sees our end, not this */
+		if (f->jfd[!b] >= 0)
+			close(f->jfd[!b]);	/* the other run's EOF is its own */
 		/* xcmd's handler (its group killed) only replaces a default */
-		signal(SIGTERM, SIG_DFL);
+		for (k = 0; k < 3; k++)
+			signal(xf_sigs[k], SIG_DFL);
+		xf_jobs[0] = xf_jobs[1] = 0;
+		sigprocmask(SIG_SETMASK, &omask, NULL);
+		/* shortcut: the follow's death is seen while the command runs
+		** (xcmd's poll), not in its few ms of setup or reap */
+		xcmd_watch(p[1]);
 		ok = xf_cmd_run(f, b, &t);
 		w = ok ? t : f->warn[b];
 		if (write(p[1], ok ? "1" : "0", 1) == 1)
-			for (n = strlen(w); n; w += k, n -= (size_t)k)
-				if ((k = write(p[1], w, n)) <= 0)
+			for (n = strlen(w); n; w += wr, n -= (size_t)wr)
+				if ((wr = write(p[1], w, n)) <= 0)
 					break;
 		_exit(0);
 	}
+	if (pid > 0)
+	{
+		setpgid(pid, pid);	/* both sides: no race with the child's */
+		xf_jobs[b] = pid;
+	}
+	sigprocmask(SIG_SETMASK, &omask, NULL);
 	close(p[1]);
 	if (pid < 0)
 	{
@@ -14681,8 +14727,10 @@ xf_blk(struct xf *f, int b, int all)
 	return xf_out(f);
 }
 
-/* After a snapshot (all): the commands run again and both blocks whole.
-** After a batch: a built-in block's moved rows (the tasks every batch;
+/* After a snapshot (all): both blocks whole now, a command's last answer
+** or the built-in one (none yet), then its run as a job whose answer
+** comes whole when it lands (#468). After a batch: a built-in block's
+** moved rows (the tasks every batch;
 ** shortcut: the whole list printed to diff it, upgrade with a change
 ** count in xr_tasks if lists of thousands show in the CPU). */
 static int
@@ -14694,14 +14742,18 @@ xf_blocks(struct xf *f, int all)
 	{
 		if (!(b ? f->memory : f->tasks) || (!all && f->cmdout[b]))
 			continue;
-		if (all)
-			xf_cmd(f, b);
-		else if (b && f->mtouched == xm_live_touched(f->cl ? f->cl->xm
+		if (all && !f->cmd[b])
+			f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
+		if (!all && b && f->mtouched == xm_live_touched(f->cl ? f->cl->xm
 		                                             : NULL))
 			continue;
 		if (xf_blk(f, b, all))
 			return 1;
 	}
+	for (b = 0; all && b < 2; b++)	/* both blocks out first: their order */
+		if ((b ? f->memory : f->tasks) && f->cmd[b] && !f->job[b] &&
+		    xf_job(f, b) && xf_blk(f, b, 0))
+			return 1;
 	return 0;
 }
 
@@ -15592,6 +15644,18 @@ xr_follow(const struct xr_target *t, int tasks, int memory)
 	f.q = f.conn = f.jfd[0] = f.jfd[1] = -1;
 	if (!(f.sent = xr_sent_new()))
 		return xr_failed();
+	if (f.cmd[0] || f.cmd[1])
+	{
+		struct sigaction sa, old;
+		int k;
+
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = xf_sig;
+		for (k = 0; k < 3; k++)	/* an ignored one stays ignored */
+			if (sigaction(xf_sigs[k], NULL, &old) == 0 &&
+			    old.sa_handler != SIG_IGN)
+				sigaction(xf_sigs[k], &sa, NULL);
+	}
 	for (;;)
 	{
 		struct cmd_info ci;

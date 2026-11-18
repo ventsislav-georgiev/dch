@@ -2493,11 +2493,15 @@ A
 .B tasks_command
 or
 .B memory_command
-runs as for the one\-shot form, again 5 s (tasks) or 30 s (memory) after
-its last run ended, and its answer is sent as a whole block when it changes.
-These later runs go on beside the stream, one of each at a time: a slow or
-hung command never holds back the transcript's lines, and one still running
-when the follow ends is stopped with it.
+runs as for the one\-shot form, after each snapshot and again 5 s (tasks)
+or 30 s (memory) after its last run ended, and its answer is sent as a
+whole block when it changes.
+Every run goes on beside the stream, one of each at a time: a slow or
+hung command never holds back the transcript's lines, so the block after a
+snapshot is the command's last answer, or the built\-in block before its
+first answer (as at the start), which the answer replaces as a whole block
+when it lands; one still running when the follow ends, or is signalled, is
+stopped with it.
 .B \-\-follow
 takes no
 .B \-\-ref

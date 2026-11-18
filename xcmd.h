@@ -78,6 +78,11 @@ typedef int (*xcmd_row_fn)(const char *line, void *arg);
 int xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
               void *arg, struct xcmd_result *res);
 
+/* fd (-1 none) watched beside the command's output: readable or hung up
+** (the peer of a socket nobody writes to has ended), the run ends as a
+** callback's stop would. The follow's job child sets it (#468). */
+void xcmd_watch(int fd);
+
 /* Pure parts, for the units and the fuzz target. */
 
 /* The command line into argv[max] (NULL-terminated), words in buf[cap]:
