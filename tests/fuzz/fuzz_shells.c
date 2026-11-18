@@ -77,6 +77,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	put(f, d, n, n);
 	snprintf(f, sizeof f, "%s/agent-f.meta.json", sub);
 	put(f, d, n, n);
+	sub_read = 0;	/* the budget is per process, so per input here */
 	(void)shell_owner(tp, "bfuzz", t, t, sv, &ns, agent, adesc, sizeof adesc,
 	                  desc, sizeof desc);
 	return 0;
