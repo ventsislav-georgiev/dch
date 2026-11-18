@@ -712,6 +712,24 @@ def test_refs():
           len(ms) == 1 and s.startswith("\u2026 ") and
           not "\u0300" <= s[2] <= "\u036f" and
           sb[sp[0]:sp[1]].decode() == purl, ms)
+    # #494: a mark right after the spaces at the cut is skipped too
+    om = "ab \u0301 " * 120
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": om + "y " + purl + " " + om}]}}])
+    r = dch("--xray", "xr-refs", "--ref", purl, "--scope", "session",
+            "--full", "--json")
+    ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+    s = ms[0].get("sentence", "") if ms else ""
+    sp = (ms[0].get("span") or [0, 0]) if ms else [0, 0]
+    sb = s.encode()
+    check("ref #494: no combining mark after the left ellipsis and its "
+          "spaces, the span still slices the ref",
+          len(ms) == 1 and s.startswith("\u2026 ") and
+          not "\u0300" <= s[2] <= "\u036f" and
+          sb[sp[0]:sp[1]].decode() == purl, ms)
     put([{"type": "user", "cwd": "/home/demo/proj",
           "timestamp": "2026-11-10T10:00:00Z",
           "message": {"content": "start"}},

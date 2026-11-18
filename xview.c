@@ -3325,7 +3325,7 @@ static void
 xv_csent(const struct xv_men *m)
 {
 	const char *s = m->sent;
-	size_t a = 0, ss = (size_t)m->ss, se = (size_t)m->se;
+	size_t a = 0, p, ss = (size_t)m->ss, se = (size_t)m->se;
 	int room = pk_w - pk_col - 2;
 
 	if (!s[0] || m->ss < 0)
@@ -3336,21 +3336,28 @@ xv_csent(const struct xv_men *m)
 	while (a < ss && xv_fitlen(s + a, se - a, room) < se - a)
 		while (++a < ss && ((unsigned char)s[a] & 0xc0) == 0x80)
 			;
-	for (size_t k; a < ss && (k = xr_u8_cont(s + a, ss - a)); )
-		a += k;
 	/* NIT-UH2: on to the next word, never past the ref; the cut stays when
-	** there is none or it drops over half the context shown (#483's rule) */
-	if (a && (unsigned char)s[a - 1] > ' ')
+	** there is none or it drops over half the context shown (#483's rule);
+	** a mark after the spaces is skipped too (#494) */
+	do
 	{
-		size_t b = a;
+		size_t k;
 
-		while (b < ss && (unsigned char)s[b] > ' ')
-			b++;
-		if (b < ss && b - a <= (ss - a) / 2)
-			a = b;
-		while (a < ss && (unsigned char)s[a] <= ' ')
-			a++;
-	}
+		p = a;
+		while (a < ss && (k = xr_u8_cont(s + a, ss - a)))
+			a += k;
+		if (a && (unsigned char)s[a - 1] > ' ')
+		{
+			size_t b = a;
+
+			while (b < ss && (unsigned char)s[b] > ' ')
+				b++;
+			if (b < ss && b - a <= (ss - a) / 2)
+				a = b;
+			while (a < ss && (unsigned char)s[a] <= ' ')
+				a++;
+		}
+	} while (a != p);
 	if (a)
 		pk_txt(xv_ell());
 	xv_txtn(s + a, ss - a);

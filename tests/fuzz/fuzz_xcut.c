@@ -13,9 +13,8 @@
 ** place in it holds the ref's bytes when the ref is valid text without
 ** controls (else the same count of bytes). The scalar after the leading
 ** ellipsis is not a continuation (xr_u8_cont) unless the line has an
-** ellipsis of its own or a continuation after a space or at its start
-** (orphan marks: see the finding below). For the selected span xv_csent draws the sentence
-** at EVERY width 8-130: valid UTF-8, within the width, the ref whole when
+** ellipsis of its own, nor when the ref itself starts on a mark. For the
+** selected span xv_csent draws the sentence at EVERY width 8-130: valid UTF-8, within the width, the ref whole when
 ** xv_fitlen says it fits, no continuation scalar after its ellipsis. */
 #include "../../xray.c"
 #include "../../picker.c"
@@ -75,7 +74,7 @@ draw(const char *o, size_t ss, size_t se, size_t k0, int own)
 		xv_csent(&m);
 		if (pk_col > pk_w || !valid((unsigned char *)pk_fb, pk_fn))
 			FAIL();
-		if (!own && pk_fn >= 3 && !memcmp(pk_fb, "\xe2\x80\xa6", 3) &&
+		if (!own && !xr_u8_cont(ref, rl) && pk_fn >= 3 && !memcmp(pk_fb, "\xe2\x80\xa6", 3) &&
 		    memcmp(o, "\xe2\x80\xa6", 3) &&
 		    xr_u8_cont(pk_fb + 3, pk_fn - 3))
 			FAIL();
@@ -105,13 +104,6 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	memcpy(l, d + 3, ll);
 	sel = d[2] % ll;
 	own = memmem(l, ll, "\xe2\x80\xa6", 3) != NULL;
-	/* FINDING: both cuts skip a continuation, then spaces, and can land
-	** on a mark that follows the spaces (an orphan mark: nothing to
-	** combine with, so cosmetic). Lines with one skip the check. */
-	for (size_t i = 0; i < ll; i++)
-		if ((!i || (unsigned char)l[i - 1] <= ' ') &&
-		    xr_u8_cont(l + i, ll - i))
-			own = 1;
 	for (size_t s = 0; s < ll; s++)
 	{
 		size_t e = s + rl > ll ? ll : s + rl, ss, se, ol;

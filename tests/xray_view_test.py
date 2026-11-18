@@ -787,7 +787,7 @@ def test_said():
         v.close()
 
 
-NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4, 3)]
+NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4, 3, 5)]
 
 
 def fixture_narrow():
@@ -829,6 +829,15 @@ def fixture_narrow():
                                           " so #412 holds."),
                                       "2026-11-10T13:01:00Z"))],
            "-home-demo-narrowemoji", solo)
+    # a mark right after the spaces at the cut (#494)
+    solo = "/home/demo/narrowspmark"
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-narrowspmark")),
+                exist_ok=True)
+    record("xv-nws", NSIDS[4], [dict(o, cwd=solo) if "cwd" in o else o
+                                for o in turn("go", "2026-11-10T13:00:00Z",
+                                   at(say("ab \u0301 " * 60 + " so #412 holds."),
+                                      "2026-11-10T13:01:00Z"))],
+           "-home-demo-narrowspmark", solo)
 
 
 def narrow_row(name, cols=50):
@@ -896,6 +905,16 @@ def test_narrow_emoji():
         check("#496: at %d columns no row of an emoji run is wider than the "
               "window and #412 shows" % cols, not wide and "so #412" in row,
               (wide, text))
+
+
+def test_narrow_spmark():
+    """#494: nor a mark that follows the spaces at the cut."""
+    row, text = narrow_row("xv-nws")
+    m = re.search(ELL + "(.)", row)
+    check("#494: the narrow row's first scalar after the ellipsis is not a "
+          "combining mark after the spaces and #412 shows", m is not None and
+          not ("\u0300" <= m.group(1) <= "\u036f") and "so #412" in row,
+          text)
 
 
 def test_narrow():
@@ -1253,7 +1272,7 @@ def main():
               test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
               fixture_said, test_said, fixture_narrow, test_narrow, test_narrow_cjk,
-              test_narrow_mark, test_narrow_emoji,
+              test_narrow_mark, test_narrow_emoji, test_narrow_spmark,
               fixture_terms, test_terms,
               test_terms_live, fixture_recall, test_recall,
               fixture_dup, test_dup)
