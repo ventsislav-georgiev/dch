@@ -5980,13 +5980,14 @@ xr_claude_calls(struct xr_claude *d, xr_call_fn fn, void *ctx, uint64_t ino)
 static uint64_t
 ch_turn(struct xr_claude *d, const char *a)
 {
+	const struct xr_chapter *c;
 	unsigned long long ino, off;
 	size_t k;
 
 	if (d->blind || sscanf(a, "f%llx:%llu", &ino, &off) != 2)
 		return 0;
 	for (k = d->ch.n; k-- > 0;)
-		if (xr_chapter_at(&d->ch, k)->offset == off)
+		if ((c = xr_chapter_at(&d->ch, k)) && c->offset == off)
 			return d->ch.total - d->ch.n + k + 1;
 	return 0;
 }
