@@ -1297,7 +1297,10 @@ standard input is a request, as NDJSON:
 - `{"req":N,"argv":["--ref","#831","--full","--json"]}`: the flags after
   `--xray <name>`, `N` from 1 to 2147483647. Only the request forms are
   taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`),
-  `--chapter` and `--clear`. dch checks them by its own rules first; any
+  `--search` (with `--scope`; `["--search","push retry","--scope","project",
+  "--json"]`, one answer per request, the bytes `dch --xray <n> --search
+  ... --json` writes on the host), `--chapter` and `--clear`. A request
+  without `--json` is refused, so there is no text answer here. dch checks them by its own rules first; any
   other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
   value is answered `{"req":N,"stderr":"dch: ..."}` and
   `{"req":N,"exit":2,"why":"refused"}`, and nothing is sent.
@@ -2009,7 +2012,7 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
 
 `--search` goes with no other flag but `--json` and `--scope` (`dch: bad
 usage: --search and --ref`, also with `--chapter`, `--clear` or `--follow`),
-and not in `--requests`; `--full` and `--budget-ms` stay `--ref`'s
+and is a `--requests` request (`--json` required there); `--full` and `--budget-ms` stay `--ref`'s
 (`dch: bad usage: --scope, --full and --budget-ms come with --ref`, the
 message `--scope` alone also gives with neither `--ref` nor `--search`). Nothing is written to disk, and the text is never logged or
 traced. On `host:name` it runs on that host's `dch serve`; a host whose dch

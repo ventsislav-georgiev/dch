@@ -620,7 +620,7 @@ xray_budget(const char *s)
 ** client's own, as --requests is); one of --follow, --ref <text>,
 ** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
 ** (#322) and --clear, but --follow takes --tasks and --memory (#446);
-** --scope, --full
+** --scope with --ref or --search (#501), --full
 ** and --budget-ms only with --ref. A value is the next element even when it
 ** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
 ** (an anchor may hold ':'). The --ref
@@ -681,7 +681,11 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	if (one & (one - 1))
 		return ctl_no(why, cap, "--ref, --search, --tasks, --memory, "
 		              "--follow, --chapter and --clear exclude each other");
-	if (seen & (X_FULL | X_SCOPE | X_BUDGET) && !(seen & X_REF))
+	/* --scope goes with --search too (#498, #501) */
+	if (seen & (X_FULL | X_BUDGET) && !(seen & X_REF))
+		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
+		              "with --ref");
+	if (seen & X_SCOPE && !(seen & (X_REF | X_SEARCH)))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");
 	if (val[5] && !xray_anchor_ok(val[5]))
