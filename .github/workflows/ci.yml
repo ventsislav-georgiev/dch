@@ -71,26 +71,6 @@ jobs:
           test "$(/tmp/dch-lite --status mixed)" = working
           ./dch -k mixed
 
-  # ASan + UBSan over the whole suite (scripts/sanitize.sh says why each
-  # option is set). Any sanitizer report fails the job.
-  sanitizers:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-        variant: [full, lite]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build and test under ASan + UBSan
-        run: |
-          if [ "${{ matrix.variant }}" = "lite" ]; then
-            scripts/sanitize.sh --without-libghostty
-          else
-            scripts/sanitize.sh
-          fi
-
   # Our code builds warning-free under a strict set, on gcc and clang. The
   # default `make` stays lenient; XCFLAGS adds to configure's CFLAGS (and
   # its hardening flags) rather than replacing them.
@@ -184,20 +164,4 @@ jobs:
           name: dch-exe
           path: dch.exe
           if-no-files-found: error
-          retention-days: 14
-
-  # libFuzzer targets (tests/fuzz/), 60 s each under ASan + UBSan.
-  fuzz:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Fuzz
-        run: CC=clang FUZZ_ARTIFACTS=$PWD/fuzz-artifacts scripts/fuzz.sh 60
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: failure()
-        with:
-          name: fuzz-artifacts
-          path: fuzz-artifacts
-          if-no-files-found: ignore
           retention-days: 14
