@@ -23,6 +23,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -11142,6 +11143,79 @@ res_origin(const char *cwd, long long until, struct res_run *run, char *out,
 	return xr_gh_repo(run->out, n, out, cap);
 }
 
+/* The disk cache of gh's answers (#508): $XDG_CACHE_HOME/dch/gh/<o>,<r>,<N>
+** (names hold no ','), 0700 dir, 0600 files, the --jq answer or "none". A
+** hit must be a regular file of ours, younger than 10 min (a "none": 2). */
+static int
+res_cache_path(char *out, size_t cap, const char *repo, const char *num,
+               int mk)
+{
+	const char *x = getenv("XDG_CACHE_HOME"), *h = getenv("HOME");
+	char dir[PATH_MAX], *p;
+	size_t n;
+
+	if (x && x[0] == '/')
+		snprintf(dir, sizeof dir, "%s/dch/gh", x);
+	else if (h && h[0] == '/')
+		snprintf(dir, sizeof dir, "%s/.cache/dch/gh", h);
+	else
+		return 0;
+	for (p = dir + 1; mk && (p = strchr(p, '/')); *p++ = '/')
+	{
+		*p = '\0';
+		(void)mkdir(dir, 0700);
+	}
+	if (mk)
+		(void)mkdir(dir, 0700);
+	n = strlen(dir);
+	if ((size_t)snprintf(out, cap, "%s/%s,%s", dir, repo, num) >= cap)
+		return 0;
+	for (p = out + n + 1; *p; p++)
+		*p = *p == '/' ? ',' : (char)tolower((unsigned char)*p);
+	return 1;
+}
+
+/* 1: a fresh entry read into buf (NUL-ended; "none" is a negative one) */
+static int
+res_cache_get(const char *repo, const char *num, char *buf, size_t cap)
+{
+	char path[PATH_MAX];
+	struct stat st;
+	ssize_t n;
+	int fd;
+
+	if (!res_cache_path(path, sizeof path, repo, num, 0) ||
+	    lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+	    st.st_uid != getuid() || st.st_size >= (off_t)cap)
+		return 0;
+	if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0)
+		return 0;
+	n = read(fd, buf, cap - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	buf[n] = '\0';
+	return time(NULL) - st.st_mtime < (strcmp(buf, "none") ? 600 : 120);
+}
+
+/* tmp + rename; any failure is silent */
+static void
+res_cache_put(const char *repo, const char *num, const char *s)
+{
+	char path[PATH_MAX], tmp[PATH_MAX + 32];
+	size_t n = strlen(s);
+	int fd;
+
+	if (!res_cache_path(path, sizeof path, repo, num, 1))
+		return;
+	snprintf(tmp, sizeof tmp, "%s.%ld.tmp", path, (long)getpid());
+	if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
+		return;
+	if (write(fd, s, n) != (ssize_t)n || close(fd) != 0 ||
+	    rename(tmp, path) != 0)
+		(void)unlink(tmp);
+}
+
 /* #N, repo#N, o/r#N or an issue/pull URL (o/r#N): `gh api` for its title
 ** and state, read-only, under XR_GIT_MS. The REST issues endpoint answers
 ** for an issue and a pull alike (a pull is an issue with pull_request), so
@@ -11165,7 +11239,7 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 	                   "then \"pull\" else \"issue\" end)}";
 	extern char **environ;
 	const char *t = xr_span_text(sp), *h = strchr(t, '#'), *sl;
-	char gh[PATH_MAX], repo[208], num[16], path[256], *env[24];
+	char gh[PATH_MAX], repo[208], num[16], path[256], *env[24], cb[4096];
 	char *av[] = {gh, a1, a2, a3, a4, a5, a6, a7, path, NULL};
 	char *fix[] = {f0, f1, f2, f3, f4, f5, f6, f7};
 	size_t k, j, e = 0, nl;
@@ -11194,6 +11268,12 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 	                    strncasecmp(strchr(repo, '/') + 1, t,
 	                                (size_t)(h - t)))))
 		return 0;	/* repo#N: only the origin's own repo */
+	if (res_cache_get(repo, num, cb, sizeof cb))
+	{
+		if (!strcmp(cb, "none") || xr_gh_parse(cb, repo, num, r))
+			return strcmp(cb, "none") != 0;
+		/* a corrupt entry: asked again, then overwritten */
+	}
 	snprintf(path, sizeof path, "repos/%s/issues/%s", repo, num);
 	for (k = 0; k < sizeof fix / sizeof *fix; k++)
 		env[e++] = fix[k];
@@ -11205,9 +11285,11 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 				break;
 			}
 	env[e] = NULL;
-	if (res_run(av, env, until, &run) != 0 || run.status != 0)
-		return 0;
-	return xr_gh_parse(run.out, repo, num, r);
+	if (res_run(av, env, until, &run) != 0 || run.status < 0)
+		return 0;	/* a timeout or a kill is not cached */
+	k = run.status == 0 && xr_gh_parse(run.out, repo, num, r);
+	res_cache_put(repo, num, k ? run.out : "none");
+	return (int)k;
 }
 
 /* ---- files (v2.1 7.1, v1 7.3) ---- */

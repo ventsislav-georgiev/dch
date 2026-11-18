@@ -1835,7 +1835,15 @@ under the same 3 s deadline and output cap as git, with only `PATH`,
 deadline, a remote that is not github.com or an answer it cannot read:
 no line and no warning; the mentions stream as always.
 `xray_github = false` (or `DCH_NO_GITHUB=1`, the test suite's guard)
-turns it off.
+turns it off (nothing is read or written then).
+Each answer is cached on disk so that every card open or hover does not
+spend your GitHub rate limit: in `$XDG_CACHE_HOME/dch/gh/` (else
+`~/.cache/dch/gh/`; directory 0700, files 0600, one per lowercased
+`owner,repo,N`, written atomically) for **10 minutes**; a missing issue
+(gh exited non-zero, or an answer that did not parse) is cached for **2
+minutes**; a timeout is not cached. An entry is used only if it is a
+regular file (no symlink) of yours; a corrupt one is ignored and
+overwritten. Delete the directory to refresh at once.
 
 - **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
   session runs nothing: `state: "ended"`. Otherwise dch runs git directly,

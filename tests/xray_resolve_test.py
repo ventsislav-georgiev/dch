@@ -641,12 +641,16 @@ def test_github(m):
         f.write(GH_FAKE % {"log": log, "envlog": envlog})
     os.chmod(os.path.join(fb, "gh"), 0o755)
     genv = {k: v for k, v in ENV.items() if k != "DCH_NO_GITHUB"}
-    genv.update(PATH=fb, XRES_CANARY="leak")
+    cache = os.path.join(T, "ghcache")
+    genv.update(PATH=fb, XRES_CANARY="leak", XDG_CACHE_HOME=cache)
+    ghd = os.path.join(cache, "dch", "gh")
     n = "xres-gh"
     spawn_shell(n, repo)
 
-    def q(text, full=False, env=genv, who=n):
+    def q(text, full=False, env=genv, who=n, keep=False):
         open(log, "w").close()
+        if not keep:	# every row starts cold, #508 rows keep the cache
+            shutil.rmtree(cache, ignore_errors=True)
         r = dch("--xray", who, "--ref", text,
                 "--scope", "session", *(["--full"] if full else []),
                 "--json", env=env)
@@ -727,6 +731,79 @@ def test_github(m):
         r, ls, rv, lg = q("#1234", env=dict(genv, DCH_NO_GITHUB="1"))
         check("#507: DCH_NO_GITHUB=1 (the suite's guard): gh never runs",
               not rv and not lg, (rv, lg))
+        # ---- #508: the disk cache of gh's answers
+        ent = os.path.join(ghd, "acme,widgets,1234")
+        r, ls, rv, lg = q("#1234")
+        check("#508: the first ask runs gh and writes the entry, dir 0700, "
+              "file 0600",
+              lg and os.path.isfile(ent) and
+              os.stat(ent).st_mode & 0o777 == 0o600 and
+              os.stat(ghd).st_mode & 0o777 == 0o700 and
+              sorted(os.listdir(ghd)) == ["acme,widgets,1234"],
+              (lg, os.listdir(ghd) if os.path.isdir(ghd) else None))
+        r, ls, rv2, lg = q("ACME/Widgets#1234", keep=True)
+        check("#508: a second --ref within the TTL (case variant): same "
+              "line, gh not run",
+              not lg and len(rv2) == 1 and rv2[0] == rv[0], (lg, rv2))
+        old = time.time() - 700
+        os.utime(ent, (old, old))
+        r, ls, rv2, lg = q("#1234", keep=True)
+        check("#508: an entry past 10 min: gh runs again, entry renewed",
+              lg and len(rv2) == 1 and time.time() - os.stat(ent).st_mtime
+              < 60, (lg, rv2))
+        neg = os.path.join(ghd, "acme,widgets,500")
+        r, ls, rv, lg = q("#500")
+        r2, ls, rv, lg2 = q("#500", keep=True)
+        check("#508: a negative answer is cached: gh asked once, no line",
+              lg and not lg2 and not rv and os.path.isfile(neg) and
+              open(neg).read() == "none", (lg, lg2))
+        os.utime(neg, (time.time() - 100, time.time() - 100))
+        r, ls, rv, lg = q("#500", keep=True)
+        check("#508: a none entry of 100 s still holds", not lg, lg)
+        os.utime(neg, (time.time() - 130, time.time() - 130))
+        r, ls, rv, lg = q("#500", keep=True)
+        check("#508: a none entry past 2 min asks again", bool(lg), lg)
+        r, ls, rv, lg = q("#600")
+        check("#508: a timeout is not cached",
+              not os.path.exists(os.path.join(ghd, "acme,widgets,600")), lg)
+        for label, mk in (
+                ("corrupt", lambda p: open(p, "w").write("{not json")),
+                ("symlinked", lambda p: os.symlink(
+                    os.path.join(T, "ghcache-target"), p))):
+            q("#1234")
+            tgt = os.path.join(T, "ghcache-target")
+            with open(tgt, "w") as f:
+                f.write('{"number":1234,"title":"Planted","state":"open",'
+                        '"kind":"issue"}')
+            os.unlink(ent)
+            mk(ent)
+            r, ls, rv, lg = q("#1234", keep=True)
+            check("#508: a %s entry is ignored (gh runs, the real title)"
+                  % label, lg and len(rv) == 1 and
+                  rv[0]["title"] != "Planted", (lg, rv))
+            if label == "corrupt":
+                check("#508: a corrupt entry is overwritten",
+                      open(ent).read().startswith("{\"number\":1234"),
+                      open(ent).read())
+            os.unlink(tgt)
+        if os.geteuid() == 0:
+            q("#1234")
+            os.chown(ent, 12345, 12345)
+            r, ls, rv, lg = q("#1234", keep=True)
+            check("#508: a foreign-owned entry is ignored", bool(lg), lg)
+        for label, env, cfgtxt in (
+                ("xray_github = false", genv, "xray_github = false\n"),
+                ("DCH_NO_GITHUB=1", dict(genv, DCH_NO_GITHUB="1"), None)):
+            if cfgtxt:
+                with open(ENV["DCH_CONFIG"], "w") as f:
+                    f.write(cfgtxt)
+            try:
+                q("#1234", env=env)
+                check("#508: %s: no cache dir, nothing written" % label,
+                      not os.path.exists(cache), label)
+            finally:
+                if cfgtxt:
+                    os.unlink(ENV["DCH_CONFIG"])
     finally:
         dch("-k", n)
 
