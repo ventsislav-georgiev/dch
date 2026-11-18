@@ -479,7 +479,7 @@ static size_t
 xv_fitlen(const char *s, size_t n, int w)
 {
 	size_t k = 0;
-	int l, cw = 0;
+	int l, cw = 0, st = 0;
 
 	while (k < n && s[k])
 	{
@@ -491,7 +491,7 @@ xv_fitlen(const char *s, size_t n, int w)
 		if (l < 1 || k + (size_t)l > n)
 			l = 1;
 		memcpy(c, s + k, (size_t)l);
-		cw += pk_cps(c);
+		cw += pk_cwx(ap_cp(c, &(int){1}), &st);
 		if (cw > w)
 			break;
 		k += (size_t)l;

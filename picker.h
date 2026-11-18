@@ -108,6 +108,7 @@ void pk_set(const char *a);
 void pk_txtto(const char *s, int lim);
 void pk_txt(const char *s);
 int pk_cps(const char *s);
+int pk_cwx(unsigned u, int *st);
 void pk_pad(int end);
 void pk_fit(const char *s, int w);
 void pk_age(long when, char *b, size_t n);	/* now, 22m, 3h, 2d; "" none */

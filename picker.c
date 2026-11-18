@@ -559,6 +559,24 @@ pk_cw(unsigned u)
 	return ap_cells(u);
 }
 
+/* pk_cw with the cluster's state st (0 at its start): a VS16 or a keycap
+** U+20E3 after a one-cell base makes that cluster two cells, as terminals
+** draw it (#496). */
+int
+pk_cwx(unsigned u, int *st)
+{
+	int c = pk_cw(u);
+
+	if (c == 0 && (u == 0xFE0F || u == 0x20E3) && *st)
+	{
+		*st = 0;
+		return 1;
+	}
+	if (c)
+		*st = c == 1;
+	return c;
+}
+
 /* Characters (UTF-8), each as wide as it draws, up to column lim and the
 ** edge. A control (C0, DEL or C1), a bidi control or a broken sequence
 ** shows as '?'. A character goes with the zero-width ones after it (marks,
@@ -569,7 +587,7 @@ pk_txtto(const char *s, int lim)
 {
 	unsigned u, prev;
 	const char *e, *q;
-	int l, w, cw, nri, join, c0 = pk_col;
+	int l, w, cw, nri, join, st, c0 = pk_col;
 	const char *until = s;	/* end of a chain cut per character */
 
 	if (lim > pk_w)
@@ -581,7 +599,7 @@ pk_txtto(const char *s, int lim)
 		** off (NIT-VW4, #429) */
 		for (join = s >= until;; join = 0)
 		{
-			for (e = s, w = 0, prev = 0, nri = 0; *e; e += l)
+			for (e = s, w = 0, prev = 0, nri = 0, st = 0; *e; e += l)
 			{
 				u = ap_cp(e, &l);
 				cw = pk_cw(u);
@@ -595,7 +613,7 @@ pk_txtto(const char *s, int lim)
 				      prev >= 0x1f1e6 && prev <= 0x1f1ff &&
 				      nri % 2 == 0))
 					break;
-				w += cw;
+				w += pk_cwx(u, &st);
 				prev = u;
 			}
 			if (!(join && w > lim - c0 && pk_col + w > lim))
@@ -632,10 +650,10 @@ pk_txt(const char *s)
 int
 pk_cps(const char *s)
 {
-	int n = 0, l;
+	int n = 0, l, st = 0;
 
 	for (; *s; s += l)
-		n += pk_cw(ap_cp(s, &l));
+		n += pk_cwx(ap_cp(s, &l), &st);
 	return n;
 }
 
