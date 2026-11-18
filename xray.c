@@ -10881,8 +10881,8 @@ res_git_prep(char *git, char *dir, char *home, char *av[], char *env[])
 ** remote URLs run between, and a repo none of them names is not that
 ** commit's (QA 1.55.0 LOW-1). */
 static int
-res_commit(const char *sha, const char *cwd, int live, const char *gh,
-           struct xr_resolved *r)
+res_commit(const char *sha, const char *cwd, int live, int light,
+           const char *gh, struct xr_resolved *r)
 {
 	static struct res_run run;	/* 68 KB: off the stack */
 	char git[PATH_MAX], dir[PATH_MAX], rev[64], home[PATH_MAX + 8];
@@ -10988,6 +10988,9 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 			size_t sl = strlen(r->subtitle);
 
 			memcpy(av + a, v, sizeof v);
+			/* QA LOW-UO2: light waits 300 ms for it, not the 3 s */
+			if (light && xr_now_ms() + 300 < until)
+				until = xr_now_ms() + 300;
 			if (res_run(av, env, until, &run) == 0 &&
 			    (run.status == 0 || run.status == 1))
 				snprintf(r->subtitle + sl, sizeof r->subtitle - sl,
@@ -11776,7 +11779,7 @@ res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 		if (u && (!e || snprintf(gh, sizeof gh, "%.*s", (int)(e - o), o)
 		          >= (int)sizeof gh))
 			return 0;
-		return res_commit(sp->full, cwd ? cwd : "", live,
+		return res_commit(sp->full, cwd ? cwd : "", live, light,
 		                  u && strlen(sp->full) < 40 ? gh : NULL, r);
 	}
 	if (sp->shape == XR_FILE)

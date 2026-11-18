@@ -4111,14 +4111,15 @@ fake_git(void)
 	    " in repository at /x' >&2; exit 128; }\n"
 	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;;\n"
 	    "*merge-base*)\n"
-	    "  case \"$m\" in offhead) exit 1 ;; mberr) exit 128 ;; esac; exit 0 ;;\n"
+	    "  case \"$m\" in offhead) exit 1 ;; mberr) exit 128 ;;"
+	    " slowmb) exec /bin/sleep 5 ;; esac; exit 0 ;;\n"
 	    "*--get-regexp*)\n"
 	    "  [ \"$m\" = cfgerr ] && { echo 'fatal: bad config' >&2; exit 3; }\n"
 	    "  [ \"$m\" = cfgslow ] && { /bin/sleep 30; exit 0; }\n"
 	    "  [ -s \"$D/remotes\" ] || exit 1; /bin/cat \"$D/remotes\"; exit 0 ;;\n"
 	    "esac\n"
 	    "case \"$m\" in\n"
-	    "ok|offhead|mberr) printf '0123456789abcdef0123456789abcdef01234567\\000Ann B\\0001700000000"
+	    "ok|offhead|mberr|slowmb) printf '0123456789abcdef0123456789abcdef01234567\\000Ann B\\0001700000000"
 	    "\\000a subject\\n\\n f | 1 +\\n 1 file changed\\n'; exit 0 ;;\n"
 	    "amb) echo 'error: short object ID abcdef1 is ambiguous' >&2; exit 128 ;;\n"
 	    "bad) echo \"fatal: bad object\" >&2; exit 128 ;;\n"
@@ -4248,6 +4249,41 @@ t_res_git(void)
 	CHECK("git #502: merge-base fails (no HEAD): ok, neither said",
 	      res("abcdef1234", "proj", 1, &r) == 1 && is(&r, "commit", "ok") &&
 	      !strstr(r.subtitle, "HEAD"));
+	/* QA LOW-UO2: a slow merge-base holds light for 300 ms, --full for 3 s */
+	{
+		struct xr_scan *x;
+		struct xr_span lsp;
+		char *ob = NULL;
+		size_t obl = 0;
+		FILE *of = open_memstream(&ob, &obl);
+
+		mode("slowmb");
+		memset(&lsp, 0, sizeof lsp);
+		lsp.shape = XR_COMMIT;
+		snprintf(lsp.key, sizeof lsp.key, "commit:abcdef1234");
+		snprintf(lsp.full, sizeof lsp.full, "abcdef1234");
+		x = of ? xr_scan_new(of, "k", "s", "", 1, 0, 0, 300, xr_now_ms())
+		       : NULL;
+		t0 = xr_now_ms();
+		if (x)
+			xr_scan_light(x, &lsp, "abcdef1234", cwd, 1);
+		t0 = xr_now_ms() - t0;
+		if (of)
+			fflush(of);
+		CHECK("git #UO2: a slow merge-base: light is back in under 1 s, "
+		      "the ok line, no on/not-on-HEAD label",
+		      x && t0 < 1000 && ob && strstr(ob, "\"state\":\"ok\"") &&
+		      strstr(ob, "a subject") && !strstr(ob, "HEAD"));
+		xr_scan_free(x);
+		if (of)
+			fclose(of);
+		free(ob);
+		t0 = xr_now_ms();
+		CHECK("git #UO2: a slow merge-base: --full keeps the 3 s deadline",
+		      res("abcdef1234", "proj", 1, &r) == 1 &&
+		      is(&r, "commit", "ok") && !strstr(r.subtitle, "HEAD") &&
+		      xr_now_ms() - t0 >= XR_GIT_MS - 50);
+	}
 	mode("ok");
 	e = slurp("env");
 	{
