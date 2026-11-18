@@ -19,9 +19,18 @@ nor once its pid is reused (#274); a
 record whose procStart does not match; a
 sessionId that is no UUID; CLAUDE_CONFIG_DIR honoured; null once the
 program exits (its record removed, or left behind under a held session).
+"shells" (#481): the Claude's children with fd 1 on its own
+.../<sessionId>/tasks/<id>.output, newest first, the eval'd command
+unquoted and cut on a UTF-8 boundary; another session's or other stdout
+not listed; the key absent with no Claude. Each shell's owner (#482) from
+fixture transcripts: main's (agent null) found by a binary search in a
+file past one read window, a subagent's (agentId, its meta description),
+descriptions cut on a UTF-8 boundary, and agent/description/background
+left out for a shell named only by a malformed or unfinished line.
 
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
+import calendar
 import json, os, shutil, signal, stat, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -203,6 +212,204 @@ def main():
         check("non-claude session: both null",
               field(b, "claude_session_id") is None
               and field(b, "transcript_path") is None)
+        check("non-claude session: no shells key",
+              field(b, "shells") == MISSING)
+        check("a Claude with no shells: shells []", field(a, "shells") == [])
+
+        # --- "shells" (#481): its Bash tool shells, from the kernel -------
+        # The "Claude" here starts each shell Claude Code's way: fd 1 on
+        # <tmp>/claude-<uid>/<project>/<sessionId>/tasks/<id>.output
+        h = "tt-sh"
+        ctl = os.path.join(tmp, "shctl")
+        os.mkdir(ctl)
+        hp = spawn(h, sys.executable, "-c",
+                   "import json,os,subprocess as sp,sys,time\n"
+                   "c,seen=sys.argv[1],set()\n"
+                   "while True:\n"
+                   "    for f in sorted(os.listdir(c)):\n"
+                   "        if f.endswith('.json') and f not in seen:\n"
+                   "            seen.add(f); j=json.load(open(c+'/'+f))\n"
+                   "            p=sp.Popen(j['argv'],stdout=open(j['out'],'ab'),"
+                   "stdin=sp.DEVNULL,stderr=sp.DEVNULL)\n"
+                   "            open(c+'/'+f[:-5]+'.pid','w').write(str(p.pid))\n"
+                   "    time.sleep(0.05)\n", ctl)
+        sh_sid = "48148148-1481-4814-8148-148148148148"
+        record(hp, sh_sid)
+        shpids = []
+
+        def shell(key, cmd, sid=sh_sid, out=None):
+            d = os.path.join(tmp, "claude-%d" % os.getuid(), "-tmp-proj", sid,
+                             "tasks")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(ctl, key + ".tmp"), "w") as f:
+                json.dump({"out": out or os.path.join(d, key + ".output"),
+                           "argv": ["/bin/sh", "-c", "true && eval " + cmd +
+                                    " < /dev/null && pwd -P >| /dev/null"]},
+                          f)
+            os.rename(os.path.join(ctl, key + ".tmp"),
+                      os.path.join(ctl, key + ".json"))
+            pid = until(lambda: open(os.path.join(ctl, key + ".pid")).read()
+                        if os.path.exists(os.path.join(ctl, key + ".pid"))
+                        else None)
+            shpids.append(int(pid))
+            # its own child (sleep) holds the same fd 1: listed once
+            until(lambda: subprocess.run(["/usr/bin/pgrep", "-P", pid],
+                                         capture_output=True).stdout)
+            return int(pid)
+
+        def started(pid):
+            return calendar.timegm(time.strptime(proc_start(pid),
+                                                 "%a %b %d %H:%M:%S %Y"))
+        try:
+            # bash's quoting of ' in the eval argument ('\'')
+            p1 = shell("bsh1one", "'sleep 120 ; echo '\\''hi'\\'''")
+            want1 = {"id": "bsh1one", "pid": p1, "started": started(p1),
+                     "command": "sleep 120 ; echo 'hi'"}
+            got = field(h, "shells")
+            check("one shell: its id, pid, start and command (%s)" % got,
+                  got == [want1])
+            time.sleep(1.1)	# a later start second: the order is by start
+            # zsh's ('"'"')
+            p2 = shell("bsh2two", "'sleep 120; echo '\"'\"'x y'\"'\"''")
+            want2 = {"id": "bsh2two", "pid": p2, "started": started(p2),
+                     "command": "sleep 120; echo 'x y'"}
+            got = field(h, "shells")
+            check("two shells: newest first (%s)" % got, got == [want2, want1])
+            shell("bsh3oth", "'sleep 120; true'",
+                  sid="99999999-9999-9999-9999-999999999999")
+            shell("bsh4else", "'sleep 120; true'",
+                  out=os.path.join(tmp, "elsewhere.output"))
+            check("another session's tasks file, or stdout elsewhere: not "
+                  "listed", field(h, "shells") == [want2, want1])
+            # a 2-byte é across the 200-byte cut; a tab as a space
+            lead = "sleep 120;\techo " + "a" * 183
+            time.sleep(1.1)
+            p5 = shell("bsh5utf", "'" + lead + "ézz'")
+            got = field(h, "shells")
+            c5 = got[0].get("command") if isinstance(got, list) and got \
+                and got[0].get("pid") == p5 else None
+            check("command cut at 200 bytes between UTF-8 scalars, control "
+                  "bytes as spaces (%r)" % c5,
+                  c5 == lead.replace("\t", " ") and
+                  len(c5.encode()) == 199)
+
+            # --- who started each shell (#482), from the transcripts ------
+            # Fixtures only in the shapes Claude Code writes (compact JSON,
+            # one object a line): the main conversation's background Bash
+            # call 3 MB into a 5 MB file (past any one window: the binary
+            # search by "timestamp" finds it), a subagent's in its own file
+            # with a meta, and a shell no transcript names.
+            p6 = shell("bsh6main", "'sleep 120'")
+            p7 = shell("bsh7sub", "'sleep 120'")
+            p8 = shell("bsh8none", "'sleep 120'")
+            t6 = started(p6)
+
+            def iso(t):
+                return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+            def jl(o):
+                return json.dumps(o, separators=(",", ":"),
+                                  ensure_ascii=False) + "\n"
+
+            def call(tu, t, desc, agent=None):
+                side = {"agentId": agent, "isSidechain": True} if agent \
+                    else {"isSidechain": False}
+                inp = {"command": "sleep 120", "run_in_background": True}
+                if desc is not None:
+                    inp["description"] = desc
+                return jl(dict(side, type="assistant", timestamp=iso(t - 1),
+                               message={"role": "assistant", "content": [
+                                   {"type": "tool_use", "id": tu,
+                                    "name": "Bash", "input": inp}]}))
+
+            def result(tu, sid_, t, agent=None):
+                side = {"agentId": agent, "isSidechain": True} if agent \
+                    else {"isSidechain": False}
+                return jl(dict(side, type="user", timestamp=iso(t),
+                               message={"role": "user", "content": [
+                                   {"type": "tool_result", "tool_use_id": tu,
+                                    "content": "running"}]},
+                               toolUseResult={"backgroundTaskId": sid_,
+                                              "interrupted": False,
+                                              "isImage": False,
+                                              "noOutputExpected": False,
+                                              "stderr": "", "stdout": ""}))
+
+            def filler(t, n):
+                return jl({"type": "assistant", "timestamp": iso(t),
+                           "message": {"content": [{"type": "text",
+                                                    "text": "x" * 1000}]}}) * n
+
+            stp = transcript(sh_sid)
+            with open(stp, "w") as f:
+                f.write(filler(t6 - 3600, 3000))
+                f.write(call("toolu_m6", t6, "Run the main build"))
+                f.write(result("toolu_m6", "bsh6main", t6))
+                f.write(filler(t6 + 30, 2000))
+            check("main transcript past one window (%d bytes)"
+                  % os.path.getsize(stp), os.path.getsize(stp) > 4 << 20)
+            sub = os.path.join(os.path.dirname(stp), sh_sid, "subagents")
+            os.makedirs(sub)
+            d7 = "d" * 199 + "é tail"	# the 2-byte é across the 200-byte cut
+            with open(os.path.join(sub, "agent-aSUB1.meta.json"), "w") as f:
+                json.dump({"agentType": "Explore",
+                           "description": "Explore\tthe tests",
+                           "finished": False, "isBuiltIn": True,
+                           "toolUseId": "toolu_agent"}, f)
+            with open(os.path.join(sub, "agent-aSUB1.jsonl"), "w") as f:
+                f.write(call("toolu_s7", t6, d7, "aSUB1"))
+                f.write(result("toolu_s7", "bsh7sub", t6, "aSUB1"))
+                # bsh8none only in a malformed line and an unfinished last one
+                f.write('{"type":"user","toolUseResult":{"backgroundTaskId":'
+                        '"bsh8none"},oops}\n')
+                f.write('{"type":"user","toolUseResult":{"backgroundTaskId":'
+                        '"bsh8none","stdout":"')
+            with open(os.path.join(sub, "agent-aOLD2.jsonl"), "w") as f:
+                f.write(filler(t6 - 3600, 3))	# a finished agent's
+            got = {s.get("id"): s for s in (field(h, "shells") or [])
+                   if isinstance(s, dict)}
+            check("main's background shell: agent null, its description, "
+                  "background (%s)" % got.get("bsh6main"),
+                  got.get("bsh6main") == {
+                      "id": "bsh6main", "pid": p6, "started": t6,
+                      "command": "sleep 120", "agent": None,
+                      "description": "Run the main build",
+                      "background": True})
+            check("a subagent's shell: its agentId and description, the "
+                  "call's description cut at 200 bytes between UTF-8 "
+                  "scalars (%s)" % got.get("bsh7sub"),
+                  got.get("bsh7sub") == {
+                      "id": "bsh7sub", "pid": p7, "started": started(p7),
+                      "command": "sleep 120", "agent": "aSUB1",
+                      "agent_description": "Explore the tests",
+                      "description": "d" * 199, "background": True})
+            check("a shell in no complete line: no agent, description or "
+                  "background (%s)" % got.get("bsh8none"),
+                  got.get("bsh8none") == {
+                      "id": "bsh8none", "pid": p8, "started": started(p8),
+                      "command": "sleep 120"})
+            keys = []
+            out = run("--ls-json").stdout
+            for r in json.loads(out, object_pairs_hook=lambda kv: kv):
+                for s in dict(r).get("shells", []):
+                    if dict(s).get("id") == "bsh7sub":
+                        keys = [k for k, _ in s]
+            check("keys in order after command (%s)" % keys, keys == [
+                "id", "pid", "started", "command", "agent",
+                "agent_description", "description", "background"])
+            os.unlink(os.path.join(sessdir, "%d.json" % hp))
+            check("its record gone: no shells key", field(h, "shells") ==
+                  MISSING)
+        finally:
+            run("-k", h)
+            for p in shpids:	# each shell and its sleep
+                kids = subprocess.run(["/usr/bin/pgrep", "-P", str(p)],
+                                      capture_output=True, text=True).stdout
+                for q in [p] + [int(k) for k in kids.split()]:
+                    try:
+                        os.kill(q, signal.SIGKILL)
+                    except OSError:
+                        pass
 
         # --- two Claudes under one session --------------------------------
         c = "tt-two"

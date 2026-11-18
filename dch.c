@@ -6604,6 +6604,433 @@ put_json_str(const char *s)
 	free(q);
 }
 
+/* s[0..n) into out: at most cap-1 bytes cut between UTF-8 scalars, control
+** bytes and bytes that are no UTF-8 as spaces (#481, #482). */
+static void
+cut_text(const char *s, size_t n, char *out, size_t cap)
+{
+	const char *e = s + n;
+	size_t o = 0, l;
+
+	for (; s < e; s += l)
+	{
+		l = dch_utf8_len((const unsigned char *)s, (size_t)(e - s));
+		if (o + (l ? l : 1) >= cap)
+			break;
+		if (l && !((unsigned char)*s < 0x20 || *s == 0x7f))
+			memcpy(out + o, s, l), o += l;
+		else
+			out[o++] = ' ', l = l ? l : 1;
+	}
+	out[o] = '\0';
+}
+
+/* A Bash tool shell's command (#481): the argument of the wrapper's
+** `eval '…'` (zsh and bash alike), its quoting undone ('\'' and '"'"'),
+** else argv joined; cut by cut_text. */
+static void
+shell_command(char **v, char *out, size_t cap)
+{
+	size_t len = 0;
+	char *j, *s, *w;
+	int k;
+
+	out[0] = '\0';
+	for (k = 0; v[k]; k++)
+		len += strlen(v[k]) + 1;
+	if (!(j = malloc(len + 1)))
+		return;
+	for (s = j, k = 0; v[k]; k++)
+		s += sprintf(s, "%s%s", k ? " " : "", v[k]);
+	if ((s = strstr(j, "eval '")))
+		/* one shell word in place: '…' runs, \x and "…" between */
+		for (s += 5, w = j; *s && *s != ' ' && *s != ';' && *s != '<'; )
+			if (*s == '\'' || *s == '"')
+			{
+				char q = *s++;
+
+				while (*s && *s != q)
+					*w++ = *s++;
+				s += *s == q;
+			}
+			else if (*s == '\\' && s[1])
+				*w++ = s[1], s += 2;
+			else
+				*w++ = *s++;
+	else
+		w = j + strlen(j);
+	*w = '\0';
+	cut_text(j, (size_t)(w - j), out, cap);
+	free(j);
+}
+
+/* ---- who started a shell (#482) -------------------------------------
+** The kernel cannot tell (every shell is the one Claude's child, writing
+** under the main session's tasks dir), the transcripts can: a background
+** Bash call's result line, written right after its shell starts, holds
+** toolUseResult.backgroundTaskId (the tasks/<id>.output name) and the
+** tool_use_id of the call, whose input.description it names. Transcripts
+** reach hundreds of MB, so only a window near the shell's start is read:
+** a binary search by line "timestamp", then BACK + FWD bytes around it. */
+
+/* The first `nd` (nl bytes) in [s, e), NULL none (memmem is no POSIX). */
+static char *
+mem_find(char *s, char *e, const char *nd, size_t nl)
+{
+	for (; s < e && (size_t)(e - s) >= nl &&
+	     (s = memchr(s, *nd, (size_t)(e - s) - nl + 1)); s++)
+		if (!memcmp(s, nd, nl))
+			return s;
+	return NULL;
+}
+
+/* The epoch of the first "timestamp":"YYYY-MM-DDTHH:MM:SS…" (UTC) past the
+** first line start after `off` (`off` 0 is one), reading at most 1 MB;
+** -1 none. Lines are not parsed: this only places a window. */
+static long
+line_ts(int fd, off_t off)
+{
+	char b[8193], *s, *t;
+	struct tm tm;
+	ssize_t n;
+	off_t o;
+	int skip = off > 0;
+
+	for (o = off; o < off + (1 << 20); o += n - 40)
+	{
+		if ((n = pread(fd, b, sizeof b - 1, o)) <= 40)
+			return -1;
+		b[n] = '\0';
+		s = b;
+		if (skip && !(s = memchr(b, '\n', (size_t)n)))
+			continue;
+		skip = 0;
+		/* a match in the last 40 bytes is read whole by the next chunk */
+		if ((t = mem_find(s, b + n, "\"timestamp\":\"", 13)) &&
+		    (t + 32 <= b + n || n < (ssize_t)sizeof b - 1))
+		{
+			memset(&tm, 0, sizeof tm);
+			if (sscanf(t + 13, "%4d-%2d-%2dT%2d:%2d:%2d", &tm.tm_year,
+			           &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min,
+			           &tm.tm_sec) != 6)
+				return -1;
+			tm.tm_year -= 1900;
+			tm.tm_mon--;
+			return (long)timegm(&tm);
+		}
+		if (n < (ssize_t)sizeof b - 1)
+			return -1;
+	}
+	return -1;
+}
+
+/* dch_json_field, -1 for a missing object too. */
+static int
+jfield(const struct json_parser *p, int obj, const char *key)
+{
+	return obj < 0 ? -1 : dch_json_field(p, obj, key);
+}
+
+/* String token `tok` decoded, then cut by cut_text into out[cap]; -1 when
+** it is no string. */
+static int
+json_cut(const struct json_parser *p, int tok, char *out, size_t cap)
+{
+	size_t n;
+	char *s;
+	int r;
+
+	if (tok < 0 || p->tok[tok].kind != JSON_STRING)
+		return -1;
+	n = (size_t)(p->tok[tok].end - p->tok[tok].start) + 1;
+	if (!(s = malloc(n)))
+		return -1;
+	if ((r = dch_json_decode(p, tok, s, n)) == 0)
+		cut_text(s, strlen(s), out, cap);
+	free(s);
+	return r;
+}
+
+/* The element of the message.content array of the JSON line [ls, le)
+** whose `key` is the string `val` (the parser is left for the caller to
+** free), -1 none. */
+static int
+content_with(struct json_parser *p, char *ls, char *le, const char *key,
+             const char *val)
+{
+	char v[128], c = *le;
+	int a, i, r = -1;
+
+	*le = '\0';
+	if (dch_json_parse(p, ls) == 0 &&
+	    (a = jfield(p, jfield(p, 0, "message"), "content")) >= 0 &&
+	    p->tok[a].kind == JSON_ARRAY)
+		for (i = a + 1; i < p->tok[a].next && r < 0; i = p->tok[i].next)
+			if (dch_json_decode(p, jfield(p, i, key), v, sizeof v) == 0 &&
+			    !strcmp(v, val))
+				r = i;
+	*le = c;
+	return r;
+}
+
+/* The transcript at `path`: whether it holds the background Bash result of
+** shell `id` started at `t`. 1 yes (*side its isSidechain, desc[dcap] its
+** call's input.description, "" without one), 0 no. Only complete lines
+** count: a line still being written, or cut by the window, is skipped. */
+static int
+tx_shell(const char *path, const char *id, time_t t, int *side, char *desc,
+         size_t dcap)
+{
+	enum { BACK = 64 << 10, FWD = 1 << 20, STEP = 64 << 10 };
+	struct json_parser p;
+	struct stat st;
+	static char *b;	/* one window for every call, kept to the exit */
+	char nd[96], tu[128], *m, *ls, *le, *u;
+	off_t lo = 0, hi, mid, at;
+	ssize_t n, k;
+	int fd, i, r = 0;
+	size_t nl = (size_t)snprintf(nd, sizeof nd, "\"backgroundTaskId\":\"%s\"",
+	                             id);
+	long ts;
+
+	if (nl >= sizeof nd || (fd = open(path, O_RDONLY | O_CLOEXEC)) < 0)
+		return 0;
+	if (fstat(fd, &st) || (!b && !(b = malloc(BACK + FWD + STEP + 1))))
+		goto out;
+	/* lo: a line start before t - 10 s (or the file's start) */
+	for (hi = st.st_size; hi - lo > 65536; )
+		if ((ts = line_ts(fd, mid = lo + (hi - lo) / 2)) >= 0 &&
+		    ts < (long)t - 10)
+			lo = mid;
+		else
+			hi = mid;
+	/* forward from there by STEP until the result line is read whole */
+	at = lo > BACK ? lo - BACK : 0;
+	for (n = 0, m = b; !r && n < BACK + FWD &&
+	     (k = pread(fd, b + n, STEP, at + n)) > 0; )
+	{
+		n += k;
+		b[n] = '\0';
+		while (!r && (m = mem_find(m, b + n, nd, nl)))
+		{
+			for (ls = m; ls > b && ls[-1] != '\n'; ls--)
+				;
+			if (!(le = memchr(m, '\n', (size_t)(b + n - m))))
+				break;	/* not read whole yet, or still being written */
+			if (ls > b || at == 0)
+			{
+				*le = '\0';
+				r = dch_json_parse(&p, ls) == 0 &&
+				    dch_json_decode(&p, jfield(&p, jfield(&p, 0,
+				                    "toolUseResult"), "backgroundTaskId"),
+				                    tu, sizeof tu) == 0 && !strcmp(tu, id);
+				*side = r && (i = jfield(&p, 0, "isSidechain")) >= 0 &&
+				        p.tok[i].end - p.tok[i].start == 4 &&
+				        !memcmp(ls + p.tok[i].start, "true", 4);
+				*le = '\n';
+				dch_json_free(&p);
+			}
+			m += !r;
+		}
+		if (!m)	/* a match may start in the last nl - 1 bytes */
+			m = (size_t)n >= nl ? b + n - nl + 1 : b;
+	}
+	if (!r)
+		goto out;
+	*desc = '\0';
+	i = content_with(&p, ls, le, "type", "tool_result");
+	if (dch_json_decode(&p, jfield(&p, i, "tool_use_id"), tu, sizeof tu) < 0)
+		tu[0] = '\0';
+	dch_json_free(&p);
+	/* its call: the last line before it naming that tool_use id */
+	if (!*tu || (nl = (size_t)snprintf(nd, sizeof nd, "\"id\":\"%s\"", tu)) >=
+	    sizeof nd)
+		goto out;
+	for (u = NULL, m = b; (m = mem_find(m, ls, nd, nl)); m++)
+		u = m;
+	if (!u)
+		goto out;
+	le = memchr(u, '\n', (size_t)(ls - u));
+	for (ls = u; ls > b && ls[-1] != '\n'; ls--)
+		;
+	if (le && !(ls == b && at > 0))
+	{
+		i = content_with(&p, ls, le, "id", tu);
+		(void)json_cut(&p, jfield(&p, jfield(&p, i, "input"), "description"),
+		               desc, dcap);
+		dch_json_free(&p);
+	}
+out:
+	close(fd);
+	return r;
+}
+
+/* A subagent transcript: <tp less .jsonl>/subagents/agent-<id>.jsonl. */
+struct sub { char id[64]; time_t mt; };
+
+/* Who started shell `id` (started at t) of the conversation whose main
+** transcript is `tp`: 1 the main conversation, 2 a subagent (agent[64]
+** its agentId, adesc its agent-<agentId>.meta.json "description", "" with
+** none), 3 a sidechain line of the main file (owner unknown), 0 unknown.
+** desc as tx_shell. Only subagent files written since t can hold the
+** result, finished subagents included (a background shell outlives its
+** agent). sv[*ns] lists them once per conversation (*ns < 0: not yet),
+** those written since tmin, the oldest shell's start. */
+static int
+shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
+            struct sub *sv, int *ns, char *agent, char *adesc, size_t adcap,
+            char *desc, size_t dcap)
+{
+	char dir[PATH_MAX], f[PATH_MAX + 100], meta[65536];
+	struct json_parser p;
+	struct dirent *e;
+	struct stat st;
+	size_t l = strlen(tp), el;
+	ssize_t n;
+	int side, fd, i;
+	DIR *d;
+
+	if (tx_shell(tp, id, t, &side, desc, dcap))
+		return side ? 3 : 1;
+	if (l < 7 || snprintf(dir, sizeof dir, "%.*s/subagents", (int)(l - 6),
+	                      tp) >= (int)sizeof dir)
+		return 0;
+	/* shortcut: the first 256 files written since tmin; more leave an
+	** owner unknown, raise it if sessions ever keep that many alive */
+	if (*ns < 0 && (*ns = 0, d = opendir(dir)))
+	{
+		int dfd = dirfd(d);
+
+		while (dfd >= 0 && *ns < 256 && (e = readdir(d)))
+			if ((el = strlen(e->d_name)) > 12 && el - 12 < sizeof sv->id &&
+			    !strncmp(e->d_name, "agent-", 6) &&
+			    !strcmp(e->d_name + el - 6, ".jsonl") &&
+			    !fstatat(dfd, e->d_name, &st, 0) && st.st_mtime >= tmin)
+			{
+				snprintf(sv[*ns].id, sizeof sv->id, "%.*s", (int)(el - 12),
+				         e->d_name + 6);
+				sv[(*ns)++].mt = st.st_mtime;
+			}
+		closedir(d);
+	}
+	for (i = 0; i < *ns; i++)
+		if (sv[i].mt >= t && snprintf(f, sizeof f, "%s/agent-%s.jsonl", dir,
+		                              sv[i].id) < (int)sizeof f &&
+		    tx_shell(f, id, t, &side, desc, dcap))
+			break;
+	if (i >= *ns)
+		return 0;
+	memcpy(agent, sv[i].id, sizeof sv->id);
+	*adesc = '\0';
+	snprintf(f, sizeof f, "%s/agent-%s.meta.json", dir, agent);
+	if ((fd = open(f, O_RDONLY | O_CLOEXEC)) >= 0)
+	{
+		if ((n = read(fd, meta, sizeof meta - 1)) > 0)
+		{
+			meta[n] = '\0';
+			if (dch_json_parse(&p, meta) == 0)
+				(void)json_cut(&p, jfield(&p, 0, "description"), adesc,
+				               adcap);
+			dch_json_free(&p);
+		}
+		close(fd);
+	}
+	return 2;
+}
+
+/* ,"shells" (#481): the Bash tool shells of the Claude at `pid` whose
+** session is `sid`, newest first. Claude Code runs each with fd 1 on
+** <tmp>/claude-<uid>/<project>/<sid>/tasks/<id>.output; the shell's own
+** children inherit that fd, so the shallowest process per id (breadth
+** first) is the shell. The kernel shows foreground and background shells
+** alike (each a session leader with stdin /dev/null): owner, description
+** and "background" come from the transcript at `tp` (#482), NULL none. */
+static void
+put_shells(long pid, const char *sid, const char *tp)
+{
+	struct { long pid; time_t t; char id[64], cmd[201]; } sh[64], x;
+	char agent[64], adesc[201], desc[201];
+	struct sub sv[256];
+	int own, nsv = -1;
+	time_t tmin;
+	long tree[1024];
+	char tail[128], path[PATH_MAX], **v;
+	const char *b;
+	int n = proc_tree(pid, tree, 1024), ns = 0, i, j;
+	size_t tl = (size_t)snprintf(tail, sizeof tail, "/%s/tasks/", sid), pl;
+
+	for (i = 1; i < n && ns < 64; i++)
+	{
+#ifdef __APPLE__
+		struct vnode_fdinfowithpath vi;
+
+		if (proc_pidfdinfo((int)tree[i], 1, PROC_PIDFDVNODEPATHINFO, &vi,
+		                   sizeof vi) != (int)sizeof vi)
+			continue;
+		snprintf(path, sizeof path, "%s", vi.pvip.vip_path);
+#else
+		char fp[64];
+		ssize_t r;
+
+		snprintf(fp, sizeof fp, "/proc/%ld/fd/1", tree[i]);
+		if ((r = readlink(fp, path, sizeof path - 1)) <= 0)
+			continue;
+		path[r] = '\0';
+#endif
+		pl = strlen(path);
+		if (!(b = strrchr(path, '/')) || !*++b || pl < tl + 8 || strcmp(path + pl - 7, ".output") ||
+		    (size_t)(b - path) < tl || memcmp(b - tl, tail, tl) ||
+		    pl - (size_t)(b - path) - 7 < 1 ||
+		    pl - (size_t)(b - path) - 7 >= sizeof x.id)
+			continue;
+		snprintf(x.id, sizeof x.id, "%.*s",
+		         (int)(pl - (size_t)(b - path) - 7), b);
+		for (j = 0; j < ns && strcmp(sh[j].id, x.id); j++)
+			;
+		if (j < ns || (x.t = proc_started(tree[i])) < 0)
+			continue;	/* a shell's child, or gone */
+		x.pid = tree[i];
+		x.cmd[0] = '\0';
+		if ((v = proc_argv(x.pid)))
+			shell_command(v, x.cmd, sizeof x.cmd);
+		free(v);
+		/* newest first; the same second, the higher pid */
+		for (j = ns++; j > 0 && (sh[j - 1].t < x.t ||
+		     (sh[j - 1].t == x.t && sh[j - 1].pid < x.pid)); j--)
+			sh[j] = sh[j - 1];
+		sh[j] = x;
+	}
+	tmin = ns ? sh[ns - 1].t : 0;	/* newest first: the last is oldest */
+	fputs(",\"shells\":[", stdout);
+	for (i = 0; i < ns; i++)
+	{
+		printf("%s{\"id\":", i ? "," : "");
+		put_json_str(sh[i].id);
+		printf(",\"pid\":%ld,\"started\":%ld,\"command\":", sh[i].pid,
+		       (long)sh[i].t);
+		put_json_str(sh[i].cmd);
+		/* every key left out when unknown: no result line, no false */
+		if (tp && (own = shell_owner(tp, sh[i].id, sh[i].t, tmin, sv, &nsv,
+		    agent, adesc, sizeof adesc, desc, sizeof desc)))
+		{
+			if (own < 3)
+				fputs(",\"agent\":", stdout);
+			if (own == 1)
+				fputs("null", stdout);
+			else if (own == 2)
+				put_json_str(agent);
+			if (own == 2 && *adesc)
+				fputs(",\"agent_description\":", stdout),
+				put_json_str(adesc);
+			if (*desc)
+				fputs(",\"description\":", stdout), put_json_str(desc);
+			fputs(",\"background\":true", stdout);
+		}
+		putchar('}');
+	}
+	putchar(']');
+}
+
 /* --json (--stop, --restart, --revive): {"name","phase"} as a session
 ** reaches each step. */
 static void
@@ -17166,7 +17593,7 @@ main_run(int argc, char **argv)
 		/* The Claude under each session's child (the root --stop
 		** joins from, by MSG_CMD), read live: every sessions dir once
 		** for all rows, procStart verified (#079). On Linux the rows
-		** share one /proc scan (proc_tree_keep). */
+		** share one /proc scan (proc_tree_keep), "shells" too. */
 		struct crec_rows cr = { calloc((size_t)sl.n + 1, sizeof *cr.v),
 		                        sl.n };
 		/* pty size and attached clients (#099), from the same MSG_CMD
@@ -17200,7 +17627,6 @@ main_run(int argc, char **argv)
 			}
 			cmd_info_free(&ci);
 		}
-		proc_tree_keep = 0;
 		for (k = 0; cr.v && k < nd; k++)
 			(void)visit_records_in(cdirs[k], crec_visit_rows, &cr);
 		/* "cwd" (#115): the session's directory, from its own live
@@ -17253,8 +17679,10 @@ main_run(int argc, char **argv)
 				put_json_str(c->sid);
 			else
 				fputs("null", stdout);
+			int tp_ok = c && claude_transcript(c, tp, sizeof tp) == 0;
+
 			fputs(",\"transcript_path\":", stdout);
-			if (c && claude_transcript(c, tp, sizeof tp) == 0)
+			if (tp_ok)
 				put_json_str(tp);
 			else
 				fputs("null", stdout);
@@ -17264,6 +17692,8 @@ main_run(int argc, char **argv)
 			if (fg >= 0)
 				printf(",\"claude_foreground\":%s",
 				       fg ? "true" : "false");
+			if (c)
+				put_shells(c->pid, c->sid, tp_ok ? tp : NULL);
 			/* omitted, not 0, when the master can't answer */
 			if (sz && sz[k][0] >= 0)
 				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",
@@ -17285,6 +17715,7 @@ main_run(int argc, char **argv)
 			free(h.launch);
 			putchar('}');
 		}
+		proc_tree_keep = 0;
 		if (hfd >= 0)
 			close(hfd);
 		if (opt_remote)
