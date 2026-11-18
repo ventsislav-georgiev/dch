@@ -11,7 +11,7 @@
 {"schema":1,"mention":{"session":"o3","chapter":null,"at":1794304801,"who":"user","tool":null,"line":"other dir, older #831","offset":0,"live":false,"project":"-home-demo-other"}}
 {"schema":1,"tally":{"session":"o3","live":false,"project":"-home-demo-other","count":1,"definitions":0,"partial":false,"mentions_dropped":0}}
 {"schema":1,"definition":{"session":"p1","live":false,"project":"-home-demo-proj","at":1794304803,"title":"Agent panes","passage":"The panes show agents.","rule":"D1","offset":375,"chapter":null}}
-{"schema":1,"mention":{"session":"p1","chapter":null,"at":1794304803,"who":"tool","tool":null,"line":"# #831 Agent panes","offset":375,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"mention":{"session":"p1","chapter":null,"at":1794304803,"who":"tool","tool":"Bash","line":"# #831 Agent panes","offset":375,"live":false,"project":"-home-demo-proj"}}
 {"schema":1,"mention":{"session":"p1","chapter":null,"at":1794304804,"who":"user","tool":null,"line":"and #831 again","offset":623,"live":false,"project":"-home-demo-proj"}}
 {"schema":1,"tally":{"session":"p1","live":false,"project":"-home-demo-proj","count":2,"definitions":1,"partial":false,"mentions_dropped":0}}
 {"schema":1,"mention":{"session":"p2","chapter":null,"at":1794304801,"who":"user","tool":null,"line":"first #831","offset":0,"live":false,"project":"-home-demo-proj"}}
