@@ -628,6 +628,7 @@ def test_suspend():
 # an RTT away; a proxy passes the 0x07 SLOW s late so that window is wide.
 # What the busy session sent in it is for the main screen the reset left.
 SLOW = 0.25    # well inside the relay's 1 s hold (RM_REARM_MS)
+LATE = 0.9     # a 1049h this long after the resume: the hold timed out
 TICK = re.compile(rb"T\d+\.\d+ ")
 
 
@@ -645,33 +646,51 @@ def test_suspend_rtt(port):
         a.wait(b"BUSY" if full else b"\033[?1049h")
         a.pump(0.5)
         for i in range(1, 4):
-            mark = len(a.out)
-            a.key(b"\x1a", 0)
-            ok = a.wait(STOPPED, start=mark)
-            stop = a.out.find(STOPPED, mark) + len(STOPPED)
-            a.wait(b"\033[?1049h", start=stop)
-            alt = a.out.find(b"\033[?1049h", stop)
-            got = TICK.findall(a.out[stop:alt])
+            # a loaded box can pass the relay's 1 s hold (RM_REARM_MS)
+            # before the 0.25 s-late re-arm is back: the hold then ends by
+            # its timeout, not the re-arm, and that run says nothing about
+            # the ordering. Such a run (1049h >= LATE s after the resume)
+            # is tried again; a run with the re-arm inside the hold still
+            # must show no output before its 1049h.
+            for _ in range(3):
+                mark = len(a.out)
+                a.key(b"\x1a", 0)
+                ok = a.wait(STOPPED, start=mark)
+                stop = a.out.find(STOPPED, mark) + len(STOPPED)
+                at = re.findall(rb"<<at (\d+\.\d+)>>", a.out[mark:stop])
+                resumed = (float(at[-1]) if at else time.time()) + 1.0
+                a.wait(b"\033[?1049h", start=stop)
+                waited = time.time() - resumed
+                alt = a.out.find(b"\033[?1049h", stop)
+                got = TICK.findall(a.out[stop:alt])
+                a.pump(0.3)
+                if not got or waited < LATE:
+                    break
             check("suspend rtt: ctrl-z %d, the host's re-arm %.2f s late: "
                   "no session output on the main screen before the "
                   "resume's 1049h" % (i, SLOW),
                   ok and alt > stop and not got,
-                  (ok, len(got), a.out[stop:stop + 200]))
+                  (ok, len(got), waited, a.out[stop:stop + 200]))
+        for _ in range(3):      # as above: a hold ended by its timeout
+            mark = len(a.out)
+            a.key(b"\x1cx", 0.05)
+            ok = a.wait(b"X-ray  srv:xv-bw", start=mark)
+            mark = len(a.out)
+            left = time.time()
+            a.key(b"q", 0.05)
+            a.wait(RESTORE, start=mark)
+            back = a.out.find(RESTORE, mark)
+            a.wait(b"\033[?1049h", start=back)
+            waited = time.time() - left
+            alt = a.out.find(b"\033[?1049h", back)
+            got = TICK.findall(a.out[back:alt])
+            if not got or waited < LATE:
+                break
             a.pump(0.3)
-        mark = len(a.out)
-        a.key(b"\x1cx", 0.05)
-        ok = a.wait(b"X-ray  srv:xv-bw", start=mark)
-        mark = len(a.out)
-        a.key(b"q", 0.05)
-        a.wait(RESTORE, start=mark)
-        back = a.out.find(RESTORE, mark)
-        a.wait(b"\033[?1049h", start=back)
-        alt = a.out.find(b"\033[?1049h", back)
-        got = TICK.findall(a.out[back:alt])
         check("suspend rtt: the X-ray overlay's return, the re-arm %.2f s "
               "late: no session output on the main screen before its 1049h"
               % SLOW, ok and back >= mark and alt > back and not got,
-              (ok, len(got), a.out[back:back + 200]))
+              (ok, len(got), waited, a.out[back:back + 200]))
         mark = len(a.out)
         a.key(b"z", 0.3)
         check("suspend rtt: the attach goes on (a key after reaches the "

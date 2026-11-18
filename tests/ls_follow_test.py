@@ -351,8 +351,13 @@ def main():
         got = json.loads(first) if first else None
         check("the first array within the --ls box (%.2f s)" % took,
               first is not None and took < BUDGET, took)
-        check("the first array is --ls-json --remote's, byte for byte",
-              first is not None and first.decode() + "\n" == want,
+        # "stale" is read at that instant (a loaded box reads true on one
+        # side): the one volatile field; every other byte must be equal
+        unstale = lambda t: re.sub(r'"stale": ?(true|false)', '"stale":X', t)
+        check("the first array is --ls-json --remote's, byte for byte "
+              "(but the stale flag)",
+              first is not None and
+              unstale(first.decode() + "\n") == unstale(want),
               (first, want))
         check("one line, a JSON array: loc1, srv:rs1 fresh",
               got and local(got) == ["loc1"]

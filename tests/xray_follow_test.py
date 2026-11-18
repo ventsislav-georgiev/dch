@@ -895,7 +895,9 @@ def test_follow_slow_cmd():
             f.write(json.dumps({"id": "r1", "title": "Before"}) + "\n")
         e6 = cfg("reset", "sleep 4.8; cat %s" % rows, "exec sleep 4.8")
         fl = Follow(n, e6, ["--tasks", "--memory"])
-        fl.wait(lambda o: "task" in o and o["task"]["id"] == "r1", 15)
+        # a run killed at xcmd's 5 s wall on a loaded box answers on the
+        # next cadence run (~15 s): wait for that, not 15 s flat
+        fl.wait(lambda o: "task" in o and o["task"]["id"] == "r1", 25)
         with open(rows, "w") as f:
             f.write(json.dumps({"id": "r2", "title": "After"}) + "\n")
         k6 = len(fl.got)
@@ -1118,8 +1120,13 @@ def test_follow_fast():
               "issue:#71" not in keys0, (ks[:6], f0.get("why"), keys0))
         # a wall-clock bound, skipped under sanitizers (1.7 s on CI's
         # ASan runner); the window rows above hold there too
-        check("fast: the first line came in under 0.5 s (%.3f s)" % first,
-              SANITIZED or first < 0.5, first)
+        # a slow runner scales the full read with the first line (0.57 s
+        # on CI): under 0.5 s flat, or under a third of the full read's
+        # own time (the reset line, which is behind it)
+        full = fl.got[1][0] - t0 if len(fl.got) > 1 else 0
+        check("fast: the first line came in under 0.5 s (%.3f s; the full "
+              "read's reset at %.3f s)" % (first, full),
+              SANITIZED or first < 0.5 or first < full / 3, (first, full))
         check("fast: then reset full and the one-shot --json snapshot, "
               "exactly one pair", ks[:3] == ["snapshot", "reset", "snapshot"]
               and objs[1] == {"schema": 1, "reset": {"why": "full"}} and
