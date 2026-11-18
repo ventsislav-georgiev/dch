@@ -5957,7 +5957,14 @@ rc_push(struct xr_claude *d, const char *id, int kind)
 	c = &d->calls[d->ncalls++];
 	memset(c, 0, sizeof *c);
 	snprintf(c->id, sizeof c->id, "%s", id);
-	snprintf(c->name, sizeof c->name, "%s", d->tool ? d->tool : "");
+	if (d->tool)
+	{
+		size_t l = strlen(d->tool);
+
+		/* cut on a character boundary; memset above NUL-terminates */
+		l = u8_cut(d->tool, l < sizeof c->name - 1 ? l : sizeof c->name - 1);
+		memcpy(c->name, d->tool, l);
+	}
 	c->kind = kind;
 	c->off = d->off;
 	c->at = d->at;
