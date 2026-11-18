@@ -547,8 +547,8 @@ int xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 ** per session kind, before done. */
 void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
                       const char *text, const char *cwd, int live);
-/* #502/#500, light only: a live session's commit ref (or file ref: stat
-** alone, ok or missing), after define_command
+/* #502/#500/#507, light only: a live session's commit ref (or file ref:
+** stat alone, ok or missing; or issue/pull ref, by gh), after define_command
 ** answered nothing, gets the resolved line too when it is ok; any other
 ** state (not a repo, not a commit, a timeout) gives none. */
 void xr_scan_light(struct xr_scan *x, const struct xr_span *sp,
@@ -570,6 +570,16 @@ int xr_gitfile(const char *s, size_t n);
 ** case-insensitive, as https://, ssh:// or git@host:, a trailing .git or /
 ** allowed; an entry cut before its NUL never matches. */
 int xr_git_remote(const char *s, size_t n, const char *want);
+/* #507: a remote URL (no newline) as github.com's "<owner>/<repo>" into
+** out[cap], each name 1-100 of [A-Za-z0-9._-] not starting '-' or '.':
+** 1, else 0. gh's --jq answer s (NUL-terminated) for repo#num:
+** {number,title,state,kind}, state open/closed/merged (any case), kind
+** issue/pull; 1 with *r an ok issue or pull block, else 0. */
+int xr_gh_repo(const char *s, size_t n, char *out, size_t cap);
+int xr_gh_parse(const char *s, const char *repo, const char *num,
+                struct xr_resolved *r);
+/* #507: 0 turns the gh issue/pull resolver off (xray_github) */
+extern int xr_res_github;
 /* Test seams: the probe list (NULL: 8.3's for this OS), the probe's pick
 ** (NULL: none), and the git spawns so far. */
 extern const char *const *xr_git_probe;
@@ -617,8 +627,28 @@ int xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 void xr_search_rec(struct xr_search *s, const struct xr_shell *sh,
                    const struct xr_rec *x);
 void xr_search_ring_end(struct xr_search *s);
+/* First and latest hit over every session searched (#505): the oldest and
+** newest *kept* hit (each session keeps its newest turns). Oldest = smallest
+** at; when either at is null, or on a tie, the session searched later (ord
+** larger) is older, then the smaller offset. */
+struct xr_end
+{
+	char *session, *sid, *title, *chapter, *snip;
+	long long at;
+	uint64_t off;
+	int ord, who, set;
+};
+struct xr_ends
+{
+	struct xr_end first, latest;
+};
+void xr_ends_add(struct xr_ends *e, const struct xr_search *s,
+                 const char *session, const char *sid, int ord);
+void xr_ends_json(FILE *f, const struct xr_ends *e);	/* ,"first":…,"latest":… */
+void xr_ends_text(FILE *f, const struct xr_ends *e);	/* one line */
+void xr_ends_free(struct xr_ends *e);
 /* {"schema":1,"session","session_id","corpus","text","hits":[{"chapter",
-** "offset","at","who","tool","snippet"}…],"more","partial","why","bytes"}
+** "offset","at","who","tool","snippet"}…],"more","partial","why","bytes","first","latest"}
 ** and a newline; why (a shell's "range") when the caller knows the read was
 ** not whole. 0, -1 the write failed. */
 int xr_search_print(FILE *f, const struct xr_search *s, const char *session,

@@ -23,6 +23,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -10831,6 +10832,50 @@ xr_git_remote(const char *s, size_t n, const char *want)
 	return 0;
 }
 
+/* 8.3's env into env[9] (HOME as the querying process has it, in
+** home[PATH_MAX + 8]) and its argv prefix "git ... -C dir" into av: the
+** argv count. */
+static size_t
+res_git_prep(char *git, char *dir, char *home, char *av[], char *env[])
+{
+	const char *h = getenv("HOME");
+	size_t k, e = 0, a = 0;
+
+	/* exactly 8.3's list */
+	{
+		static char e0[] = "GIT_CONFIG_NOSYSTEM=1",
+		            e1[] = "GIT_CONFIG_GLOBAL=/dev/null",
+		            e2[] = "GIT_OPTIONAL_LOCKS=0",
+		            e3[] = "GIT_TERMINAL_PROMPT=0",
+		            e4[] = "GIT_NO_LAZY_FETCH=1", e5[] = "PATH=/usr/bin:/bin",
+		            e6[] = "LANG=en_US.UTF-8";
+		char *v[] = {e0, e1, e2, e3, e4, e5, e6};
+
+		for (k = 0; k < 7; k++)
+			env[e++] = v[k];
+		if (h && snprintf(home, PATH_MAX + 8, "HOME=%s", h) < PATH_MAX + 8)
+			env[e++] = home;
+		env[e] = NULL;
+	}
+	{
+		/* 8.3's argv verbatim, plus log.showSignature=false: a repo's
+		** log.showSignature and gpg.program would run that program on a
+		** signed commit (#159's sentinel test) */
+		static char g0[] = "--no-pager", c[] = "-c",
+		            g1[] = "core.fsmonitor=", g2[] = "core.hooksPath=/dev/null",
+		            g3[] = "protocol.allow=never", g4[] = "diff.external=",
+		            g5[] = "color.ui=never", g6[] = "log.showSignature=false",
+		            g7[] = "-C";
+		char *v[] = {g0, c, g1, c, g2, c, g3, c, g4, c, g5, c, g6, g7};
+
+		av[a++] = git;
+		for (k = 0; k < sizeof v / sizeof *v; k++)
+			av[a++] = v[k];
+		av[a++] = dir;
+	}
+	return a;
+}
+
 /* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline.
 ** gh, a commit URL's "<owner>/<repo>" when its SHA is short: config's
 ** remote URLs run between, and a repo none of them names is not that
@@ -10842,8 +10887,8 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 	static struct res_run run;	/* 68 KB: off the stack */
 	char git[PATH_MAX], dir[PATH_MAX], rev[64], home[PATH_MAX + 8];
 	char root[PATH_MAX], name[300], *av[40], *env[9];
-	const char *h = getenv("HOME"), *b;
-	size_t n = strlen(sha), k, e = 0, a = 0;
+	const char *b;
+	size_t n = strlen(sha), k, a;
 	long long until;
 	int rc, foreign = 0;
 
@@ -10869,39 +10914,7 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 		return 1;
 	}
 	snprintf(rev, sizeof rev, "%s^{commit}", sha);
-	/* exactly 8.3's list; HOME as the querying process has it */
-	{
-		static char e0[] = "GIT_CONFIG_NOSYSTEM=1",
-		            e1[] = "GIT_CONFIG_GLOBAL=/dev/null",
-		            e2[] = "GIT_OPTIONAL_LOCKS=0",
-		            e3[] = "GIT_TERMINAL_PROMPT=0",
-		            e4[] = "GIT_NO_LAZY_FETCH=1", e5[] = "PATH=/usr/bin:/bin",
-		            e6[] = "LANG=en_US.UTF-8";
-		char *v[] = {e0, e1, e2, e3, e4, e5, e6};
-
-		for (k = 0; k < 7; k++)
-			env[e++] = v[k];
-		if (h && snprintf(home, sizeof home, "HOME=%s", h)
-		    < (int)sizeof home)
-			env[e++] = home;
-		env[e] = NULL;
-	}
-	{
-		/* 8.3's argv verbatim, plus log.showSignature=false: a repo's
-		** log.showSignature and gpg.program would run that program on a
-		** signed commit (#159's sentinel test) */
-		static char g0[] = "--no-pager", c[] = "-c",
-		            g1[] = "core.fsmonitor=", g2[] = "core.hooksPath=/dev/null",
-		            g3[] = "protocol.allow=never", g4[] = "diff.external=",
-		            g5[] = "color.ui=never", g6[] = "log.showSignature=false",
-		            g7[] = "-C";
-		char *v[] = {g0, c, g1, c, g2, c, g3, c, g4, c, g5, c, g6, g7};
-
-		av[a++] = git;
-		for (k = 0; k < sizeof v / sizeof *v; k++)
-			av[a++] = v[k];
-		av[a++] = dir;
-	}
+	a = res_git_prep(git, dir, home, av, env);
 	until = xr_now_ms() + XR_GIT_MS;
 	{
 		static char s0[] = "rev-parse", s1[] = "--is-inside-work-tree";
@@ -11000,6 +11013,283 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 	r->state = "not_commit";
 	snprintf(r->title, sizeof r->title, "Not a commit in %s", name);
 	return 1;
+}
+
+/* ---- GitHub issues and pulls via gh (#507) ---- */
+
+int xr_res_github = 1;	/* dch.c: the xray_github config key */
+
+/* An owner or repo name as it reaches gh's argv: 1-100 of [A-Za-z0-9._-],
+** never starting with '-' or '.' */
+static int
+res_gh_name(const char *s, size_t n)
+{
+	return n && s[0] != '-' && s[0] != '.' && gh_name(s, n, 100);
+}
+
+int
+xr_gh_repo(const char *s, size_t n, char *out, size_t cap)
+{
+	size_t e = n, b, m;
+
+	if (e && s[e - 1] == '/')
+		e--;
+	if (e >= 4 && !strncasecmp(s + e - 4, ".git", 4))
+		e -= 4;
+	for (b = e; b && s[b - 1] != '/'; b--)
+		;
+	if (!b)
+		return 0;
+	for (m = b - 1; m && s[m - 1] != '/' && s[m - 1] != ':'; m--)
+		;
+	if (!res_gh_name(s + m, b - 1 - m) || !res_gh_name(s + b, e - b) ||
+	    e - m >= cap)
+		return 0;
+	memcpy(out, s + m, e - m);
+	out[e - m] = '\0';
+	/* the whole URL is github.com's o/r, as the commit check reads it */
+	return res_gh_url(s, n, out);
+}
+
+int
+xr_gh_parse(const char *s, const char *repo, const char *num,
+            struct xr_resolved *r)
+{
+	struct json_parser p;
+	char title[XR_TITLE_MAX * 4 + 1], st[16], kind[8];
+	size_t k, i, a;
+	int t, ok = 0;
+
+	memset(&p, 0, sizeof p);
+	if (dch_json_parse(&p, s) != 0 || p.tok[0].kind != JSON_OBJECT ||
+	    (t = dch_json_field(&p, 0, "number")) < 0 ||
+	    p.tok[t].kind != JSON_PRIMITIVE ||
+	    (size_t)(p.tok[t].end - p.tok[t].start) != strlen(num) ||
+	    memcmp(s + p.tok[t].start, num, strlen(num)) ||
+	    (t = dch_json_field(&p, 0, "state")) < 0 ||
+	    p.tok[t].kind != JSON_STRING ||
+	    dch_json_decode(&p, t, st, sizeof st) != 0 ||
+	    (t = dch_json_field(&p, 0, "kind")) < 0 ||
+	    p.tok[t].kind != JSON_STRING ||
+	    dch_json_decode(&p, t, kind, sizeof kind) != 0 ||
+	    (t = dch_json_field(&p, 0, "title")) < 0 ||
+	    p.tok[t].kind != JSON_STRING)
+		goto out;
+	/* shortcut: a title past XR_TITLE_MAX * 4 bytes is no line (GitHub's
+	** cap is 256 characters, inside it) */
+	if (dch_json_decode(&p, t, title, sizeof title) != 0)
+		goto out;
+	for (k = 0; st[k]; k++)
+		st[k] = (char)tolower((unsigned char)st[k]);
+	if ((strcmp(st, "open") && strcmp(st, "closed") && strcmp(st, "merged")) ||
+	    (strcmp(kind, "issue") && strcmp(kind, "pull")))
+		goto out;
+	/* the controls (and bidi ones) a title can hold become spaces */
+	for (i = 0; title[i]; i += a)
+		if ((a = xr_ctl_at(title + i, strlen(title + i))))
+			memset(title + i, ' ', a);
+		else
+			(void)u8_next((const unsigned char *)title + i,
+			              strlen(title + i), &a);
+	res_text(r->title, title, strlen(title), XR_TITLE_MAX);
+	snprintf(r->subtitle, sizeof r->subtitle, "%s \xc2\xb7 %s#%s", st, repo,
+	         num);
+	r->kind = kind[0] == 'i' ? "issue" : "pull";
+	r->state = "ok";
+	ok = 1;
+out:
+	dch_json_free(&p);
+	return ok;
+}
+
+/* The first gh on PATH (absolute entries only) into buf, else NULL. */
+static const char *
+res_gh_bin(char *buf, size_t cap)
+{
+	const char *p = getenv("PATH"), *e;
+
+	for (; p && *p; p = *e ? e + 1 : e)
+	{
+		e = p + strcspn(p, ":");
+		if (p[0] == '/' && snprintf(buf, cap, "%.*s/gh", (int)(e - p), p)
+		    < (int)cap && res_exec(buf))
+			return buf;
+	}
+	return NULL;
+}
+
+/* The session repo's origin as github.com's "o/r", by 8.3's git */
+static int
+res_origin(const char *cwd, long long until, struct res_run *run, char *out,
+           size_t cap)
+{
+	static char s0[] = "remote", s1[] = "get-url", s2[] = "origin";
+	char git[PATH_MAX], dir[PATH_MAX], home[PATH_MAX + 8], *av[40], *env[9];
+	size_t a, n;
+
+	if (!xr_git_bin(git, sizeof git) || !cwd || cwd[0] != '/' ||
+	    snprintf(dir, sizeof dir, "%s", cwd) >= (int)sizeof dir)
+		return 0;
+	a = res_git_prep(git, dir, home, av, env);
+	av[a] = s0;
+	av[a + 1] = s1;
+	av[a + 2] = s2;
+	av[a + 3] = NULL;
+	/* run->out (a remote URL can carry a token) is only matched */
+	if (res_run(av, env, until, run) != 0 || run->status != 0)
+		return 0;
+	for (n = run->on; n && (run->out[n - 1] == '\n' || run->out[n - 1] == '\r');)
+		n--;
+	return xr_gh_repo(run->out, n, out, cap);
+}
+
+/* The disk cache of gh's answers (#508): $XDG_CACHE_HOME/dch/gh/<o>,<r>,<N>
+** (names hold no ','), 0700 dir, 0600 files, the --jq answer or "none". A
+** hit must be a regular file of ours, younger than 10 min (a "none": 2). */
+static int
+res_cache_path(char *out, size_t cap, const char *repo, const char *num,
+               int mk)
+{
+	const char *x = getenv("XDG_CACHE_HOME"), *h = getenv("HOME");
+	char dir[PATH_MAX], *p;
+	size_t n;
+
+	if (x && x[0] == '/')
+		snprintf(dir, sizeof dir, "%s/dch/gh", x);
+	else if (h && h[0] == '/')
+		snprintf(dir, sizeof dir, "%s/.cache/dch/gh", h);
+	else
+		return 0;
+	for (p = dir + 1; mk && (p = strchr(p, '/')); *p++ = '/')
+	{
+		*p = '\0';
+		(void)mkdir(dir, 0700);
+	}
+	if (mk)
+		(void)mkdir(dir, 0700);
+	n = strlen(dir);
+	if ((size_t)snprintf(out, cap, "%s/%s,%s", dir, repo, num) >= cap)
+		return 0;
+	for (p = out + n + 1; *p; p++)
+		*p = *p == '/' ? ',' : (char)tolower((unsigned char)*p);
+	return 1;
+}
+
+/* 1: a fresh entry read into buf (NUL-ended; "none" is a negative one) */
+static int
+res_cache_get(const char *repo, const char *num, char *buf, size_t cap)
+{
+	char path[PATH_MAX];
+	struct stat st;
+	ssize_t n;
+	int fd;
+
+	if (!res_cache_path(path, sizeof path, repo, num, 0) ||
+	    lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+	    st.st_uid != getuid() || st.st_size >= (off_t)cap)
+		return 0;
+	if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0)
+		return 0;
+	n = read(fd, buf, cap - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	buf[n] = '\0';
+	return time(NULL) - st.st_mtime < (strcmp(buf, "none") ? 600 : 120);
+}
+
+/* tmp + rename; any failure is silent */
+static void
+res_cache_put(const char *repo, const char *num, const char *s)
+{
+	char path[PATH_MAX], tmp[PATH_MAX + 32];
+	size_t n = strlen(s);
+	int fd;
+
+	if (!res_cache_path(path, sizeof path, repo, num, 1))
+		return;
+	snprintf(tmp, sizeof tmp, "%s.%ld.tmp", path, (long)getpid());
+	if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
+		return;
+	if (write(fd, s, n) != (ssize_t)n || close(fd) != 0 ||
+	    rename(tmp, path) != 0)
+		(void)unlink(tmp);
+}
+
+/* #N, repo#N, o/r#N or an issue/pull URL (o/r#N): `gh api` for its title
+** and state, read-only, under XR_GIT_MS. The REST issues endpoint answers
+** for an issue and a pull alike (a pull is an issue with pull_request), so
+** one call serves a bare #N; --jq keeps the answer to four fields. No gh,
+** no auth, no network, the deadline, not github.com, any odd answer: 0. */
+static int
+res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
+{
+	static struct res_run run;	/* 68 KB: off the stack */
+	static const char *const keep[] = {"PATH=", "HOME=", "XDG_CONFIG_HOME=",
+		"GH_CONFIG_DIR=", "GH_TOKEN=", "GITHUB_TOKEN=",
+		"DBUS_SESSION_BUS_ADDRESS="};	/* the Linux keyring's */
+	static char f0[] = "GH_PROMPT_DISABLED=1", f1[] = "GH_NO_UPDATE_NOTIFIER=1",
+	            f2[] = "GH_NO_EXTENSION_UPDATE_NOTIFIER=1", f3[] = "NO_COLOR=1",
+	            f4[] = "GH_PAGER=cat", f5[] = "GH_BROWSER=false",
+	            f6[] = "BROWSER=false", f7[] = "GH_SPINNER_DISABLED=1",
+	            a1[] = "api", a2[] = "--hostname", a3[] = "github.com",
+	            a4[] = "--method", a5[] = "GET", a6[] = "--jq",
+	            a7[] = "{number,title,state:(if .pull_request.merged_at then "
+	                   "\"merged\" else .state end),kind:(if .pull_request "
+	                   "then \"pull\" else \"issue\" end)}";
+	extern char **environ;
+	const char *t = xr_span_text(sp), *h = strchr(t, '#'), *sl;
+	char gh[PATH_MAX], repo[208], num[16], path[256], *env[24], cb[4096];
+	char *av[] = {gh, a1, a2, a3, a4, a5, a6, a7, path, NULL};
+	char *fix[] = {f0, f1, f2, f3, f4, f5, f6, f7};
+	size_t k, j, e = 0, nl;
+	long long until = xr_now_ms() + XR_GIT_MS;
+
+	if (!xr_res_github || !h)
+		return 0;
+	/* checked again before argv: the number digits only, no leading 0 */
+	for (nl = 0; A_DIG((unsigned char)h[1 + nl]); nl++)
+		;
+	if (!nl || nl > 9 || h[1 + nl] || h[1] == '0')
+		return 0;
+	memcpy(num, h + 1, nl + 1);
+	if (!res_gh_bin(gh, sizeof gh))
+		return 0;
+	sl = memchr(t, '/', (size_t)(h - t));
+	if (sl)	/* o/r#N, a URL's too */
+	{
+		if (!res_gh_name(t, (size_t)(sl - t)) ||
+		    !res_gh_name(sl + 1, (size_t)(h - sl - 1)))
+			return 0;
+		snprintf(repo, sizeof repo, "%.*s", (int)(h - t), t);
+	}
+	else if (!res_origin(cwd, until, &run, repo, sizeof repo) ||
+	         (h > t && (strlen(strchr(repo, '/') + 1) != (size_t)(h - t) ||
+	                    strncasecmp(strchr(repo, '/') + 1, t,
+	                                (size_t)(h - t)))))
+		return 0;	/* repo#N: only the origin's own repo */
+	if (res_cache_get(repo, num, cb, sizeof cb))
+	{
+		if (!strcmp(cb, "none") || xr_gh_parse(cb, repo, num, r))
+			return strcmp(cb, "none") != 0;
+		/* a corrupt entry: asked again, then overwritten */
+	}
+	snprintf(path, sizeof path, "repos/%s/issues/%s", repo, num);
+	for (k = 0; k < sizeof fix / sizeof *fix; k++)
+		env[e++] = fix[k];
+	for (k = 0; environ[k] && e < sizeof env / sizeof *env - 1; k++)
+		for (j = 0; j < sizeof keep / sizeof *keep; j++)
+			if (!strncmp(environ[k], keep[j], strlen(keep[j])))
+			{
+				env[e++] = environ[k];
+				break;
+			}
+	env[e] = NULL;
+	if (res_run(av, env, until, &run) != 0 || run.status < 0)
+		return 0;	/* a timeout or a kill is not cached */
+	k = run.status == 0 && xr_gh_parse(run.out, repo, num, r);
+	res_cache_put(repo, num, k ? run.out : "none");
+	return (int)k;
 }
 
 /* ---- files (v2.1 7.1, v1 7.3) ---- */
@@ -11477,6 +11767,8 @@ res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 	}
 	if (sp->shape == XR_FILE)
 		return res_file(xr_span_text(sp), text, cwd ? cwd : "", light, r);
+	if (sp->shape == XR_ISSUE || sp->shape == XR_PULL)
+		return res_issue(sp, cwd, r);
 	return 0;
 }
 
@@ -11487,8 +11779,8 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 	return res_ref(sp, text, cwd, live, 0, r);
 }
 
-/* light: a commit, only an ok one (#502: no noise); a file by stat alone,
-** ok or missing (#500) */
+/* light: a commit or an issue/pull, only an ok one (#502, #507: no noise);
+** a file by stat alone, ok or missing (#500) */
 static void
 res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
          const char *cwd, int live, int light)
@@ -11503,7 +11795,8 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 
 	if (x->cancel || x->out_full || !(r = malloc(sizeof *r)))
 		return;
-	if (res_ref(sp, text, cwd, live, light, r) &&
+	/* a resolver that answered without a state gives no line */
+	if (res_ref(sp, text, cwd, live, light, r) && r->state &&
 	    (!light || !strcmp(r->state, "ok") ||
 	     !strcmp(r->state, "missing")) && (m = ln_open(&b, &bl)))
 	{
@@ -11546,7 +11839,8 @@ void
 xr_scan_light(struct xr_scan *x, const struct xr_span *sp, const char *text,
               const char *cwd, int live)
 {
-	if (!x->full && live && (sp->shape == XR_COMMIT || sp->shape == XR_FILE))
+	if (!x->full && live && (sp->shape == XR_COMMIT || sp->shape == XR_FILE ||
+	                         sp->shape == XR_ISSUE || sp->shape == XR_PULL))
 		res_scan(x, sp, text, cwd, live, 1);
 }
 
@@ -12798,12 +13092,32 @@ sr_shown(const struct xr_search *s, size_t k)
 	return &s->hit[s->shell ? (s->h0 + s->n - 1 - k) % SR_SLOTS : k];
 }
 
+/* The group's likely answer (#506), as sr_shown's index, or s->n for none:
+** the plain assistant text hit (who assistant, no tool) with the greatest
+** offset. Turns are contiguous, so the newest turn's latest one is just the
+** greatest offset: no chapter order needed. Ranking order is not assumed. */
+static size_t
+sr_answer(const struct xr_search *s)
+{
+	size_t k, best = s->n;
+
+	for (k = 0; k < s->n; k++)
+	{
+		const struct sr_hit *h = sr_shown(s, k);
+
+		if (h->who == SK_ASSISTANT && !h->tool &&
+		    (best == s->n || h->off > sr_shown(s, best)->off))
+			best = k;
+	}
+	return best;
+}
+
 /* An object's tail: "hits" to "bytes" and the '}' (titled: each hit's
 ** turn_title, #498) */
 static void
 sr_put_hits(FILE *f, const struct xr_search *s, const char *why, int titled)
 {
-	size_t k;
+	size_t k, ans = sr_answer(s);
 
 	if (!why && s->partial)
 		why = s->why;
@@ -12826,18 +13140,150 @@ sr_put_hits(FILE *f, const struct xr_search *s, const char *why, int titled)
 		}
 		fputs(",\"snippet\":", f);
 		xr_put_str(f, h->snip ? h->snip : "");
-		fputc('}', f);
+		fprintf(f, ",\"answer\":%s}", k == ans ? "true" : "false");
 	}
 	fprintf(f, "],\"more\":%s,\"partial\":%s,\"why\":",
 	        s->more ? "true" : "false", why ? "true" : "false");
 	put_or_null(f, why);
-	fprintf(f, ",\"bytes\":%llu}", (unsigned long long)s->bytes);
+	fprintf(f, ",\"bytes\":%llu", (unsigned long long)s->bytes);
+}
+
+/* ---- first and latest mention (#505) ---- */
+
+static void
+sr_end_free(struct xr_end *e)
+{
+	free(e->session), free(e->sid), free(e->title), free(e->chapter);
+	free(e->snip);
+	memset(e, 0, sizeof *e);
+}
+
+void
+xr_ends_free(struct xr_ends *e)
+{
+	sr_end_free(&e->first);
+	sr_end_free(&e->latest);
+}
+
+/* a older than b: by at when both have one and differ, else the session
+** searched later is older (xr_mapped goes newest first), then the smaller
+** offset */
+static int
+sr_end_older(const struct xr_end *a, const struct xr_end *b)
+{
+	if (a->at >= 0 && b->at >= 0 && a->at != b->at)
+		return a->at < b->at;
+	if (a->ord != b->ord)
+		return a->ord > b->ord;
+	return a->off < b->off;
+}
+
+static void
+sr_end_set(struct xr_end *e, const struct sr_hit *h, const char *session,
+           const char *sid, int ord)
+{
+	int ch = h->chapter[0] && !h->pend;
+
+	sr_end_free(e);
+	e->set = 1;
+	e->session = strdup(session ? session : "");
+	e->sid = sid && sid[0] ? strdup(sid) : NULL;
+	e->title = ch && h->title ? strdup(h->title) : NULL;
+	e->chapter = ch ? strdup(h->chapter) : NULL;
+	e->snip = strdup(h->snip ? h->snip : "");
+	e->at = h->at, e->off = h->off, e->ord = ord, e->who = h->who;
+}
+
+/* Fold s's hits (ranked, not by time) in; ord is the session's place in the
+** search, 0 first */
+void
+xr_ends_add(struct xr_ends *e, const struct xr_search *s, const char *session,
+            const char *sid, int ord)
+{
+	size_t k;
+
+	for (k = 0; k < s->n; k++)
+	{
+		const struct sr_hit *h = sr_shown(s, k);
+		struct xr_end x = { .at = h->at, .off = h->off, .ord = ord };
+
+		if (!e->first.set || sr_end_older(&x, &e->first))
+			sr_end_set(&e->first, h, session, sid, ord);
+		if (!e->latest.set || sr_end_older(&e->latest, &x))
+			sr_end_set(&e->latest, h, session, sid, ord);
+	}
+}
+
+static void
+sr_end_json(FILE *f, const struct xr_end *e)
+{
+	if (!e->set)
+	{
+		fputs("null", f);
+		return;
+	}
+	fputs("{\"session\":", f);
+	put_or_null(f, e->session);
+	fputs(",\"session_id\":", f);
+	put_or_null(f, e->sid);
+	fputs(",\"turn_title\":", f);
+	put_or_null(f, e->title);
+	fputs(",\"at\":", f);
+	put_at(f, e->at);
+	fputs(",\"chapter\":", f);
+	put_or_null(f, e->chapter);
+	fprintf(f, ",\"who\":\"%s\",\"snippet\":", sk_name[e->who]);
+	put_or_null(f, e->snip);
+	fputc('}', f);
+}
+
+/* the object's last two keys, no '}' */
+void
+xr_ends_json(FILE *f, const struct xr_ends *e)
+{
+	fputs(",\"first\":", f);
+	sr_end_json(f, &e->first);
+	fputs(",\"latest\":", f);
+	sr_end_json(f, &e->latest);
+}
+
+static void sr_put_plain(FILE *f, const char *s);
+
+static void
+sr_end_text(FILE *f, const struct xr_end *e)
+{
+	struct tm tm;
+	time_t t = (time_t)e->at;
+	char when[32] = "";
+
+	if (!e->set)
+	{
+		fputs("none", f);
+		return;
+	}
+	if (e->at > 0 && localtime_r(&t, &tm))
+		strftime(when, sizeof when, " %Y-%m-%d %H:%M", &tm);
+	sr_put_plain(f, e->session);
+	fprintf(f, "%s %s: ", when, sk_name[e->who]);
+	sr_put_plain(f, e->snip);
+}
+
+void
+xr_ends_text(FILE *f, const struct xr_ends *e)
+{
+	fputs("first: ", f);
+	sr_end_text(f, &e->first);
+	fputs(" / latest: ", f);
+	sr_end_text(f, &e->latest);
+	fputc('\n', f);
 }
 
 int
 xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                 const char *session_id, const char *corpus, const char *why)
 {
+	struct xr_ends e = { 0 };
+
 	fputs("{\"schema\":1,\"session\":", f);
 	xr_put_str(f, session);
 	fputs(",\"session_id\":", f);
@@ -12845,7 +13291,10 @@ xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 	fprintf(f, ",\"corpus\":\"%s\",\"text\":", corpus);
 	xr_put_str(f, s->text);
 	sr_put_hits(f, s, why, 0);
-	fputc('\n', f);
+	xr_ends_add(&e, s, session, session_id, 0);
+	xr_ends_json(f, &e);
+	xr_ends_free(&e);
+	fputs("}\n", f);
 	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
 }
 
@@ -12874,6 +13323,7 @@ xr_search_group(FILE *f, const struct xr_search *s, const char *session,
 	fputs(",\"turn_title\":", f);
 	put_or_null(f, h && h->chapter[0] && !h->pend ? h->title : NULL);
 	sr_put_hits(f, s, why, 1);
+	fputc('}', f);
 }
 
 /* s for a terminal: C0, DEL and C1 controls (U+0080-009F) as a space, so a
@@ -12900,7 +13350,7 @@ xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 	char when[32] = "";
 	struct tm tm;
 	time_t t = (time_t)last_active;
-	size_t k;
+	size_t k, ans = sr_answer(s);
 
 	if (last_active > 0 && localtime_r(&t, &tm))
 		strftime(when, sizeof when, "  %Y-%m-%d %H:%M", &tm);
@@ -12920,7 +13370,8 @@ xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 			fputc('\n', f);
 		}
 		prev = ti;
-		fprintf(f, "    %s", sk_name[h->who]);
+		fprintf(f, "%s  %s", k == ans ? "\xe2\x86\x92 " : "  ",
+		        sk_name[h->who]);
 		if (h->tool)
 		{
 			fputc(' ', f);

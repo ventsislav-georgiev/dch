@@ -1234,8 +1234,8 @@ def test_write_fail():
 SSID = "11111111-2222-4333-8444-5555555555b1"
 SSID2 = "11111111-2222-4333-8444-5555555555b2"
 S_KEYS = ["schema", "session", "session_id", "corpus", "text", "hits",
-          "more", "partial", "why", "bytes"]
-H_KEYS = ["chapter", "offset", "at", "who", "tool", "snippet"]
+          "more", "partial", "why", "bytes", "first", "latest"]
+H_KEYS = ["chapter", "offset", "at", "who", "tool", "snippet", "answer"]
 
 
 def search(n, text, env=None):
@@ -3039,14 +3039,15 @@ def test_search_scope():
               "last_active", "turn_title", "hits", "more", "partial", "why",
               "bytes"]
     HT_KEYS = ["chapter", "offset", "at", "who", "tool", "turn_title",
-               "snippet"]
+               "snippet", "answer"]
     rc, o, err = run("--scope", "project", "--json")
     g = o["sessions"] if o else []
     check("search scope: project groups <n>'s and its project's sessions "
           "with hits (q3 has none: left out; q2 is another project)",
           rc == 0 and o and list(o) == ["schema", "session", "session_id",
                                         "text", "scope", "sessions",
-                                        "searched", "partial", "why"] and
+                                        "searched", "partial", "why",
+                                        "first", "latest"] and
           o["scope"] == "project" and o["session_id"] == sid(0) and
           [x["session"] for x in g] == ["q0", "q1"] and o["searched"] == 3 and
           o["partial"] is False, (rc, o, err))
@@ -3068,6 +3069,24 @@ def test_search_scope():
           [x["session"] for x in g] == ["q0", "q1", "q2"] and
           o["searched"] == 4 and g[2]["project"] == key(O) and
           g[2]["turn_title"] == "the push retry thing again", (rc, o, err))
+    # #505: q1 (user, at 11-11) is older than q2 (11-12); q0's assistant
+    # hit has no at, so session order decides and <n>'s own is the newest
+    E_KEYS = ["session", "session_id", "turn_title", "at", "chapter", "who",
+              "snippet"]
+    fl, la = o["first"], o["latest"]
+    check("search scope: first/latest across the groups (all: q1 oldest, "
+          "q0 newest), their keys",
+          fl and la and list(fl) == E_KEYS and list(la) == E_KEYS and
+          fl["session"] == "q1" and fl["session_id"] == sid(1) and
+          fl["turn_title"] == "why does push retry loop" and
+          fl["at"] == 1794391200 and fl["who"] == "user" and
+          fl["chapter"] and la["at"] is None and
+          la["session"] == "q0" and la["who"] == "assistant" and
+          la["snippet"] == "see the Push Retry note", (fl, la))
+    rc, o, err = run("--scope", "project", "--json")
+    check("search scope: project's first is q1",
+          rc == 0 and o["first"]["session"] == "q1" and
+          o["latest"]["session"] == "q0", (rc, o, err))
     for a in ((), ("--scope", "session")):
         rc, o, err = run(*a, "--json")
         check("search scope: %s stays <n>'s one object"
@@ -3077,14 +3096,19 @@ def test_search_scope():
     r = dch("--xray", "q0", "--search", "push retry", "--scope", "all",
             env=env)
     out = r.stdout.splitlines()
-    heads = [l.split()[0] for l in out if l and not l.startswith(" ")]
+    heads = [l.split()[0] for l in out if l and not l.startswith((" ", "\u2192"))
+             and not l.startswith("first: ")]
     check("search scope: without --json, text: a line per session, its "
           "turns' titles, its hits",
           r.returncode == 0 and heads == ["q0", "q1", "q2"] and
           "    user: why does push retry loop" in out and
           "  why does push retry loop" in out and
-          "    assistant: see the Push Retry note" in out,
+          "\u2192   assistant: see the Push Retry note" in out,
           (r.returncode, r.stdout, r.stderr))
+    check("search scope: text ends with one first/latest line",
+          out[-1].startswith("first: q1 ") and
+          " user: why does push retry loop / latest: q0 assistant: see the "
+          "Push Retry note" in out[-1], out)
     rc, o, err = run("--scope", "all", "--json",
                      e=dict(env, DCH_XRAY_CAPS="2"))
     check("search scope: the files cap stops it, newest first (q0, then "
@@ -3119,6 +3143,109 @@ def test_search_scope():
           r.returncode == 0 and "pwn" in r.stdout and not any(
               c in r.stdout for c in "\x1b\x07\x7f\u009b"),
           (r.returncode, r.stdout, r.stderr))
+
+
+def test_search_answer():
+    """#506: per group (and the one object) exactly one hit, the plain
+    assistant text hit with the greatest offset, has "answer": true."""
+    S = os.path.join(T, "sanswer")
+    home = os.path.join(S, "home")
+    cfg = os.path.join(home, ".claude")
+    sockdir = os.path.join(S, "dch-%d" % os.getuid())
+    hdir = os.path.join(S, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for d in (home, hdir):
+        os.makedirs(d)
+    env = dict(ENV, XDG_RUNTIME_DIR=S, XDG_STATE_HOME=os.path.join(S, "state"),
+               HOME=home)
+    cwd = "/home/demo/ans"
+    sid = lambda k: "44444444-3333-4444-8555-%012d" % k
+
+    def put(k, lines):
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid(k) + ".jsonl"), "w") as f:
+            for i, (who, text) in enumerate(lines):
+                if who == "user":
+                    f.write(json.dumps({"type": "user", "cwd": cwd,
+                        "timestamp": "2026-11-10T10:%02d:00Z" % i,
+                        "message": {"content": text}}) + "\n")
+                elif who == "tool":
+                    f.write(json.dumps({"type": "assistant", "message": {
+                        "content": [{"type": "tool_use", "id": "t%d" % i,
+                                     "name": "Bash",
+                                     "input": {"command": text}}]}}) + "\n")
+                else:
+                    f.write(json.dumps({"type": "assistant", "message": {
+                        "content": [{"type": "text", "text": text}]}})
+                        + "\n")
+        rec = {"name": "a%d" % k, "cwd": cwd, "end": "exited",
+               "argv": ["claude"], "started": 1794299400,
+               "updated": 1794300000 + k, "ended": 1794300000 + k,
+               "sock_dir": sockdir,
+               "agent": {"session_id": sid(k), "cwd": cwd,
+                         "config_dir": cfg}}
+        with open(os.path.join(hdir, "a%d.json" % k), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    # a0: the newest turn holds two assistant hits (the later offset wins)
+    put(0, [("user", "tide plan?"), ("asst", "tide plan early"),
+            ("asst", "tide plan final")])
+    # a1: the newest assistant hit is older than a user hit's turn
+    put(1, [("user", "go"), ("asst", "the tide plan is chosen"),
+            ("user", "tide plan again?"), ("asst", "ok")])
+    # a2: only user and tool hits
+    put(2, [("user", "tide plan?"), ("tool", "echo tide plan"),
+            ("asst", "done")])
+
+    def run(n, *a):
+        r = dch("--xray", n, "--search", "tide plan", *a, env=env)
+        try:
+            return json.loads(r.stdout)
+        except ValueError:
+            return {"err": r.stdout + r.stderr}
+
+    def ans(hits):
+        return [(h["who"], h["tool"], h["snippet"]) for h in hits
+                if h["answer"]]
+
+    o = run("a0", "--scope", "all", "--json")
+    g = {x["session"]: x for x in o.get("sessions", [])}
+    check("answer #506: a group's hits end in answer, one true: two "
+          "assistant hits in the newest turn, the later offset",
+          len(g) == 3 and all(h["answer"] in (True, False) and
+                              list(h)[-1] == "answer"
+                              for x in g.values() for h in x["hits"]) and
+          ans(g["a0"]["hits"]) == [("assistant", None, "tide plan final")]
+          and len(g["a0"]["hits"]) == 3,
+          [(k, [(h["who"], h["answer"], list(h)[-1]) for h in x["hits"]])
+           for k, x in g.items()])
+    check("answer #506: the newest assistant hit in an older turn than a "
+          "user hit still wins",
+          ans(g["a1"]["hits"]) == [("assistant", None,
+                                    "the tide plan is chosen")] and
+          any(h["who"] == "user" and not h["answer"]
+              for h in g["a1"]["hits"]), g["a1"])
+    check("answer #506: only user/tool hits, all false",
+          len(g["a2"]["hits"]) >= 2 and
+          not any(h["answer"] for h in g["a2"]["hits"]), g["a2"])
+    for n, want in (("a0", "tide plan final"),
+                    ("a1", "the tide plan is chosen")):
+        o = run(n, "--json")
+        check("answer #506: the single object (no --scope) of %s" % n,
+              list(o["hits"][0])[-1] == "answer" and
+              [h["snippet"] for h in o["hits"] if h["answer"]] == [want], o)
+    o = run("a2", "--json")
+    check("answer #506: the single object with only user/tool hits",
+          o["hits"] and not any(h["answer"] for h in o["hits"]), o)
+    r = dch("--xray", "a0", "--search", "tide plan", "--scope", "all",
+            env=env)
+    out = r.stdout.splitlines()
+    check("answer #506: text marks the answer line with an arrow in place "
+          "of two leading spaces, and only that one",
+          "\u2192   assistant: tide plan final" in out and
+          "    assistant: tide plan early" in out and
+          sum(l.startswith("\u2192 ") for l in out) == 2, r.stdout)
 
 
 def turn_rows(got, how):
@@ -4212,6 +4339,7 @@ def main():
         test_responses()
         test_scope()
         test_search_scope()
+        test_search_answer()
         test_light_anchors()
         test_light_303()
         test_light_326()

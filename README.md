@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.110.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.111.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -852,6 +852,7 @@ running sessions.
 | `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
 | `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
 | `define_command` | a program and its arguments, run with no shell, the ref last: X-ray's definition of a ref no transcript defines (see [Your own definitions](#your-own-definitions-define_command)). Your own config only; through `dch serve` the host's | empty |
+| `xray_github` | `true`/`false`: X-ray looks up a `#N`, `owner/repo#N` or GitHub issue/pull URL with your `gh` (title and state; see [Refs](#refs)) | `true` |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -1813,6 +1814,37 @@ its own, so a client need not read the subtitle, and unlike `ok` it does
 not claim a file was found. `--full` is unchanged: a missing file gives
 no line, an existing one the 14-line window.
 
+An issue or pull ref (`#1234`, `repo#12`, `owner/repo#12`, a
+`https://github.com/<o>/<r>/issues/<N>` or `/pull/<N>` URL) gets a
+`resolved` line from your `gh` (#507), in the light scan of a live `<n>`
+(the same define_command rule) and under `--full`: `kind` `issue` or
+`pull`, `title` the issue's title (controls as spaces), `subtitle`
+`<state> · owner/repo#N` with `open`, `closed` or `merged`, no `lines`.
+`owner/repo` is the ref's own, else the github.com `origin` of `<n>`'s
+repo, read with the git above (`repo#N` only when it names that repo).
+Both names are 1 to 100 of `[A-Za-z0-9._-]`, not starting with `-` or `.`,
+and `N` digits, checked before anything reaches `gh`'s argv. It runs one
+read-only call, `gh api --hostname github.com --method GET --jq <four
+fields> repos/<o>/<r>/issues/<N>`: GitHub's issues endpoint answers for a
+pull too, so one call serves a bare `#N`. The first `gh` on `PATH` runs
+under the same 3 s deadline and output cap as git, with only `PATH`,
+`HOME`, `XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and
+`DBUS_SESSION_BUS_ADDRESS` from your environment plus
+`GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `NO_COLOR=1`,
+`GH_PAGER=cat` and no browser. No `gh`, not logged in, no network, the
+deadline, a remote that is not github.com or an answer it cannot read:
+no line and no warning; the mentions stream as always.
+`xray_github = false` (or `DCH_NO_GITHUB=1`, the test suite's guard)
+turns it off (nothing is read or written then).
+Each answer is cached on disk so that every card open or hover does not
+spend your GitHub rate limit: in `$XDG_CACHE_HOME/dch/gh/` (else
+`~/.cache/dch/gh/`; directory 0700, files 0600, one per lowercased
+`owner,repo,N`, written atomically) for **10 minutes**; a missing issue
+(gh exited non-zero, or an answer that did not parse) is cached for **2
+minutes**; a timeout is not cached. An entry is used only if it is a
+regular file (no symlink) of yours; a corrupt one is ignored and
+overwritten. Delete the directory to refresh at once.
+
 - **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
   session runs nothing: `state: "ended"`. Otherwise dch runs git directly,
   never through a shell: on macOS the first of the Command Line Tools git,
@@ -1940,10 +1972,18 @@ no line, an existing one the 14-line window.
 `dch --xray <n> --search <text> --json` finds where a word or a phrase was
 said in `<n>`'s own corpus and prints one object, the places with the
 whole text first, then the rest, each newest first:
-`{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet"}],"more","partial","why","bytes"}`.
+`{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet","answer"}],"more","partial","why","bytes","first","latest"}`.
 `<text>` is 2 to 200 bytes of UTF-8 with no control character and
 none of `--ref`'s bidi controls (`dch: bad search: 2 to 200 bytes, no control
 character`, exit 2). ASCII letters match in either case; nothing else folds.
+- **The likely answer (#506).** Every hit ends in `"answer"`, true for one hit
+  per group (and for the one object), or none. "What did we decide" wants the
+  conclusion, so among the hits by the assistant with no tool (`who`
+  `"assistant"`, `tool` null) it is the one in the newest turn, and within
+  that turn the latest `offset`, nearest the turn's end. A group with no such
+  hit has every `answer` false. It is picked by turn order and offset, not by
+  position (the whole text ranks first). Without `--json` the line of that
+  hit starts with `→ ` in place of its first spaces.
 - **Words (#499).** `<text>` is split into words at spaces and tabs; a text
   matches when it holds every word, in any order, so `retry backoff` finds
   "…backoff between retries…". A text that holds `<text>` as typed (its
@@ -2023,11 +2063,11 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   (64 files, `why: "files"`) and its 10 s counted from dch's start
   (`why: "time"`), so the newest sessions come first and a cut drops the
   oldest. The answer is one object:
-  `{"schema":1,"session","session_id","text","scope","sessions":[…],"searched","partial","why"}`,
+  `{"schema":1,"session","session_id","text","scope","sessions":[…],"searched","partial","why","first","latest"}`,
   `searched` the files read, `partial`/`why` a cap that stopped it.
   `sessions` holds `<n>`'s group first (also with no hit), then each other
   session that has a hit, in the order read:
-  `{"session","session_id","corpus","live","project","last_active","turn_title","hits":[{"chapter","offset","at","who","tool","turn_title","snippet"}],"more","partial","why","bytes"}`.
+  `{"session","session_id","corpus","live","project","last_active","turn_title","hits":[{"chapter","offset","at","who","tool","turn_title","snippet","answer"}],"more","partial","why","bytes"}`.
   As on `--ref`'s other-session `mention` lines, `session_id` is the
   session's own id (`null` when none) and `last_active` its last activity in
   epoch seconds (another session's: its `lastSeen`, as History holds it;
@@ -2038,16 +2078,31 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
 
   ```json
   {"schema":1,"session":"api","session_id":"3f…","text":"push retry","scope":"all","sessions":[
-    {"session":"api","session_id":"3f…","corpus":"claude","live":true,"project":"-home-me-api","last_active":1794300000,"turn_title":"plan the release","hits":[{"chapter":"f36cb:0","offset":125,"at":1794299990,"who":"assistant","tool":null,"turn_title":"plan the release","snippet":"see the Push Retry note"}],"more":false,"partial":false,"why":null,"bytes":226},
+    {"session":"api","session_id":"3f…","corpus":"claude","live":true,"project":"-home-me-api","last_active":1794300000,"turn_title":"plan the release","hits":[{"chapter":"f36cb:0","offset":125,"at":1794299990,"who":"assistant","tool":null,"turn_title":"plan the release","snippet":"see the Push Retry note","answer":true}],"more":false,"partial":false,"why":null,"bytes":226},
     {"session":"cli","session_id":"9a…","corpus":"claude","live":false,"project":"-home-me-cli","last_active":1794200000,"turn_title":"the push retry thing again","hits":[…],"more":false,"partial":false,"why":null,"bytes":4096}],
    "searched":3,"partial":false,"why":null}
   ```
+- **First and latest (#505).** Both shapes (one session, and `--scope`) end
+  with `"first"` and `"latest"`: the oldest and newest hit across every
+  session searched, `{"session","session_id","turn_title","at","chapter","who","snippet"}`
+  (a `null` chapter or `session_id` gives `null`), or `null` when nothing
+  matched. For a selection that is not a ref ("where did this come up"): the
+  client shows the first and the last place without walking the groups. They
+  are the oldest and newest *kept* hit, not of all history: each session
+  keeps only its newest 50 turns (and 500 hits), and a cap that stopped the
+  search leaves later sessions out. Oldest is the smallest `at`; when either
+  hit has no `at` (or both are equal), the session read later is older (the
+  order is newest first), then the smaller `offset`. Hits are ranked, so this
+  never goes by position. The one-session object gets the two keys last,
+  after `bytes`; the other keys are as before.
 - **Text.** Without `--json` (a local `<n>` only; `host:name` still needs
   `--json`), `--search` prints text instead: per session a line with its
   name, its last activity in local time and its hit count (`, more` past a
   cap), then per turn its title (`(no turn title)` for none) and that turn's
   hits as `who[ tool]: snippet`, indented; a cap that stopped a scoped search
-  ends it with `(stopped at the files|time cap: N sessions searched)`.
+  ends it with `(stopped at the files|time cap: N sessions searched)`; the
+  last line is `first: <session> <time> <who>: <snippet> / latest: …` (`none`
+  for no hit).
 
 `--search` goes with no other flag but `--json` and `--scope` (`dch: bad
 usage: --search and --ref`, also with `--chapter`, `--clear` or `--follow`),

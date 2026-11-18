@@ -679,6 +679,47 @@ resolvers(const char *s, size_t n)
 		abort();
 	if (xr_git_remote(s, n, "o/r") != remote_rule(s, n))
 		abort();
+	/* #507: gh's answer is an ok issue or pull block with no control in
+	** its title and "<state> · o/r#12"; a remote's o/r is two names gh's
+	** argv can take, and the URL names it */
+	memset(&r, 0, sizeof r);
+	if (xr_gh_parse(s, "o/r", "12", &r))
+	{
+		size_t i;
+
+		check_res(&r);
+		if (strcmp(r.state, "ok") || (strcmp(r.kind, "issue") &&
+		    strcmp(r.kind, "pull")) || r.nlines ||
+		    (strcmp(r.subtitle, "open \xc2\xb7 o/r#12") &&
+		     strcmp(r.subtitle, "closed \xc2\xb7 o/r#12") &&
+		     strcmp(r.subtitle, "merged \xc2\xb7 o/r#12")))
+			abort();
+		for (i = 0; r.title[i]; i++)
+			if (xr_ctl_at(r.title + i, strlen(r.title + i)))
+				abort();
+	}
+	{
+		char o[256], *e;
+		const char *sl;
+
+		if (xr_gh_repo(s, n, o, sizeof o))
+		{
+			/* as one config entry: the commit check's matcher agrees */
+			if (memchr(s, '\0', n) || !(e = malloc(n + 14)))
+				abort();
+			memcpy(e, "remote.o.url\n", 13);
+			memcpy(e + 13, s, n);
+			e[n + 13] = '\0';
+			sl = strchr(o, '/');
+			if (!sl || strchr(sl + 1, '/') || o[0] == '-' || o[0] == '.' ||
+			    sl[1] == '-' || sl[1] == '.' ||
+			    strspn(o, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTU"
+			           "VWXYZ0123456789._-/") != strlen(o) ||
+			    !xr_git_remote(e, n + 14, o))
+				abort();
+			free(e);
+		}
+	}
 }
 
 int

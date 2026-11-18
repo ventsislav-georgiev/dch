@@ -189,6 +189,7 @@ def test_shell():
         check("all: schema 1 on every line", all(l.get("schema") == 1
                                                 for l in ls))
         test_light(n, m, repo, sha)
+        test_github(m)
         r, ls, rv = ref(n, "abcdef1234")
         check("shell commit: a SHA not in the repo: not_commit, "
               "\"Not a commit in repo\"",
@@ -603,6 +604,208 @@ def test_light(n, m, repo, sha):
     check("card #502: the light card shows the commit, its subject, on HEAD",
           re.search(r"commit Add the widget +Ann Example · [^\n]*· %s · on "
                     r"HEAD" % sha[:7], t), t[-1500:])
+
+
+# ---- #507: issues and pulls through a fake gh (never the real one) --------
+
+GH_FAKE = r"""#!/bin/sh
+echo "$*" >> '%(log)s'
+/usr/bin/env >> '%(envlog)s'
+case "$*" in
+*repos/acme/widgets/issues/1234)
+  echo '{"number":1234,"title":"Fix the \u001b[2Jwidget","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/77)
+  echo '{"number":77,"title":"Ship the widget","state":"MERGED","kind":"pull"}' ;;
+*repos/other/thing/issues/12)
+  echo '{"number":12,"title":"Old thing","state":"closed","kind":"issue"}' ;;
+*repos/acme/widgets/issues/44)
+  echo '{"number":45,"title":"Wrong one","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/500)
+  echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+*repos/acme/widgets/issues/600)
+  exec /bin/sleep 20 ;;
+*) echo 'gh: unexpected' >&2; exit 1 ;;
+esac
+"""
+
+
+def test_github(m):
+    repo = os.path.join(T, "ghrepo")
+    make_repo(repo, "Widgets")
+    git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+    fb, nob = os.path.join(T, "fakegh"), os.path.join(T, "nogh")
+    os.makedirs(fb)
+    os.makedirs(nob)
+    log, envlog = os.path.join(T, "gh.log"), os.path.join(T, "gh.env")
+    with open(os.path.join(fb, "gh"), "w") as f:
+        f.write(GH_FAKE % {"log": log, "envlog": envlog})
+    os.chmod(os.path.join(fb, "gh"), 0o755)
+    genv = {k: v for k, v in ENV.items() if k != "DCH_NO_GITHUB"}
+    cache = os.path.join(T, "ghcache")
+    genv.update(PATH=fb, XRES_CANARY="leak", XDG_CACHE_HOME=cache)
+    ghd = os.path.join(cache, "dch", "gh")
+    n = "xres-gh"
+    spawn_shell(n, repo)
+
+    def q(text, full=False, env=genv, who=n, keep=False):
+        open(log, "w").close()
+        if not keep:	# every row starts cold, #508 rows keep the cache
+            shutil.rmtree(cache, ignore_errors=True)
+        r = dch("--xray", who, "--ref", text,
+                "--scope", "session", *(["--full"] if full else []),
+                "--json", env=env)
+        ls = lines(r.stdout) or []
+        return r, ls, [l["resolved"] for l in ls if "resolved" in l], \
+            open(log).read()
+
+    try:
+        r, ls, rv, lg = q("#1234")
+        check("#507 light: a bare #N via the origin remote: an open issue",
+              r.returncode == 0 and len(rv) == 1 and rv[0]["kind"] ==
+              "issue" and rv[0]["state"] == "ok" and rv[0]["subtitle"] ==
+              "open · acme/widgets#1234" and "resolved" in ls[-2] and
+              ls[-1].get("done") is True, (r.stderr, r.stdout[-600:]))
+        check("#507: the title's controls are stripped",
+              rv and rv[0]["title"] == "Fix the  [2Jwidget", rv)
+        check("#507: gh api, read-only, github.com, --jq, the issues path",
+              lg.startswith("api --hostname github.com --method GET --jq ")
+              and lg.rstrip().endswith(" repos/acme/widgets/issues/1234"),
+              lg)
+        ev = open(envlog).read().split("\n") if os.path.exists(envlog) \
+            else []
+        check("#507: gh's env: the GH_* switches, nothing else leaks",
+              all(e in ev for e in ("GH_PROMPT_DISABLED=1",
+                                    "GH_NO_UPDATE_NOTIFIER=1", "NO_COLOR=1",
+                                    "GH_PAGER=cat", "HOME=" + HOME,
+                                    "PATH=" + fb)) and
+              not any(e.startswith(("XRES_CANARY", "DCH_", "TMPDIR"))
+                      for e in ev), ev)
+        r, ls, rv, lg = q("https://github.com/acme/widgets/pull/77")
+        check("#507: a pull URL: a merged pull",
+              len(rv) == 1 and rv[0]["kind"] == "pull" and rv[0]["title"] ==
+              "Ship the widget" and rv[0]["subtitle"] ==
+              "merged · acme/widgets#77", (r.stderr, rv))
+        r, ls, rv, lg = q("other/thing#12")
+        check("#507: owner/repo#N: that repo, not the origin's; closed",
+              len(rv) == 1 and rv[0]["subtitle"] == "closed · other/thing#12"
+              and rv[0]["title"] == "Old thing", (r.stderr, rv, lg))
+        r, ls, rv, lg = q("widgets#1234")
+        check("#507: repo#N naming the origin's repo resolves",
+              len(rv) == 1 and rv[0]["subtitle"] ==
+              "open · acme/widgets#1234", rv)
+        r, ls, rv, lg = q("#1234", full=True)
+        check("#507 --full: the issue line too",
+              len(rv) == 1 and rv[0]["state"] == "ok" and rv[0]["lines"] == []
+              and rv[0]["subtitle"] == "open · acme/widgets#1234", rv)
+        for label, text, env, who, gh_ran in (
+                ("gh missing", "#1234", dict(genv, PATH=nob), n, False),
+                ("gh exits 1", "#500", genv, n, True),
+                ("another number answered", "#44", genv, n, True),
+                ("an invalid owner", "-rf/r#1", genv, n, False),
+                ("an invalid owner in a URL",
+                 "https://github.com/-acme/widgets/issues/9", genv, n, False),
+                ("repo#N not the origin's", "gadgets#3", genv, n, False),
+                ("not a repo (no origin)", "#1234", genv, m, False)):
+            r, ls, rv, lg = q(text, env=env, who=who)
+            check("#507: %s: no resolved line, no noise, done" % label,
+                  r.returncode == 0 and not rv and not r.stderr and ls and
+                  ls[-1].get("done") is True and
+                  ls[-1].get("define_warn") is None and
+                  bool(lg) == gh_ran, (r.stderr, r.stdout[-300:], lg))
+        t0 = time.time()
+        r, ls, rv, lg = q("#600")
+        dt = time.time() - t0
+        check("#507: gh hanging past the deadline: no line, done in < 7 s",
+              r.returncode == 0 and not rv and ls and
+              ls[-1].get("done") is True and dt < 7, (dt, r.stdout[-300:]))
+        cfg = ENV["DCH_CONFIG"]
+        with open(cfg, "w") as f:
+            f.write("xray_github = false\n")
+        try:
+            r, ls, rv, lg = q("#1234")
+            check("#507: xray_github = false: no line, gh never runs",
+                  r.returncode == 0 and not rv and not lg and
+                  ls[-1].get("done") is True, (rv, lg))
+        finally:
+            os.unlink(cfg)
+        r, ls, rv, lg = q("#1234", env=dict(genv, DCH_NO_GITHUB="1"))
+        check("#507: DCH_NO_GITHUB=1 (the suite's guard): gh never runs",
+              not rv and not lg, (rv, lg))
+        # ---- #508: the disk cache of gh's answers
+        ent = os.path.join(ghd, "acme,widgets,1234")
+        r, ls, rv, lg = q("#1234")
+        check("#508: the first ask runs gh and writes the entry, dir 0700, "
+              "file 0600",
+              lg and os.path.isfile(ent) and
+              os.stat(ent).st_mode & 0o777 == 0o600 and
+              os.stat(ghd).st_mode & 0o777 == 0o700 and
+              sorted(os.listdir(ghd)) == ["acme,widgets,1234"],
+              (lg, os.listdir(ghd) if os.path.isdir(ghd) else None))
+        r, ls, rv2, lg = q("ACME/Widgets#1234", keep=True)
+        check("#508: a second --ref within the TTL (case variant): same "
+              "line, gh not run",
+              not lg and len(rv2) == 1 and rv2[0] == rv[0], (lg, rv2))
+        old = time.time() - 700
+        os.utime(ent, (old, old))
+        r, ls, rv2, lg = q("#1234", keep=True)
+        check("#508: an entry past 10 min: gh runs again, entry renewed",
+              lg and len(rv2) == 1 and time.time() - os.stat(ent).st_mtime
+              < 60, (lg, rv2))
+        neg = os.path.join(ghd, "acme,widgets,500")
+        r, ls, rv, lg = q("#500")
+        r2, ls, rv, lg2 = q("#500", keep=True)
+        check("#508: a negative answer is cached: gh asked once, no line",
+              lg and not lg2 and not rv and os.path.isfile(neg) and
+              open(neg).read() == "none", (lg, lg2))
+        os.utime(neg, (time.time() - 100, time.time() - 100))
+        r, ls, rv, lg = q("#500", keep=True)
+        check("#508: a none entry of 100 s still holds", not lg, lg)
+        os.utime(neg, (time.time() - 130, time.time() - 130))
+        r, ls, rv, lg = q("#500", keep=True)
+        check("#508: a none entry past 2 min asks again", bool(lg), lg)
+        r, ls, rv, lg = q("#600")
+        check("#508: a timeout is not cached",
+              not os.path.exists(os.path.join(ghd, "acme,widgets,600")), lg)
+        for label, mk in (
+                ("corrupt", lambda p: open(p, "w").write("{not json")),
+                ("symlinked", lambda p: os.symlink(
+                    os.path.join(T, "ghcache-target"), p))):
+            q("#1234")
+            tgt = os.path.join(T, "ghcache-target")
+            with open(tgt, "w") as f:
+                f.write('{"number":1234,"title":"Planted","state":"open",'
+                        '"kind":"issue"}')
+            os.unlink(ent)
+            mk(ent)
+            r, ls, rv, lg = q("#1234", keep=True)
+            check("#508: a %s entry is ignored (gh runs, the real title)"
+                  % label, lg and len(rv) == 1 and
+                  rv[0]["title"] != "Planted", (lg, rv))
+            if label == "corrupt":
+                check("#508: a corrupt entry is overwritten",
+                      open(ent).read().startswith("{\"number\":1234"),
+                      open(ent).read())
+            os.unlink(tgt)
+        if os.geteuid() == 0:
+            q("#1234")
+            os.chown(ent, 12345, 12345)
+            r, ls, rv, lg = q("#1234", keep=True)
+            check("#508: a foreign-owned entry is ignored", bool(lg), lg)
+        for label, env, cfgtxt in (
+                ("xray_github = false", genv, "xray_github = false\n"),
+                ("DCH_NO_GITHUB=1", dict(genv, DCH_NO_GITHUB="1"), None)):
+            if cfgtxt:
+                with open(ENV["DCH_CONFIG"], "w") as f:
+                    f.write(cfgtxt)
+            try:
+                q("#1234", env=env)
+                check("#508: %s: no cache dir, nothing written" % label,
+                      not os.path.exists(cache), label)
+            finally:
+                if cfgtxt:
+                    os.unlink(ENV["DCH_CONFIG"])
+    finally:
+        dch("-k", n)
 
 
 # ---- the sentinel test: a hostile repo runs nothing, fetches nothing -------

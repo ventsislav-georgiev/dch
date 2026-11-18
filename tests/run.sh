@@ -270,6 +270,8 @@ export DCH_CONFIG="$TMP/config"
 # -ls and the picker would probe the developer's tailnet peers (#087):
 # remote_client_test.py points dch at a loopback dch serve with --hosts.
 export DCH_NO_REMOTE=1
+# #507: no test reaches the real gh; xray_resolve_test.py's fake one unsets it
+export DCH_NO_GITHUB=1
 SOCKDIR="$TMP/dch-$(id -u)"
 mkdir -p "$SOCKDIR"
 

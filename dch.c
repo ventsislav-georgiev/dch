@@ -298,6 +298,9 @@ const struct dch_conf config_keys[] = {
 	/* #405: a ref the transcripts do not define, from a command */
 	{ "define_command", 0, "", NULL,
 	  "X-ray's definition of a ref from a command; empty: none" },
+	/* #507: #N, o/r#N and issue/pull URLs resolved by gh (read-only) */
+	{ "xray_github", 1, "true", NULL,
+	  "X-ray looks up GitHub issues and pull requests with gh" },
 };
 _Static_assert(sizeof config_keys / sizeof *config_keys == NCONF,
                "picker.h's NCONF counts config_keys");
@@ -13143,6 +13146,7 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 	struct xr_cand *v = NULL;
 	const char *swhy = NULL;
 	int m = 0, k, rc = 0, searched = 1, fd;
+	struct xr_ends ends = { 0 };
 	FILE *f = stdout;
 
 	if (!q->scope && !q->txt)
@@ -13169,6 +13173,7 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 		xr_search_group(f, s, session, sid, corpus, live, project, seen,
 		                why);
 	}
+	xr_ends_add(&ends, s, session, sid, 0);
 	xr_search_free(s);
 	for (k = 0; k < m && rc == 0; k++)
 	{
@@ -13187,6 +13192,8 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 			rc = xr_search_file(s, fd, (uint64_t)v[k].st.st_size,
 			                    (uint64_t)v[k].st.st_ino, v[k].codex);
 			close(fd);
+			if (rc == 0)
+				xr_ends_add(&ends, s, v[k].name, v[k].sid, k + 1);
 			if (rc == 0 && xr_search_hits(s) && q->txt)
 				xr_search_text(f, s, v[k].name, v[k].seen);
 			else if (rc == 0 && xr_search_hits(s))
@@ -13201,11 +13208,16 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 	}
 	free(v);
 	if (rc != 0)
+	{
+		xr_ends_free(&ends);
 		return xr_failed();
+	}
 	if (q->txt && swhy)
 		fprintf(f, "(stopped at the %s cap: %d sessions searched)\n",
 		        swhy, searched);
-	else if (!q->txt)
+	if (q->txt)
+		xr_ends_text(f, &ends);
+	else
 	{
 		fprintf(f, "],\"searched\":%d,\"partial\":%s,\"why\":", searched,
 		        swhy ? "true" : "false");
@@ -13213,8 +13225,10 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 			fprintf(f, "\"%s\"", swhy);
 		else
 			fputs("null", f);
+		xr_ends_json(f, &ends);
 		fputs("}\n", f);
 	}
+	xr_ends_free(&ends);
 	return xr_out_exit(fflush(f) == 0 && !ferror(f));
 }
 
@@ -16436,6 +16450,14 @@ xray_main(int argc, char **argv)
 
 	xr_t0 = xr_now_ms();
 	xr_noclock = getenv("DCH_XRAY_NOCLOCK") != NULL;	/* tests only */
+	{
+		char v[16];
+
+		/* DCH_NO_GITHUB=1: the suite's guard, as DCH_NO_REMOTE */
+		xr_res_github = !dch_env_on("DCH_NO_GITHUB") &&
+		                (!dch_config_get("xray_github", v, sizeof v) ||
+		                 dch_config_bool("xray_github"));
+	}
 	/* tests only: 3.8's --ref caps lowered, never raised (files, bytes,
 	** ms, the per-file head and tail, light's cwd walk) */
 	if ((e = getenv("DCH_XRAY_CAPS")))
