@@ -14327,6 +14327,15 @@ xr_clear(const struct xr_target *t)
 #define XF_RESET (-1)
 #define XF_TASKS_MS 5000L	/* --tasks: a tasks_command's run (#446) */
 #define XF_MEM_MS 30000L	/* --memory: the rows listed, memory_command */
+/* XF_MEM_MS; DCH_XRAY_MEVERY=<ms> lowers it, as for the view (tests only) */
+static long
+xf_mem_ms(void)
+{
+	const char *e = getenv("DCH_XRAY_MEVERY");
+	long ms = e ? atol(e) : 0;
+
+	return ms > 0 && ms < XF_MEM_MS ? ms : XF_MEM_MS;
+}
 
 #define XF_MEMRE_MS 1000L	/* --memory: the re-list after a dir event (#449) */
 enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8, XE_MEM = 16,
@@ -14906,7 +14915,7 @@ xf_cmd(struct xf *f, int b)
 	xf_job_kill(f, b);
 	free(f->cmdout[b]);
 	(void)xf_cmd_run(f, b, &f->cmdout[b]);
-	f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
+	f->at[b] = xr_now_ms() + (b ? xf_mem_ms() : XF_TASKS_MS);
 }
 
 /* A timed run (#461): in a child of ours, its answer back on a pipe the
@@ -15022,7 +15031,7 @@ xf_job_read(struct xf *f, int b)
 	else if (f->jn[b])
 		snprintf(f->warn[b], sizeof f->warn[b], "%s", f->jbuf[b] + 1);
 	xf_job_kill(f, b);	/* exited already: reaped */
-	f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
+	f->at[b] = xr_now_ms() + (b ? xf_mem_ms() : XF_TASKS_MS);
 	return 1;
 }
 
@@ -15218,7 +15227,7 @@ xf_blocks(struct xf *f, int all)
 		if (!(b ? f->memory : f->tasks) || (!all && f->cmdout[b]))
 			continue;
 		if (all && !f->cmd[b])
-			f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
+			f->at[b] = xr_now_ms() + (b ? xf_mem_ms() : XF_TASKS_MS);
 		if (!all && b && f->mtouched == xm_live_touched(f->cl ? f->cl->xm
 		                                             : NULL))
 			continue;
@@ -15283,7 +15292,7 @@ xf_side(struct xf *f)
 		if (due && f->cmd[1] && !xf_job(f, 1))
 			return 0;	/* the block when the run ends */
 		if (due)
-			f->at[1] = now + XF_MEM_MS;
+			f->at[1] = now + xf_mem_ms();
 		return xf_blk(f, 1, 0);
 	}
 	return 0;
