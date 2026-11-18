@@ -2023,7 +2023,7 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   (64 files, `why: "files"`) and its 10 s counted from dch's start
   (`why: "time"`), so the newest sessions come first and a cut drops the
   oldest. The answer is one object:
-  `{"schema":1,"session","session_id","text","scope","sessions":[…],"searched","partial","why"}`,
+  `{"schema":1,"session","session_id","text","scope","sessions":[…],"searched","partial","why","first","latest"}`,
   `searched` the files read, `partial`/`why` a cap that stopped it.
   `sessions` holds `<n>`'s group first (also with no hit), then each other
   session that has a hit, in the order read:
@@ -2042,12 +2042,27 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
     {"session":"cli","session_id":"9a…","corpus":"claude","live":false,"project":"-home-me-cli","last_active":1794200000,"turn_title":"the push retry thing again","hits":[…],"more":false,"partial":false,"why":null,"bytes":4096}],
    "searched":3,"partial":false,"why":null}
   ```
+- **First and latest (#505).** Both shapes (one session, and `--scope`) end
+  with `"first"` and `"latest"`: the oldest and newest hit across every
+  session searched, `{"session","session_id","turn_title","at","chapter","who","snippet"}`
+  (a `null` chapter or `session_id` gives `null`), or `null` when nothing
+  matched. For a selection that is not a ref ("where did this come up"): the
+  client shows the first and the last place without walking the groups. They
+  are the oldest and newest *kept* hit, not of all history: each session
+  keeps only its newest 50 turns (and 500 hits), and a cap that stopped the
+  search leaves later sessions out. Oldest is the smallest `at`; when either
+  hit has no `at` (or both are equal), the session read later is older (the
+  order is newest first), then the smaller `offset`. Hits are ranked, so this
+  never goes by position. The one-session object gets the two keys last,
+  after `bytes`; the other keys are as before.
 - **Text.** Without `--json` (a local `<n>` only; `host:name` still needs
   `--json`), `--search` prints text instead: per session a line with its
   name, its last activity in local time and its hit count (`, more` past a
   cap), then per turn its title (`(no turn title)` for none) and that turn's
   hits as `who[ tool]: snippet`, indented; a cap that stopped a scoped search
-  ends it with `(stopped at the files|time cap: N sessions searched)`.
+  ends it with `(stopped at the files|time cap: N sessions searched)`; the
+  last line is `first: <session> <time> <who>: <snippet> / latest: …` (`none`
+  for no hit).
 
 `--search` goes with no other flag but `--json` and `--scope` (`dch: bad
 usage: --search and --ref`, also with `--chapter`, `--clear` or `--follow`),

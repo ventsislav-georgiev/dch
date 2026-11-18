@@ -12831,13 +12831,145 @@ sr_put_hits(FILE *f, const struct xr_search *s, const char *why, int titled)
 	fprintf(f, "],\"more\":%s,\"partial\":%s,\"why\":",
 	        s->more ? "true" : "false", why ? "true" : "false");
 	put_or_null(f, why);
-	fprintf(f, ",\"bytes\":%llu}", (unsigned long long)s->bytes);
+	fprintf(f, ",\"bytes\":%llu", (unsigned long long)s->bytes);
+}
+
+/* ---- first and latest mention (#505) ---- */
+
+static void
+sr_end_free(struct xr_end *e)
+{
+	free(e->session), free(e->sid), free(e->title), free(e->chapter);
+	free(e->snip);
+	memset(e, 0, sizeof *e);
+}
+
+void
+xr_ends_free(struct xr_ends *e)
+{
+	sr_end_free(&e->first);
+	sr_end_free(&e->latest);
+}
+
+/* a older than b: by at when both have one and differ, else the session
+** searched later is older (xr_mapped goes newest first), then the smaller
+** offset */
+static int
+sr_end_older(const struct xr_end *a, const struct xr_end *b)
+{
+	if (a->at >= 0 && b->at >= 0 && a->at != b->at)
+		return a->at < b->at;
+	if (a->ord != b->ord)
+		return a->ord > b->ord;
+	return a->off < b->off;
+}
+
+static void
+sr_end_set(struct xr_end *e, const struct sr_hit *h, const char *session,
+           const char *sid, int ord)
+{
+	int ch = h->chapter[0] && !h->pend;
+
+	sr_end_free(e);
+	e->set = 1;
+	e->session = strdup(session ? session : "");
+	e->sid = sid && sid[0] ? strdup(sid) : NULL;
+	e->title = ch && h->title ? strdup(h->title) : NULL;
+	e->chapter = ch ? strdup(h->chapter) : NULL;
+	e->snip = strdup(h->snip ? h->snip : "");
+	e->at = h->at, e->off = h->off, e->ord = ord, e->who = h->who;
+}
+
+/* Fold s's hits (ranked, not by time) in; ord is the session's place in the
+** search, 0 first */
+void
+xr_ends_add(struct xr_ends *e, const struct xr_search *s, const char *session,
+            const char *sid, int ord)
+{
+	size_t k;
+
+	for (k = 0; k < s->n; k++)
+	{
+		const struct sr_hit *h = sr_shown(s, k);
+		struct xr_end x = { .at = h->at, .off = h->off, .ord = ord };
+
+		if (!e->first.set || sr_end_older(&x, &e->first))
+			sr_end_set(&e->first, h, session, sid, ord);
+		if (!e->latest.set || sr_end_older(&e->latest, &x))
+			sr_end_set(&e->latest, h, session, sid, ord);
+	}
+}
+
+static void
+sr_end_json(FILE *f, const struct xr_end *e)
+{
+	if (!e->set)
+	{
+		fputs("null", f);
+		return;
+	}
+	fputs("{\"session\":", f);
+	put_or_null(f, e->session);
+	fputs(",\"session_id\":", f);
+	put_or_null(f, e->sid);
+	fputs(",\"turn_title\":", f);
+	put_or_null(f, e->title);
+	fputs(",\"at\":", f);
+	put_at(f, e->at);
+	fputs(",\"chapter\":", f);
+	put_or_null(f, e->chapter);
+	fprintf(f, ",\"who\":\"%s\",\"snippet\":", sk_name[e->who]);
+	put_or_null(f, e->snip);
+	fputc('}', f);
+}
+
+/* the object's last two keys, no '}' */
+void
+xr_ends_json(FILE *f, const struct xr_ends *e)
+{
+	fputs(",\"first\":", f);
+	sr_end_json(f, &e->first);
+	fputs(",\"latest\":", f);
+	sr_end_json(f, &e->latest);
+}
+
+static void sr_put_plain(FILE *f, const char *s);
+
+static void
+sr_end_text(FILE *f, const struct xr_end *e)
+{
+	struct tm tm;
+	time_t t = (time_t)e->at;
+	char when[32] = "";
+
+	if (!e->set)
+	{
+		fputs("none", f);
+		return;
+	}
+	if (e->at > 0 && localtime_r(&t, &tm))
+		strftime(when, sizeof when, " %Y-%m-%d %H:%M", &tm);
+	sr_put_plain(f, e->session);
+	fprintf(f, "%s %s: ", when, sk_name[e->who]);
+	sr_put_plain(f, e->snip);
+}
+
+void
+xr_ends_text(FILE *f, const struct xr_ends *e)
+{
+	fputs("first: ", f);
+	sr_end_text(f, &e->first);
+	fputs(" / latest: ", f);
+	sr_end_text(f, &e->latest);
+	fputc('\n', f);
 }
 
 int
 xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                 const char *session_id, const char *corpus, const char *why)
 {
+	struct xr_ends e = { { 0 } };
+
 	fputs("{\"schema\":1,\"session\":", f);
 	xr_put_str(f, session);
 	fputs(",\"session_id\":", f);
@@ -12845,7 +12977,10 @@ xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 	fprintf(f, ",\"corpus\":\"%s\",\"text\":", corpus);
 	xr_put_str(f, s->text);
 	sr_put_hits(f, s, why, 0);
-	fputc('\n', f);
+	xr_ends_add(&e, s, session, session_id, 0);
+	xr_ends_json(f, &e);
+	xr_ends_free(&e);
+	fputs("}\n", f);
 	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
 }
 
@@ -12874,6 +13009,7 @@ xr_search_group(FILE *f, const struct xr_search *s, const char *session,
 	fputs(",\"turn_title\":", f);
 	put_or_null(f, h && h->chapter[0] && !h->pend ? h->title : NULL);
 	sr_put_hits(f, s, why, 1);
+	fputc('}', f);
 }
 
 /* s for a terminal: C0, DEL and C1 controls (U+0080-009F) as a space, so a

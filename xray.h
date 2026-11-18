@@ -617,8 +617,28 @@ int xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 void xr_search_rec(struct xr_search *s, const struct xr_shell *sh,
                    const struct xr_rec *x);
 void xr_search_ring_end(struct xr_search *s);
+/* First and latest hit over every session searched (#505): the oldest and
+** newest *kept* hit (each session keeps its newest turns). Oldest = smallest
+** at; when either at is null, or on a tie, the session searched later (ord
+** larger) is older, then the smaller offset. */
+struct xr_end
+{
+	char *session, *sid, *title, *chapter, *snip;
+	long long at;
+	uint64_t off;
+	int ord, who, set;
+};
+struct xr_ends
+{
+	struct xr_end first, latest;
+};
+void xr_ends_add(struct xr_ends *e, const struct xr_search *s,
+                 const char *session, const char *sid, int ord);
+void xr_ends_json(FILE *f, const struct xr_ends *e);	/* ,"first":…,"latest":… */
+void xr_ends_text(FILE *f, const struct xr_ends *e);	/* one line */
+void xr_ends_free(struct xr_ends *e);
 /* {"schema":1,"session","session_id","corpus","text","hits":[{"chapter",
-** "offset","at","who","tool","snippet"}…],"more","partial","why","bytes"}
+** "offset","at","who","tool","snippet"}…],"more","partial","why","bytes","first","latest"}
 ** and a newline; why (a shell's "range") when the caller knows the read was
 ** not whole. 0, -1 the write failed. */
 int xr_search_print(FILE *f, const struct xr_search *s, const char *session,

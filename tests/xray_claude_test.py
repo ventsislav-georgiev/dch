@@ -1234,7 +1234,7 @@ def test_write_fail():
 SSID = "11111111-2222-4333-8444-5555555555b1"
 SSID2 = "11111111-2222-4333-8444-5555555555b2"
 S_KEYS = ["schema", "session", "session_id", "corpus", "text", "hits",
-          "more", "partial", "why", "bytes"]
+          "more", "partial", "why", "bytes", "first", "latest"]
 H_KEYS = ["chapter", "offset", "at", "who", "tool", "snippet"]
 
 
@@ -3046,7 +3046,8 @@ def test_search_scope():
           "with hits (q3 has none: left out; q2 is another project)",
           rc == 0 and o and list(o) == ["schema", "session", "session_id",
                                         "text", "scope", "sessions",
-                                        "searched", "partial", "why"] and
+                                        "searched", "partial", "why",
+                                        "first", "latest"] and
           o["scope"] == "project" and o["session_id"] == sid(0) and
           [x["session"] for x in g] == ["q0", "q1"] and o["searched"] == 3 and
           o["partial"] is False, (rc, o, err))
@@ -3068,6 +3069,24 @@ def test_search_scope():
           [x["session"] for x in g] == ["q0", "q1", "q2"] and
           o["searched"] == 4 and g[2]["project"] == key(O) and
           g[2]["turn_title"] == "the push retry thing again", (rc, o, err))
+    # #505: q1 (user, at 11-11) is older than q2 (11-12); q0's assistant
+    # hit has no at, so session order decides and <n>'s own is the newest
+    E_KEYS = ["session", "session_id", "turn_title", "at", "chapter", "who",
+              "snippet"]
+    fl, la = o["first"], o["latest"]
+    check("search scope: first/latest across the groups (all: q1 oldest, "
+          "q0 newest), their keys",
+          fl and la and list(fl) == E_KEYS and list(la) == E_KEYS and
+          fl["session"] == "q1" and fl["session_id"] == sid(1) and
+          fl["turn_title"] == "why does push retry loop" and
+          fl["at"] == 1794391200 and fl["who"] == "user" and
+          fl["chapter"] and la["at"] is None and
+          la["session"] == "q0" and la["who"] == "assistant" and
+          la["snippet"] == "see the Push Retry note", (fl, la))
+    rc, o, err = run("--scope", "project", "--json")
+    check("search scope: project's first is q1",
+          rc == 0 and o["first"]["session"] == "q1" and
+          o["latest"]["session"] == "q0", (rc, o, err))
     for a in ((), ("--scope", "session")):
         rc, o, err = run(*a, "--json")
         check("search scope: %s stays <n>'s one object"
@@ -3077,7 +3096,8 @@ def test_search_scope():
     r = dch("--xray", "q0", "--search", "push retry", "--scope", "all",
             env=env)
     out = r.stdout.splitlines()
-    heads = [l.split()[0] for l in out if l and not l.startswith(" ")]
+    heads = [l.split()[0] for l in out if l and not l.startswith(" ")
+             and not l.startswith("first: ")]
     check("search scope: without --json, text: a line per session, its "
           "turns' titles, its hits",
           r.returncode == 0 and heads == ["q0", "q1", "q2"] and
@@ -3085,6 +3105,10 @@ def test_search_scope():
           "  why does push retry loop" in out and
           "    assistant: see the Push Retry note" in out,
           (r.returncode, r.stdout, r.stderr))
+    check("search scope: text ends with one first/latest line",
+          out[-1].startswith("first: q1 ") and
+          " user: why does push retry loop / latest: q0 assistant: see the "
+          "Push Retry note" in out[-1], out)
     rc, o, err = run("--scope", "all", "--json",
                      e=dict(env, DCH_XRAY_CAPS="2"))
     check("search scope: the files cap stops it, newest first (q0, then "

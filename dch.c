@@ -13143,6 +13143,7 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 	struct xr_cand *v = NULL;
 	const char *swhy = NULL;
 	int m = 0, k, rc = 0, searched = 1, fd;
+	struct xr_ends ends = { { 0 } };
 	FILE *f = stdout;
 
 	if (!q->scope && !q->txt)
@@ -13169,6 +13170,7 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 		xr_search_group(f, s, session, sid, corpus, live, project, seen,
 		                why);
 	}
+	xr_ends_add(&ends, s, session, sid, 0);
 	xr_search_free(s);
 	for (k = 0; k < m && rc == 0; k++)
 	{
@@ -13187,6 +13189,8 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 			rc = xr_search_file(s, fd, (uint64_t)v[k].st.st_size,
 			                    (uint64_t)v[k].st.st_ino, v[k].codex);
 			close(fd);
+			if (rc == 0)
+				xr_ends_add(&ends, s, v[k].name, v[k].sid, k + 1);
 			if (rc == 0 && xr_search_hits(s) && q->txt)
 				xr_search_text(f, s, v[k].name, v[k].seen);
 			else if (rc == 0 && xr_search_hits(s))
@@ -13201,11 +13205,16 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 	}
 	free(v);
 	if (rc != 0)
+	{
+		xr_ends_free(&ends);
 		return xr_failed();
+	}
 	if (q->txt && swhy)
 		fprintf(f, "(stopped at the %s cap: %d sessions searched)\n",
 		        swhy, searched);
-	else if (!q->txt)
+	if (q->txt)
+		xr_ends_text(f, &ends);
+	else
 	{
 		fprintf(f, "],\"searched\":%d,\"partial\":%s,\"why\":", searched,
 		        swhy ? "true" : "false");
@@ -13213,8 +13222,10 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 			fprintf(f, "\"%s\"", swhy);
 		else
 			fputs("null", f);
+		xr_ends_json(f, &ends);
 		fputs("}\n", f);
 	}
+	xr_ends_free(&ends);
 	return xr_out_exit(fflush(f) == 0 && !ferror(f));
 }
 
