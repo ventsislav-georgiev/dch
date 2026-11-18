@@ -6604,8 +6604,9 @@ put_json_str(const char *s)
 	free(q);
 }
 
-/* s[0..n) into out: at most cap-1 bytes cut between UTF-8 scalars, control
-** bytes and bytes that are no UTF-8 as spaces (#481, #482). */
+/* s[0..n) into out: at most cap-1 bytes cut between UTF-8 scalars, each
+** byte of a control character (C0, DEL, C1 U+0080-U+009F, as X-ray) and
+** each byte that is no UTF-8 as a space (#481, #482, #487). */
 static void
 cut_text(const char *s, size_t n, char *out, size_t cap)
 {
@@ -6617,10 +6618,13 @@ cut_text(const char *s, size_t n, char *out, size_t cap)
 		l = dch_utf8_len((const unsigned char *)s, (size_t)(e - s));
 		if (o + (l ? l : 1) >= cap)
 			break;
-		if (l && !((unsigned char)*s < 0x20 || *s == 0x7f))
-			memcpy(out + o, s, l), o += l;
+		if (!l)
+			out[o++] = ' ', l = 1;
+		else if ((unsigned char)*s < 0x20 || *s == 0x7f ||
+		         ((unsigned char)*s == 0xc2 && (unsigned char)s[1] < 0xa0))
+			memset(out + o, ' ', l), o += l;
 		else
-			out[o++] = ' ', l = l ? l : 1;
+			memcpy(out + o, s, l), o += l;
 	}
 	out[o] = '\0';
 }
@@ -6684,6 +6688,9 @@ mem_find(char *s, char *e, const char *nd, size_t nl)
 	return NULL;
 }
 
+/* Bytes line_ts and tx_shell read; shell_owner budgets subagent files'. */
+static size_t tx_read;
+
 /* The epoch of the first "timestamp":"YYYY-MM-DDTHH:MM:SS…" (UTC) past the
 ** first line start after `off` (`off` 0 is one), reading at most 1 MB;
 ** -1 none. Lines are not parsed: this only places a window. */
@@ -6700,6 +6707,7 @@ line_ts(int fd, off_t off)
 	{
 		if ((n = pread(fd, b, sizeof b - 1, o)) <= 40)
 			return -1;
+		tx_read += (size_t)n;
 		b[n] = '\0';
 		s = b;
 		if (skip && !(s = memchr(b, '\n', (size_t)n)))
@@ -6793,9 +6801,12 @@ tx_shell(const char *path, const char *id, time_t t, int *side, char *desc,
 	                             id);
 	long ts;
 
-	if (nl >= sizeof nd || (fd = open(path, O_RDONLY | O_CLOEXEC)) < 0)
+	/* O_NONBLOCK: a FIFO must not hang the open (#487) */
+	if (nl >= sizeof nd ||
+	    (fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
 		return 0;
-	if (fstat(fd, &st) || (!b && !(b = malloc(BACK + FWD + STEP + 1))))
+	if (fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+	    (!b && !(b = malloc(BACK + FWD + STEP + 1))))
 		goto out;
 	/* lo: a line start before t - 10 s (or the file's start) */
 	for (hi = st.st_size; hi - lo > 65536; )
@@ -6810,6 +6821,7 @@ tx_shell(const char *path, const char *id, time_t t, int *side, char *desc,
 	     (k = pread(fd, b + n, STEP, at + n)) > 0; )
 	{
 		n += k;
+		tx_read += (size_t)k;
 		b[n] = '\0';
 		while (!r && (m = mem_find(m, b + n, nd, nl)))
 		{
@@ -6875,7 +6887,12 @@ struct sub { char id[64]; time_t mt; };
 ** desc as tx_shell. Only subagent files written since t can hold the
 ** result, finished subagents included (a background shell outlives its
 ** agent). sv[*ns] lists them once per conversation (*ns < 0: not yet),
-** those written since tmin, the oldest shell's start. */
+** those written since tmin, the oldest shell's start. Their windows share
+** one budget per process (one --ls-json): SUB_BUDGET bytes, then shells
+** not found yet are left unknown (#487: shells x files x ~1 MB took 7 s). */
+enum { SUB_BUDGET = 16 << 20 };
+static size_t sub_read;
+
 static int
 shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
             struct sub *sv, int *ns, char *agent, char *adesc, size_t adcap,
@@ -6887,7 +6904,8 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 	struct stat st;
 	size_t l = strlen(tp), el;
 	ssize_t n;
-	int side, fd, i;
+	int side, fd, i, hit = 0;
+	size_t r0;
 	DIR *d;
 
 	if (tx_shell(tp, id, t, &side, desc, dcap))
@@ -6913,19 +6931,25 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 			}
 		closedir(d);
 	}
-	for (i = 0; i < *ns; i++)
+	for (i = 0; i < *ns && sub_read < SUB_BUDGET; i++)
 		if (sv[i].mt >= t && snprintf(f, sizeof f, "%s/agent-%s.jsonl", dir,
-		                              sv[i].id) < (int)sizeof f &&
-		    tx_shell(f, id, t, &side, desc, dcap))
-			break;
-	if (i >= *ns)
+		                              sv[i].id) < (int)sizeof f)
+		{
+			r0 = tx_read;
+			hit = tx_shell(f, id, t, &side, desc, dcap);
+			sub_read += tx_read - r0;
+			if (hit)
+				break;
+		}
+	if (!hit)
 		return 0;
 	memcpy(agent, sv[i].id, sizeof sv->id);
 	*adesc = '\0';
 	snprintf(f, sizeof f, "%s/agent-%s.meta.json", dir, agent);
-	if ((fd = open(f, O_RDONLY | O_CLOEXEC)) >= 0)
+	if ((fd = open(f, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) >= 0)
 	{
-		if ((n = read(fd, meta, sizeof meta - 1)) > 0)
+		if (!fstat(fd, &st) && S_ISREG(st.st_mode) &&
+		    (n = read(fd, meta, sizeof meta - 1)) > 0)
 		{
 			meta[n] = '\0';
 			if (dch_json_parse(&p, meta) == 0)

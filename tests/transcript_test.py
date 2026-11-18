@@ -27,6 +27,11 @@ fixture transcripts: main's (agent null) found by a binary search in a
 file past one read window, a subagent's (agentId, its meta description),
 descriptions cut on a UTF-8 boundary, and agent/description/background
 left out for a shell named only by a malformed or unfinished line.
+#487: C1 controls as spaces (a byte each); a sidechain line in the main
+file without "agent"; a subagent file older than the shell, or whose
+complete last line has no newline yet, not taken; FIFOs as a subagent file
+or meta skipped at once; 32 unnamed shells x 250 x 1.2 MB subagent files
+under 2 s (the per-call read budget).
 
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
@@ -397,6 +402,116 @@ def main():
             check("keys in order after command (%s)" % keys, keys == [
                 "id", "pid", "started", "command", "agent",
                 "agent_description", "description", "background"])
+
+            # --- #487: C1 controls, edge rows, FIFOs, a bounded cost ------
+            # C1 controls (U+0085, U+009B) as spaces, one per byte as X-ray
+            p9 = shell("bsh9c1", "'echo \u0085x\u009by; sleep 120'")
+            p10 = shell("bsh10side", "'sleep 120'")
+            p11 = shell("bsh11old", "'sleep 120'")
+            p12 = shell("bsh12part", "'sleep 120'")
+            p13 = shell("bsh13fifo", "'sleep 120'")
+            p14 = shell("bsh14meta", "'sleep 120'")
+            t9, t10, t11, t12, t14 = (started(p) for p in
+                                      (p9, p10, p11, p12, p14))
+            with open(stp, "w") as f:	# the new results before the tail
+                f.write(filler(t6 - 3600, 3000))
+                f.write(call("toolu_m6", t6, "Run the main build"))
+                f.write(result("toolu_m6", "bsh6main", t6))
+                f.write(call("toolu_c9", t9, "c\u0085d\u009be"))
+                f.write(result("toolu_c9", "bsh9c1", t9))
+                # a sidechain line in the main file: no agent key (mside)
+                f.write(call("toolu_s10", t10, "Side", "aSIDE"))
+                f.write(result("toolu_s10", "bsh10side", t10, "aSIDE"))
+                f.write(filler(t14 + 30, 2000))
+            # its result in a file last written before it started (mmtime)
+            old = os.path.join(sub, "agent-aOLD3.jsonl")
+            with open(old, "w") as f:
+                f.write(call("toolu_o11", t11, "Old", "aOLD3"))
+                f.write(result("toolu_o11", "bsh11old", t11, "aOLD3"))
+            os.utime(old, (t11 - 1, t11 - 1))
+            # a complete JSON last line with no newline yet (mpartial)
+            with open(os.path.join(sub, "agent-aPART.jsonl"), "w") as f:
+                f.write(call("toolu_p12", t12, "Part", "aPART"))
+                f.write(result("toolu_p12", "bsh12part", t12,
+                               "aPART").rstrip("\n"))
+            # FIFOs as a subagent file and as a meta (only the user can)
+            with open(os.path.join(sub, "agent-aMF.jsonl"), "w") as f:
+                f.write(call("toolu_f14", t14, "Meta fifo", "aMF"))
+                f.write(result("toolu_f14", "bsh14meta", t14, "aMF"))
+            fifos = [os.path.join(sub, "agent-aFIFO.jsonl"),
+                     os.path.join(sub, "agent-aMF.meta.json")]
+            for q in fifos:
+                os.mkfifo(q)
+            t0 = time.time()
+            try:
+                out = subprocess.run([DCH, "--ls-json"], capture_output=True,
+                                     text=True, timeout=10).stdout
+            except subprocess.TimeoutExpired:
+                out = "[]"
+            took = time.time() - t0
+            for q in fifos:	# a hung base binary must not hang the rest
+                os.unlink(q)
+            got = {}
+            for r in json.loads(out or "[]"):
+                if r.get("name") == h:
+                    got = {s["id"]: s for s in r.get("shells", [])}
+            base = {s: {"id": s, "pid": p, "started": started(p),
+                        "command": "sleep 120"} for s, p in
+                    (("bsh10side", p10), ("bsh11old", p11),
+                     ("bsh12part", p12), ("bsh13fifo", p13),
+                     ("bsh14meta", p14))}
+            check("FIFOs named agent-<id>.jsonl and .meta.json: --ls-json "
+                  "returns at once (%.2f s)" % took, took < 5)
+            check("C1 controls as spaces, one per byte, in command and "
+                  "description (%s)" % got.get("bsh9c1"),
+                  got.get("bsh9c1") == {
+                      "id": "bsh9c1", "pid": p9, "started": t9,
+                      "command": "echo   x  y; sleep 120", "agent": None,
+                      "description": "c  d  e", "background": True})
+            check("a sidechain line in the main file: no agent key (%s)"
+                  % got.get("bsh10side"),
+                  got.get("bsh10side") == dict(base["bsh10side"],
+                                               description="Side",
+                                               background=True))
+            check("a subagent file older than the shell: not searched (%s)"
+                  % got.get("bsh11old"),
+                  got.get("bsh11old") == base["bsh11old"])
+            check("a complete last line with no newline yet: not taken (%s)"
+                  % got.get("bsh12part"),
+                  got.get("bsh12part") == base["bsh12part"])
+            check("a FIFO subagent file: no keys (%s)" % got.get("bsh13fifo"),
+                  got.get("bsh13fifo") == base["bsh13fifo"])
+            check("a FIFO meta: agent and description, no agent_description "
+                  "(%s)" % got.get("bsh14meta"),
+                  got.get("bsh14meta") == dict(base["bsh14meta"],
+                                               agent="aMF",
+                                               description="Meta fifo",
+                                               background=True))
+
+            # cost bounded per call (#487): 32 shells no transcript names x
+            # 250 subagent files of 1.2 MB, every line since they started
+            # (hard links: one file on disk). 1.102.0 read ~1 MB a pair.
+            big = [shell("bsz%02d" % k, "'sleep 120'") for k in range(32)]
+            src = os.path.join(tmp, "big.jsonl")
+            with open(src, "w") as f:
+                f.write(filler(started(big[-1]), 1200))
+            for k in range(250):
+                os.link(src, os.path.join(sub, "agent-aBIG%03d.jsonl" % k))
+            run("--ls-json")	# warm the page cache
+            t0 = time.time()
+            out = run("--ls-json").stdout
+            took = time.time() - t0
+            got = {}
+            for r in json.loads(out or "[]"):
+                if r.get("name") == h:
+                    got = {s["id"]: s for s in r.get("shells", [])}
+            # ASan (the nightly) runs slower; 1.102.0 took 8 s unsanitized
+            lim = 6 if "ASAN_OPTIONS" in os.environ else 2
+            check("32 unnamed shells x 250 subagent files: --ls-json in "
+                  "%.2f s (< %d s), main's shell still found" % (took, lim),
+                  took < lim and got.get("bsh6main", {}).get("agent",
+                                                           MISSING) is None
+                  and len(got) >= 38)
             os.unlink(os.path.join(sessdir, "%d.json" % hp))
             check("its record gone: no shells key", field(h, "shells") ==
                   MISSING)
