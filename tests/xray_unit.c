@@ -5355,6 +5355,27 @@ t_d3(void)
 
 /* ---- --search (#297) ------------------------------------------------------ */
 
+static int search_raw;	/* set: search_of keeps #505/#506's keys */
+
+/* b as before #505/#506, in place: no hit's "answer", no "first"/"latest"
+** (their rows are search: first, latest and answer below and the CLI's) */
+static char *
+search_v1(char *b)
+{
+	char *p, *q;
+
+	if (!b)
+		return b;
+	while ((p = strstr(b, ",\"answer\":")))
+	{
+		q = p + 10 + (p[10] == 't' ? 4 : 5);
+		memmove(p, q, strlen(q) + 1);
+	}
+	if ((p = strstr(b, ",\"first\":")))
+		strcpy(p, "}\n");
+	return b;
+}
+
 /* body into an unlinked temp file searched for text: the printed object
 ** (malloc'd), NULL on a failure */
 static char *
@@ -5386,7 +5407,7 @@ search_of(const char *body, size_t n, const char *text, int codex)
 		free(b);
 		return NULL;
 	}
-	return b;
+	return search_raw ? b : search_v1(b);
 }
 
 static int
@@ -5541,6 +5562,17 @@ t_search(void)
 		                  "\"why\":null,\"bytes\":"));
 		if (fails > f0)
 			fprintf(stderr, "  got: %s", o ? o : "(null)\n");
+		free(o);
+		search_raw = 1;
+		o = search_of(t, sizeof t - 1, "nEeDlE", 0);
+		search_raw = 0;
+		CHECK("search: answer, first, latest: the assistant's text the one "
+		      "answer of four hits, the ends after the groups",
+		      o && count_of(o, "\"answer\":true") == 1 &&
+		      count_of(o, "\"answer\":false") == 3 &&
+		      strstr(o, "\"snippet\":\"NEEDLE one, needle two\","
+		                "\"answer\":true}") &&
+		      strstr(o, ",\"first\":{") && strstr(o, ",\"latest\":{"));
 		free(o);
 		static const char *const never[] = {"think1", "tur1", "side1",
 		                                    "sum1", "sum2", "meta1"};
@@ -5951,6 +5983,7 @@ t_search(void)
 			{
 				xr_search_print(f, s, "s", "m1", "shell", NULL);
 				fclose(f);
+				search_v1(b);
 			}
 		}
 		/* the second block's prompt record is r[37]: s537 */
@@ -6020,6 +6053,7 @@ t_search(void)
 			{
 				xr_search_print(f, s, "s", "m1", "shell", NULL);
 				fclose(f);
+				search_v1(b);
 			}
 		}
 		CHECK("search: shell: 60 blocks of 2 hits: the newest 50 blocks' "
@@ -6086,6 +6120,7 @@ t_search(void)
 			{
 				xr_search_print(f, s, "s", "m1", "shell", NULL);
 				fclose(f);
+				search_v1(b);
 			}
 		}
 		CHECK("search: shell: the cap on a block boundary keeps 20 whole "
