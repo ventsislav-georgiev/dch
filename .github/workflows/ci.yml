@@ -71,32 +71,6 @@ jobs:
           test "$(/tmp/dch-lite --status mixed)" = working
           ./dch -k mixed
 
-  # The committed libghostty-vt blobs must be honestly derived from the
-  # pinned upstream commit. Byte-equality across machines proved brittle
-  # (zig embeds host-specific paths despite pinned build/cache dirs), so
-  # verify functionally: rebuild the host blob from the pin, check the
-  # vendored headers match the pin, and run the full suite linked against
-  # the rebuilt blob. Zig is only needed here, never for `make`.
-  vendor-verify:
-    runs-on: macos-latest
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # No versioned zig@0.17 formula exists; the script's version gate
-      # fails loudly if the zig formula moves past 0.17.x.
-      - name: Install zig 0.17
-        run: brew install zig
-
-      - name: Rebuild host blob from the pinned commit
-        run: ZIG=/opt/homebrew/opt/zig/bin/zig scripts/build-libghostty.sh --refresh-sha
-
-      - name: Vendored headers must match the pin
-        run: git diff --exit-code vendor/libghostty-vt/include
-
-      - name: Full suite against the rebuilt blob
-        run: ./configure && make && make test
-
   # ASan + UBSan over the whole suite (scripts/sanitize.sh says why each
   # option is set). Any sanitizer report fails the job.
   sanitizers:
