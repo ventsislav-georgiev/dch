@@ -82,8 +82,8 @@ def fixture_narrow():
 def test_narrow_2space():
     """#504 UN1: a cut between two spaces leads with neither a space nor a mark."""
     bad = []
-    for cols in (40, 41, 42):
-        row, text = narrow_row("xv-nw2s", cols)
+    for cols, (row, text) in zip((40, 41, 42),
+                                 narrow_rows("xv-nw2s", (40, 41, 42))):
         m = re.search(ELL + "(.)", row)
         if not (m and m.group(1) == "c" and "so #412" in row):
             bad.append((cols, row))
@@ -96,8 +96,8 @@ def test_narrow_chain():
     bad = []
     for name, want in (("xv-nwch", "\u0301cc \u0301dd so #412"),
                        ("xv-nwch1", "\u0301e \u0301f \u0301g so #412")):
-        for cols in (40, 50, 60):
-            row, text = narrow_row(name, cols)
+        for cols, (row, text) in zip((40, 50, 60),
+                                     narrow_rows(name, (40, 50, 60))):
             m = re.search(ELL + "(.)", row)
             if not (m and m.group(1) not in " \u0301" and want in row):
                 bad.append((name, cols, row))
@@ -141,8 +141,7 @@ def emoji_cells(s):
 
 def test_narrow_emoji():
     """#496: VS16 emoji and keycaps take two cells; no row passes the width."""
-    for cols in (40, 50):
-        row, text = narrow_row("xv-nwe", cols)
+    for cols, (row, text) in zip((40, 50), narrow_rows("xv-nwe", (40, 50))):
         wide = [l for l in text.split("\n") if emoji_cells(l) > cols]
         check("#496: at %d columns no row of an emoji run is wider than the "
               "window and #412 shows" % cols, not wide and "so #412" in row,

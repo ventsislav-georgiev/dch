@@ -31,8 +31,8 @@ def test_narrow_keyflag():
     """#495: no lone keycap mark, no flag re-paired by the cut."""
     bad = []
     for name, first in (("xv-nwk", "1"), ("xv-nwf", "\U0001f1e7")):
-        for cols in (40, 47, 54, 60):
-            row, text = narrow_row(name, cols)
+        for cols, (row, text) in zip((40, 47, 54, 60), narrow_rows(
+                name, (40, 47, 54, 60))):
             m = re.search(ELL + "(.)", row)
             if not (m and m.group(1) == first and "so #412" in row):
                 bad.append((name, cols, m and m.group(1)))

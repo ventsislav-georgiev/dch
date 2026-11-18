@@ -31,6 +31,8 @@ def fixture_dup():
         for o in turn("live: see #412", "2026-11-18T10:00:00Z",
                       at(say("ok live"), "2026-11-18T10:01:00Z")):
             f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) + "\n")
+    old = time.time() - 600
+    os.utime(tl(DSIDS[4], "-home-demo-dup"), (old, old))
     dch("--spawn", "xv-dc", "/bin/sleep", "300")
     pid = until(lambda: json.loads(dch("--cmd", "xv-dc").stdout or "{}")
                 .get("pid"), 5)
@@ -39,7 +41,9 @@ def fixture_dup():
                            env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
     sd = os.path.join(HOME, ".claude", "sessions")
     os.makedirs(sd, exist_ok=True)
-    now = int(time.time() * 1000)
+    # ten minutes back: a live age of "now" is short enough to stay at 30
+    # columns, so the 30-column row needs it past "now"
+    now = int(time.time() * 1000) - 600000
     with open(os.path.join(sd, "%d.json" % pid), "w") as f:
         json.dump({"pid": pid, "sessionId": DSIDS[4], "cwd": cwd,
                    "procStart": start, "version": "2.1.0",
@@ -51,7 +55,8 @@ def dup_card(cols):
     """xv-da's card, full scan, at cols columns: the Pty and its screen."""
     v = Pty([DCH, "--xray", "xv-da"], rows=40, cols=cols,
             env={"TMPDIR": TPD + "/", "NO_COLOR": ""})
-    v.wait(b"Prompts 1")
+    # the count has its own SGR: read the screen, not the raw bytes
+    until(lambda: (v.pump(0.1), "Prompts 1" in screen(v, 0))[1], 10)
     v.pump(0.5)
     for _ in range(6):
         if "[Refs" in rows(v.out).get(2, ""):
@@ -65,6 +70,15 @@ def dup_card(cols):
     until(lambda: (v.pump(0.1), "in 3 sessions" in screen(v, mark))[1], 10)
     v.pump(0.5)
     return v
+
+
+def dup_resize(v, cols):
+    """Draw xv-da's filtered card again at cols columns, on the same Pty."""
+    v.resize(40, cols)
+    mark = len(v.out)
+    v.wait(b"also discussed in", start=mark)
+    v.pump(0.5)
+    return mark
 
 
 def test_dup():
@@ -101,34 +115,27 @@ def test_dup():
         v.exit()
     finally:
         v.close()
-    for cols in (34, 36, 40):
-        v = dup_card(cols)
-        try:
-            text = screen(v, 0)
+    # one Pty for the narrow cards and the last wide one, resized; opened at
+    # 30 columns: a resized card keeps the live header's age there (a fresh
+    # one drops it), so the 30-column row needs the first draw at 30
+    v = dup_card(30)
+    try:
+        # #493: the age goes first, the name stays whole; a header whose
+        # transcript is gone says so, never the engine's "no x-ray corpus"
+        text = screen(v, 0)
+        check("#493: at 30 columns xv-dc's ended header keeps its whole name "
+              "and drops the age", re.search(r"discussed in xv-dc$", text,
+              re.M) and "xv-dc," not in text, text)
+        for cols in (34, 36, 40):
+            text = screen(v, dup_resize(v, cols))
             m = re.search(r"also discussed in (xv-db\S*?)(\u2026)?(,|\s*$)",
                           text, re.M)
             check("LOW-UK2: the header at %d columns shows a name, a cut "
                   "one marked with an ellipsis" % cols, m is not None and
                   DLONG.startswith(m.group(1)) and len(m.group(1)) > 3 and
                   (m.group(1) == DLONG or m.group(2) == "\u2026"), text)
-            v.key(b"q")
-            v.key(b"q")
-            v.exit()
-        finally:
-            v.close()
-    # #493: the age goes first, the name stays whole; a header whose
-    # transcript is gone says so, never the engine's "no x-ray corpus"
-    v = dup_card(30)
-    try:
-        text = screen(v, 0)
-        check("#493: at 30 columns xv-dc's ended header keeps its whole name "
-              "and drops the age", re.search(r"discussed in xv-dc$", text,
-              re.M) and "xv-dc," not in text, text)
-    finally:
-        v.close()
-    # a status line of 30 columns cuts the sentence: the wide card
-    v = dup_card(100)
-    try:
+        # a status line of 30 columns cuts the sentence: the wide card
+        dup_resize(v, 100)
         os.unlink(tl(DSIDS[3], "-home-demo-dup"))
         for _ in range(12):
             if any("\u258c" in l and re.search(r"discussed in xv-dc, \d+d", l)
