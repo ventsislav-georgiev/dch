@@ -400,6 +400,9 @@ sys.exit(0 if min(m) - min(c) < 0.08 else 1)
 xsrc=$(cd "$(dirname "$0")/.." && pwd)
 xcc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
 xcc=${xcc:-cc}
+pyrun "the --xray view: twin names in one project, ended twins, a renamed live session (#493)" xray_view_dup_test.py
+pyrun "the --xray view: narrow Reply rows over CJK, marks and emoji (#483, #488, #494, #496)" xray_view_narrow_test.py
+pyrun "the --xray view: narrow Reply rows over keycaps and flags (#495)" xray_view_narrow_keys_test.py
 pyrun "the --xray view: tabs, card, reader, hostile text, Refs, look-up, order, temp files, live Memory" xray_view_test.py
 pyrun "the --xray view: auto rows, compact, Responses, Codex tasks, Search" xray_view_turns_test.py
 pyrun "the --xray view: Tasks, Memory, a hit's place, twin hits, the tab bar" xray_view_tasks_test.py
