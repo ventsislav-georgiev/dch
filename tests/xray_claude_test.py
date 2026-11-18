@@ -3043,8 +3043,19 @@ def test_search_scope():
           rc == 0 and o and o["searched"] == 2 and o["partial"] is True and
           o["why"] == "files" and
           [x["session"] for x in o["sessions"]] == ["q0"], (rc, o, err))
-    rc, o, err = run("--scope", "all", "--json",
-                     e=dict(env, DCH_XRAY_CAPS="0:0:1"))
+    # the text comes on stdin 50 ms late, so the 1 ms budget (counted from
+    # dch's start) is spent before any other session, on any machine
+    p = subprocess.Popen([DCH, "--xray", "q0", "--search", "-", "--scope",
+                          "all", "--json"], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, env=dict(env, DCH_XRAY_CAPS="0:0:1"))
+    time.sleep(0.05)
+    out, err = p.communicate("push retry", timeout=30)
+    rc = p.returncode
+    try:
+        o = json.loads(out)
+    except ValueError:
+        o, err = None, out + err
     check("search scope: the time budget (from dch's start) stops it, "
           "partial why time",
           rc == 0 and o and o["partial"] is True and o["why"] == "time" and
