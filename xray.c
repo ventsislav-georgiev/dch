@@ -4618,8 +4618,12 @@ ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
 			while (lo < s && (adv = xr_u8_cont(l + lo, s - lo)))
 				lo += adv;
 			lo += xr_ri2(l, lo, s);
-			while (lo < s && sent_brk(l, lo))
-				lo++;
+			/* and a C1 control, drawn as spaces (#504) */
+			while (lo < s && (sent_brk(l, lo) || (lo + 1 < s &&
+			       (unsigned char)l[lo] == 0xc2 &&
+			       (unsigned char)l[lo + 1] >= 0x80 &&
+			       (unsigned char)l[lo + 1] < 0xa0)))
+				lo += sent_brk(l, lo) ? 1 : 2;
 		} while (lo != l0);
 		/* the right before the word it ends in, past the ref (whole when
 		** kept, else cut on a scalar) */
@@ -11314,7 +11318,7 @@ xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
 ** worktree in <repo>/.claude/worktrees/<name> has that one ".claude" part
 ** lifted, on both paths (res_lift, #184, QA 1.57.0 MED-D1). */
 static int
-res_file(const char *key, const char *text, const char *cwd,
+res_file(const char *key, const char *text, const char *cwd, int light,
          struct xr_resolved *r)
 {
 	char p[PATH_MAX], root[PATH_MAX], rp[PATH_MAX], rr[PATH_MAX];
@@ -11364,6 +11368,12 @@ res_file(const char *key, const char *text, const char *cwd,
 	** a helper process could bound an uninterruptible wait, and it would be
 	** left stuck instead; an interruptible one ends with the caller's
 	** SIGTERM, and res_root has already walked the same mount */
+	if (lstat(p, &st) != 0 && light && errno == ENOENT)
+	{
+		/* #500: its own state, so a client need not parse the subtitle */
+		res_set(r, "missing", "Missing");
+		return 1;
+	}
 	if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode))
 		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
 	if (!realpath(p, rp) || !rr[0])
@@ -11379,6 +11389,22 @@ res_file(const char *key, const char *text, const char *cwd,
 	if (xr_secret_at(rp, lr) || res_home_deny(rp))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
+		return 1;
+	}
+	if (light)
+	{
+		/* #500: stat alone, the file is never opened */
+		struct tm tm;
+		char when[40];
+
+		gmtime_r(&st.st_mtime, &tm);
+		strftime(when, sizeof when, "%Y-%m-%d %H:%M UTC", &tm);
+		snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
+		         " \xc2\xb7 modified %s", when);
+		res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
+		res_text(r->title, strrchr(p, '/') + 1, strlen(strrchr(p, '/') + 1),
+		         XR_TITLE_MAX);
+		r->state = "ok";
 		return 1;
 	}
 	if ((uint64_t)st.st_size > XR_RES_FILE)
@@ -11427,9 +11453,9 @@ res_file(const char *key, const char *text, const char *cwd,
 	return 1;
 }
 
-int
-xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
-           int live, struct xr_resolved *r)
+static int
+res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+        int live, int light, struct xr_resolved *r)
 {
 	memset(r, 0, sizeof *r);
 	if (sp->shape == XR_COMMIT)
@@ -11450,11 +11476,19 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 		                  u && strlen(sp->full) < 40 ? gh : NULL, r);
 	}
 	if (sp->shape == XR_FILE)
-		return res_file(xr_span_text(sp), text, cwd ? cwd : "", r);
+		return res_file(xr_span_text(sp), text, cwd ? cwd : "", light, r);
 	return 0;
 }
 
-/* light: a commit only, and only an ok one (#502: no noise) */
+int
+xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+           int live, struct xr_resolved *r)
+{
+	return res_ref(sp, text, cwd, live, 0, r);
+}
+
+/* light: a commit, only an ok one (#502: no noise); a file by stat alone,
+** ok or missing (#500) */
 static void
 res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
          const char *cwd, int live, int light)
@@ -11469,8 +11503,9 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 
 	if (x->cancel || x->out_full || !(r = malloc(sizeof *r)))
 		return;
-	if (xr_res_ref(sp, text, cwd, live, r) &&
-	    (!light || !strcmp(r->state, "ok")) && (m = ln_open(&b, &bl)))
+	if (res_ref(sp, text, cwd, live, light, r) &&
+	    (!light || !strcmp(r->state, "ok") ||
+	     !strcmp(r->state, "missing")) && (m = ln_open(&b, &bl)))
 	{
 		fputs("{\"schema\":1,\"resolved\":{\"kind\":", m);
 		xr_put_str(m, r->kind);
@@ -11481,7 +11516,7 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 		fputs(",\"subtitle\":", m);
 		xr_put_str(m, r->subtitle);
 		/* which row is line N, even clamped at the end; only a file shown */
-		if (!strcmp(r->kind, "file") && !strcmp(r->state, "ok"))
+		if (!light && !strcmp(r->kind, "file") && !strcmp(r->state, "ok"))
 			fprintf(m, ",\"first\":%ld", r->first);
 		fputs(",\"lines\":[", m);
 		for (k = 0; k < r->nlines; k++)
@@ -11508,10 +11543,10 @@ xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 }
 
 void
-xr_scan_commit(struct xr_scan *x, const struct xr_span *sp, const char *text,
-               const char *cwd, int live)
+xr_scan_light(struct xr_scan *x, const struct xr_span *sp, const char *text,
+              const char *cwd, int live)
 {
-	if (!x->full && live && sp->shape == XR_COMMIT)
+	if (!x->full && live && (sp->shape == XR_COMMIT || sp->shape == XR_FILE))
 		res_scan(x, sp, text, cwd, live, 1);
 }
 
@@ -11573,17 +11608,29 @@ struct sr_hit
 	char *tool, *snip;
 	char *title;		/* its chapter's title (#498), NULL for none */
 	char chapter[40];
+	int exact;		/* the phrase itself (#499): ranked first */
+};
+
+/* A query word (#499): text[off..off+len), its stem text[off..off+k) and c
+** (a 'y' or 0, sr_stem), its root text[off..off+rl) (the stem without a
+** last 'y': what every form holds). lit: matched as is (a quoted query).
+** The raw prefilter on the root: the longest run JSON writes as is (no '"',
+** '\\' or '/'), and for a root with non-ASCII, which a writer may escape as
+** \uXXXX, its longest plain-ASCII run in a line that holds "\u". */
+struct sr_word
+{
+	uint8_t off, len, k, rl, run, runl, asc, ascl;
+	char c, lit, nonascii;
 };
 
 struct xr_search
 {
 	char text[XR_SEARCH_MAX + 1];
 	size_t tl;
-	/* the raw prefilter: the longest run JSON writes as is (no '"', '\\'
-	** or '/'), and for a text with non-ASCII, which a writer may escape as
-	** \uXXXX, its longest plain-ASCII run in a line that holds "\u" */
-	size_t run, runl, asc, ascl;
-	int nonascii;
+	size_t po, pl;		/* the phrase: the text trimmed, or unquoted */
+	struct sr_word w[XR_SEARCH_MAX / 2 + 1];
+	size_t nw;
+	int quoted;
 	struct sr_hit hit[SR_SLOTS];
 	size_t n, h0;		/* a shell's are a ring from h0, oldest first */
 	uint64_t total, bytes;
@@ -11602,11 +11649,194 @@ struct xr_search
 	char lch[40];
 };
 
+#define SR_STEM_MIN 3		/* a fold never leaves a shorter stem */
+
+/* w[0..j) holds a vowel (a e i o u y); a stem of 6 bytes or more is taken
+** to (O(1) on a long run) */
+static int
+sr_vowel(const char *w, size_t j)
+{
+	size_t i;
+
+	for (i = 0; i < j && i < 6; i++)
+		if (strchr("aeiouy", fold((unsigned char)w[i])))
+			return 1;
+	return j >= 6;
+}
+
+/* The stem of w[0..n) (#499): its first *k bytes, then the returned byte
+** ('y', or 0 for none). ASCII letters folded; a word that does not end in
+** a letter is its own stem. First rule that fits, the stem left at least
+** SR_STEM_MIN bytes: -ies/-ied to -y (retries, retried: retry); -es after
+** s x z ch sh (pushes: push); -ing, -ed (not -eed) when the stem holds a
+** vowel (pushing, pushed: push; string, shred stay), a doubled consonant
+** but l s z then one (stopped: stop); -s but -ss -us -is (files: file).
+** Then a last 'e' goes (file, files, filed: fil; make, making: mak).
+** Only the word's end is read. */
+static int
+sr_stem(const char *w, size_t n, size_t *k)
+{
+	size_t j = n;
+	int d = 0;
+
+#define SL(i) fold((unsigned char)w[i])
+	*k = n;
+	if (!n || !A_LO(SL(n - 1)))
+		return 0;
+	if (n >= SR_STEM_MIN + 2 && SL(n - 3) == 'i' && SL(n - 2) == 'e' &&
+	    (SL(n - 1) == 's' || SL(n - 1) == 'd'))
+	{
+		*k = n - 3;
+		return 'y';
+	}
+	if (n >= SR_STEM_MIN + 2 && SL(n - 2) == 'e' && SL(n - 1) == 's' &&
+	    (strchr("sxz", SL(n - 3)) ||
+	     (SL(n - 3) == 'h' && (SL(n - 4) == 'c' || SL(n - 4) == 's'))))
+		j = n - 2;
+	else if (n >= SR_STEM_MIN + 3 && SL(n - 3) == 'i' && SL(n - 2) == 'n' &&
+	         SL(n - 1) == 'g' && sr_vowel(w, n - 3))
+		j = n - 3, d = 1;
+	else if (n >= SR_STEM_MIN + 2 && SL(n - 2) == 'e' && SL(n - 1) == 'd' &&
+	         SL(n - 3) != 'e' && sr_vowel(w, n - 2))
+		j = n - 2, d = 1;
+	else if (n >= SR_STEM_MIN + 1 && SL(n - 1) == 's' &&
+	         !strchr("siu", SL(n - 2)))
+		j = n - 1;
+	if (d && j > SR_STEM_MIN && SL(j - 1) == SL(j - 2) &&
+	    !strchr("aeioulsz", SL(j - 1)))
+		j--;
+	if (j > SR_STEM_MIN && SL(j - 1) == 'e')
+		j--;
+#undef SL
+	*k = j;
+	return 0;
+}
+
+/* stems a[0..ak)+ac and b[0..bk)+bc are one, letters folded */
+static int
+sr_same_stem(const char *a, size_t ak, int ac, const char *b, size_t bk,
+             int bc)
+{
+	size_t al = ak + !!ac, i;
+
+	if (al != bk + !!bc)
+		return 0;
+	for (i = 0; i < al; i++)
+		if ((i < ak ? fold((unsigned char)a[i]) : ac) !=
+		    (i < bk ? fold((unsigned char)b[i]) : bc))
+			return 0;
+	return 1;
+}
+
+/* w's prefilter runs, over its root t[0..w->rl) */
+static void
+sr_runs(const char *t, struct sr_word *w)
+{
+	size_t i, j, n = w->rl;
+
+	for (i = 0; i < n; i = j + 1)
+	{
+		for (j = i; j < n && !strchr("\"\\/", t[j]); j++)
+			;
+		if (j - i > w->runl)
+			w->run = (uint8_t)i, w->runl = (uint8_t)(j - i);
+	}
+	for (i = 0; i < n; i = j + 1)
+	{
+		for (j = i; j < n && t[j] >= 0x20 && t[j] < 0x7f &&
+		     !strchr("\"\\/", t[j]); j++)
+			;
+		if (j - i > w->ascl)
+			w->asc = (uint8_t)i, w->ascl = (uint8_t)(j - i);
+		w->nonascii |= j < n && (unsigned char)t[j] >= 0x80;
+	}
+}
+
+/* ASCII letter or digit (#503: a word under 3 bytes matches whole only) */
+static int
+sr_alnum(char c)
+{
+	return (c >= '0' && c <= '9') || A_LO(fold((unsigned char)c));
+}
+
+/* Word w's first match in t[0..n) (*ml its length): where its root starts
+** the word as typed (so "push" still finds "repushed" and "pushover", as a
+** phrase does), or a run of letters with the word's stem (from there to
+** the run's end: "pushing" finds "pushes", not "pushover"). */
+static size_t
+sr_word(const struct xr_search *s, const struct sr_word *w, const char *t,
+        size_t n, size_t *ml)
+{
+	const char *q = s->text + w->off;
+	size_t p = 0, e = 0, f, k;
+	int c;
+
+	while (p < n && (f = xr_find(t + p, n - p, q, w->rl)) != SIZE_MAX)
+	{
+		p += f;
+		if (p + w->len <= n && xr_find(t + p, w->len, q, w->len) == 0 &&
+		    (w->lit || w->len >= 3 ||
+		     ((!p || !sr_alnum(t[p - 1])) &&
+		      (p + w->len == n || !sr_alnum(t[p + w->len])))))
+		{
+			*ml = w->len;
+			return p;
+		}
+		if (!w->lit && w->len >= 3)
+		{
+			/* the run's end, kept while p's root ends inside it */
+			if (e < p + w->rl)
+				for (e = p + w->rl; e < n &&
+				     A_LO(fold((unsigned char)t[e])); e++)
+					;
+			c = sr_stem(t + p, e - p, &k);
+			if (sr_same_stem(q, w->k, w->c, t + p, k, c))
+			{
+				*ml = e - p < XR_SEARCH_MAX ? e - p : XR_SEARCH_MAX;
+				return p;
+			}
+		}
+		p++;
+	}
+	return SIZE_MAX;
+}
+
+size_t
+xr_search_match(const struct xr_search *s, const char *t, size_t n,
+                size_t *ml, int *exact)
+{
+	size_t m, best = SIZE_MAX, bl = 0, l, i;
+
+	*exact = 0;
+	*ml = 0;
+	if (!t)
+		return SIZE_MAX;
+	if ((m = xr_find(t, n, s->text + s->po, s->pl)) != SIZE_MAX)
+	{
+		*ml = s->pl;
+		*exact = 1;
+		return m;
+	}
+	if (s->quoted)
+		return SIZE_MAX;
+	/* every word, anywhere: the snippet at the first one in the text */
+	for (i = 0; i < s->nw; i++)
+	{
+		if ((m = sr_word(s, &s->w[i], t, n, &l)) == SIZE_MAX)
+			return SIZE_MAX;
+		if (m < best)
+			best = m, bl = l;
+	}
+	*ml = bl;
+	return best;
+}
+
 struct xr_search *
 xr_search_new(const char *text, long long t0)
 {
-	size_t tl = strlen(text), i, j;
+	size_t tl = strlen(text), i, j, a, b, k;
 	struct xr_search *s;
+	struct sr_word *w;
 
 	if (tl < XR_SEARCH_MIN || tl > XR_SEARCH_MAX ||
 	    !(s = calloc(1, sizeof *s)))
@@ -11614,21 +11844,33 @@ xr_search_new(const char *text, long long t0)
 	memcpy(s->text, text, tl + 1);
 	s->tl = tl;
 	s->t0 = t0;
-	for (i = 0; i < tl; i = j + 1)
+	for (a = 0; a < tl && (unsigned char)text[a] <= ' '; a++)
+		;
+	for (b = tl; b > a && (unsigned char)text[b - 1] <= ' '; b--)
+		;
+	/* "a phrase": its inside, as is (an inside under 2 bytes stays quoted) */
+	if (b - a >= 2 + XR_SEARCH_MIN && text[a] == '"' && text[b - 1] == '"')
+		s->quoted = 1, a++, b--;
+	if (a == b)
+		s->quoted = 1, a = 0, b = tl;	/* all blanks: as is */
+	s->po = a, s->pl = b - a;
+	for (i = a; i < b; i = j)
 	{
-		for (j = i; j < tl && !strchr("\"\\/", text[j]); j++)
+		for (j = i; j < b && (s->quoted || (unsigned char)text[j] > ' '); j++)
 			;
-		if (j - i > s->runl)
-			s->run = i, s->runl = j - i;
-	}
-	for (i = 0; i < tl; i = j + 1)
-	{
-		for (j = i; j < tl && text[j] >= 0x20 && text[j] < 0x7f &&
-		     !strchr("\"\\/", text[j]); j++)
-			;
-		if (j - i > s->ascl)
-			s->asc = i, s->ascl = j - i;
-		s->nonascii |= j < tl && (unsigned char)text[j] >= 0x80;
+		w = &s->w[s->nw++];
+		w->off = (uint8_t)i, w->len = (uint8_t)(j - i);
+		w->lit = (char)s->quoted;
+		k = j - i;
+		w->c = w->lit ? 0 : (char)sr_stem(text + i, j - i, &k);
+		w->k = (uint8_t)k;
+		w->rl = (uint8_t)(k - (!w->c && k &&
+		        fold((unsigned char)text[i + k - 1]) == 'y'));
+		if (!w->rl)	/* "y" */
+			w->rl = w->len, w->lit = 1;
+		sr_runs(text + i, w);
+		while (j < b && (unsigned char)text[j] <= ' ')
+			j++;
 	}
 	return s;
 }
@@ -11757,7 +11999,7 @@ sr_region(const struct xr_search *s, uint64_t o)
 ** search; a shell's ring keeps the newest XR_SEARCH_HITS. */
 static void
 sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
-       const char *t, size_t n, size_t m)
+       const char *t, size_t n, size_t m, size_t ml, int exact)
 {
 	struct sr_hit *h;
 
@@ -11779,7 +12021,8 @@ sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
 	h->at = at;
 	h->who = who;
 	h->tool = tool;
-	h->snip = sr_snip(t, n, m, s->tl);
+	h->snip = sr_snip(t, n, m, ml);
+	h->exact = exact;
 	/* a transcript's chapter: from its window's decoder (sr_chapters) */
 	h->pend = !s->shell && sr_region(s, off) != 1;
 	s->more |= s->n == SR_SLOTS;
@@ -11808,10 +12051,11 @@ struct sr_win
 
 static size_t
 sr_find(const struct xr_search *s, const struct sr_rec *r, int who,
-        const char *t, size_t n)
+        const char *t, size_t n, size_t *ml, int *exact)
 {
-	return !t || r->done & 1u << who ? SIZE_MAX
-	       : xr_find(t, n, s->text, s->tl);
+	*ml = 0, *exact = 0;
+	return r->done & 1u << who ? SIZE_MAX
+	       : xr_search_match(s, t, n, ml, exact);
 }
 
 /* t a hit of kind who, unless one is in r already (t freed, tool taken). */
@@ -11819,12 +12063,13 @@ static void
 sr_try(struct xr_search *s, struct sr_rec *r, int who, char *t, size_t n,
        char *tool)
 {
-	size_t m = sr_find(s, r, who, t, n);
+	int ex;
+	size_t ml, m = sr_find(s, r, who, t, n, &ml, &ex);
 
 	if (m != SIZE_MAX)
 	{
 		r->done |= 1u << who;
-		sr_add(s, r->off, r->at, who, tool, t, n, m);
+		sr_add(s, r->off, r->at, who, tool, t, n, m, ml, ex);
 		tool = NULL;
 	}
 	free(tool);
@@ -11837,7 +12082,8 @@ static char *
 sr_values(const struct xr_search *s, const struct json_parser *p, int v,
           size_t *n)
 {
-	int i, end;
+	int i, end, ex;
+	size_t l;
 	char *t;
 
 	if (v < 0)
@@ -11852,7 +12098,7 @@ sr_values(const struct xr_search *s, const struct json_parser *p, int v,
 			continue;
 		if (!(t = j_str(p, i, n)))
 			continue;
-		if (xr_find(t, *n, s->text, s->tl) != SIZE_MAX)
+		if (xr_search_match(s, t, *n, &l, &ex) != SIZE_MAX)
 			return t;
 		free(t);
 	}
@@ -12020,11 +12266,11 @@ static void
 sr_codex(struct xr_search *s, const struct json_parser *p, struct sr_rec *r,
          const struct sr_win *w)
 {
-	int pl = k_obj(p, 0, A_PAYLOAD), c, i;
+	int pl = k_obj(p, 0, A_PAYLOAD), c, i, ex;
 	char *t = pl >= 0 && k_streq(p, 0, A_TYPE, "response_item")
 	          ? k_str(p, pl, A_TYPE, NULL) : NULL, *x, *role, *a, *id;
 	struct json_parser q;
-	size_t n = 0;
+	size_t n = 0, l;
 
 	if (!t)
 		return;
@@ -12055,7 +12301,8 @@ sr_codex(struct xr_search *s, const struct json_parser *p, struct sr_rec *r,
 		x = tokens_max(a, n) <= XR_LINE_TOKENS &&
 		    dch_json_parse(&q, a) >= 0 && q.tok[0].kind == JSON_OBJECT
 		    ? sr_values(s, &q, 0, &n)
-		    : xr_find(a, n, s->text, s->tl) != SIZE_MAX ? strdup(a) : NULL;
+		    : xr_search_match(s, a, n, &l, &ex) != SIZE_MAX ? strdup(a)
+		    : NULL;
 		dch_json_free(&q);
 		free(a);
 		sr_try(s, r, SK_TOOL, x, x ? strlen(x) : 0,
@@ -12084,16 +12331,22 @@ static void
 sr_line(struct xr_search *s, const struct sr_win *w)
 {
 	const char *l = w->buf + w->ln[w->k].i;
-	size_t n = w->ln[w->k].n;
+	size_t n = w->ln[w->k].n, i;
 	struct json_parser p;
 	struct sr_rec r;
 	char *ts;
 
-	/* the raw prefilter (the decode alone decides) */
-	if (xr_find(l, n, s->text + s->run, s->runl) == SIZE_MAX &&
-	    (!s->nonascii || xr_find(l, n, "\\u", 2) == SIZE_MAX ||
-	     xr_find(l, n, s->text + s->asc, s->ascl) == SIZE_MAX))
-		return;
+	/* the raw prefilter, every word's root (the decode alone decides) */
+	for (i = 0; i < s->nw; i++)
+	{
+		const struct sr_word *q = &s->w[i];
+		const char *t = s->text + q->off;
+
+		if (xr_find(l, n, t + q->run, q->runl) == SIZE_MAX &&
+		    (!q->nonascii || xr_find(l, n, "\\u", 2) == SIZE_MAX ||
+		     xr_find(l, n, t + q->asc, q->ascl) == SIZE_MAX))
+			return;
+	}
 	/* as the decoder takes a line (xr_claude_line) */
 	if (memchr(l, '\0', n) || tokens_max(l, n) > XR_LINE_TOKENS)
 		return;
@@ -12268,7 +12521,7 @@ static void
 sr_trim(struct xr_search *s)
 {
 	struct sr_hit *o;
-	size_t k, n = 0, t = 0;
+	size_t k, n = 0, t = 0, j;
 	int cut = 0;
 
 	/* the hit past the cap (the oldest of SR_SLOTS) is not kept: the oldest
@@ -12288,7 +12541,6 @@ sr_trim(struct xr_search *s)
 	for (k = 0; k < s->n; k++)
 	{
 		struct sr_hit *h = sr_nth(s, k);
-		size_t j;
 
 		for (j = 0; j < n && !sr_same(&o[j], h); j++)
 			;
@@ -12314,9 +12566,17 @@ sr_trim(struct xr_search *s)
 		while (n && sr_same(&o[n - 1], &l));
 		s->more = 1;
 	}
-	/* back as the printer reads them: a shell's oldest first from 0 */
-	for (k = 0; k < n; k++)
-		s->hit[k] = o[s->shell ? n - 1 - k : k];
+	/* back as the printer reads them (a shell's oldest first from 0), the
+	** caps taken: the phrase's hits first, then the rest, each newest
+	** first (#499) */
+	t = 0;
+	for (j = 2; j-- > 0;)
+		for (k = 0; k < n; k++)
+			if (o[k].exact == (int)j)
+			{
+				s->hit[s->shell ? n - 1 - t : t] = o[k];
+				t++;
+			}
 	s->n = n;
 	s->h0 = 0;
 	free(o);
@@ -12458,15 +12718,17 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 static void
 sr_flush(struct xr_search *s)
 {
-	size_t m;
+	size_t m, ml;
+	int ex;
 
 	if (!s->ll)
 		return;
-	if ((m = xr_find(s->line, s->ll, s->text, s->tl)) != SIZE_MAX)
+	if ((m = xr_search_match(s, s->line, s->ll, &ml, &ex)) != SIZE_MAX)
 	{
 		struct sr_hit *h;
 
-		sr_add(s, s->lseq, s->lat, s->lwho, NULL, s->line, s->ll, m);
+		sr_add(s, s->lseq, s->lat, s->lwho, NULL, s->line, s->ll, m, ml,
+		       ex);
 		h = &s->hit[(s->h0 + s->n - 1) % SR_SLOTS];
 		snprintf(h->chapter, sizeof h->chapter, "%s", s->lch);
 		h->aseq = s->laseq;

@@ -11,11 +11,15 @@
 **      of kind 0xFE draws the ring/screen seam (#171), every record after it
 **      a screen row.
 ** xr_find always agrees with a naive folded search over the body. The
-** printed object is one line of JSON with at most 50 hits, newest first
-** (offsets never rising), each inside the body; `more` only with 50 hits.
-** For a needle the CLI takes (xray_search_ok), every hit's snippet holds
-** the needle, ASCII letters folded, its space runs as one space and its
-** ends trimmed, as the snippet writes them. */
+** matcher (#499), over the body as one text: the needle found as is is an
+** exact match there; a match lies inside the body; the needle's words
+** reversed match iff they do. The printed object is one line of JSON
+** with at most 500 hits, the phrase's then the rest, each newest first
+** (offsets rise once at most), each inside the body. For a needle the CLI
+** takes (xray_search_ok), every hit's snippet holds a word of the needle
+** (all but its last 5 bytes, what a root drops at most) or, quoted, the
+** needle's inside, ASCII letters folded, its space runs as one space and
+** its ends trimmed, as the snippet writes them. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +56,43 @@ naive(const char *h, size_t hn, const char *t, size_t tn)
 	return SIZE_MAX;
 }
 
+static size_t norm(const char *t, char *o);
+
+/* some word of t (blank-split; t quoted: its inside, normed) is in snip,
+** less its last 5 bytes (a stem's -ing, a doubled letter, the root's y) */
+static int
+has_word(const char *snip, const char *t)
+{
+	size_t sl = strlen(snip), a = 0, b = strlen(t), i, j;
+
+	while (a < b && (unsigned char)t[a] <= ' ')
+		a++;
+	while (b > a && (unsigned char)t[b - 1] <= ' ')
+		b--;
+	if (b - a >= 4 && t[a] == '"' && t[b - 1] == '"')
+	{
+		char in[XR_SEARCH_MAX + 1], o[XR_SEARCH_MAX + 1];
+		size_t l;
+
+		memcpy(in, t + a + 1, b - a - 2);
+		in[b - a - 2] = '\0';
+		l = norm(in, o);
+		return !l || naive(snip, sl, o, l) != SIZE_MAX;
+	}
+	if (a == b)
+		return 1;
+	for (i = a; i < b; i = j)
+	{
+		for (j = i; j < b && (unsigned char)t[j] > ' '; j++)
+			;
+		if (naive(snip, sl, t + i, j - i > 5 ? j - i - 5 : 1) != SIZE_MAX)
+			return 1;
+		while (j < b && (unsigned char)t[j] <= ' ')
+			j++;
+	}
+	return 0;
+}
+
 /* the needle as a snippet writes it: space runs as one, the ends trimmed */
 static size_t
 norm(const char *t, char *o)
@@ -71,9 +112,8 @@ static void
 check(const char *out, size_t ol, const char *needle, uint64_t body)
 {
 	struct json_parser p;
-	char want[XR_SEARCH_MAX + 1], snip[4 * XR_SNIPPET + 8 * XR_SEARCH_MAX];
-	size_t wl = norm(needle, want);
-	int ok = xray_search_ok(needle), h, i, f, hits = 0;
+	char snip[4 * XR_SNIPPET + 8 * XR_SEARCH_MAX];
+	int ok = xray_search_ok(needle), h, i, f, hits = 0, rises = 0;
 	long long last = -1;
 
 	if (!ol || out[ol - 1] != '\n' || memchr(out, '\n', ol - 1))
@@ -92,20 +132,67 @@ check(const char *out, size_t ol, const char *needle, uint64_t body)
 		    p.tok[f].kind != JSON_PRIMITIVE)
 			abort();
 		off = strtoll(out + p.tok[f].start, NULL, 10);
-		if (off < 0 || (body && (uint64_t)off >= body) ||
-		    (last >= 0 && off > last))
-			abort();	/* inside the body, newest first */
+		rises += last >= 0 && off > last;
+		if (off < 0 || (body && (uint64_t)off >= body) || rises > 1)
+			abort();	/* inside the body, newest first per rank */
 		last = off;
 		if ((f = dch_json_field(&p, i, "snippet")) < 0 ||
 		    p.tok[f].kind != JSON_STRING ||
 		    dch_json_decode(&p, f, snip, sizeof snip) < 0)
 			abort();
-		if (ok && naive(snip, strlen(snip), want, wl) == SIZE_MAX && wl)
-			abort();	/* a hit that does not hold the needle */
+		if (ok && !has_word(snip, needle))
+			abort();	/* a hit that holds no word of the needle */
 	}
 	if (hits > XR_SEARCH_HITS)	/* more: a 51st turn or this cap (#457) */
 		abort();
 	dch_json_free(&p);
+}
+
+/* the matcher over body[0..n) as one text (#499) */
+static void
+match(const struct xr_search *s, const char *needle, const char *body,
+      size_t n)
+{
+	char rev[XR_SEARCH_MAX + 2];
+	size_t m, ml, m2, l = 0, i, j, a = 0, b = strlen(needle);
+	int ex, ex2, q;
+	struct xr_search *r;
+
+	m = xr_search_match(s, body, n, &ml, &ex);
+	if (m != SIZE_MAX && (m > n || ml > n - m))
+		abort();	/* inside the body */
+	while (a < b && (unsigned char)needle[a] <= ' ')
+		a++;
+	while (b > a && (unsigned char)needle[b - 1] <= ' ')
+		b--;
+	q = b - a >= 4 && needle[a] == '"' && needle[b - 1] == '"';
+	if (a < b && !q && naive(body, n, needle + a, b - a) != SIZE_MAX &&
+	    (m == SIZE_MAX || !ex))
+		abort();	/* the phrase as is: an exact match */
+	if (a == b || q)
+		return;
+	/* the words reversed: the same answer (off an exact hit) */
+	for (j = b; j > a; j = i)
+	{
+		for (i = j; i > a && (unsigned char)needle[i - 1] > ' '; i--)
+			;
+		if (l)
+			rev[l++] = ' ';
+		memcpy(rev + l, needle + i, j - i);
+		l += j - i;
+		while (i > a && (unsigned char)needle[i - 1] <= ' ')
+			i--;
+	}
+	rev[l] = '\0';
+	if (l < XR_SEARCH_MIN || (l >= 4 && rev[0] == '"' && rev[l - 1] == '"') ||
+	    !(r = xr_search_new(rev, 0)))
+		return;	/* reversed into a quoted one: literal, another query */
+	m2 = xr_search_match(r, body, n, &ml, &ex2);
+	/* an exact phrase hit is a substring, a short word is whole-only (#503):
+	** only the word match is order-free */
+	if (!ex && !ex2 && (m == SIZE_MAX) != (m2 == SIZE_MAX))
+		abort();
+	xr_search_free(r);
 }
 
 int
@@ -134,6 +221,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		abort();
 	if (!(s = xr_search_new(needle, xr_now_ms())))
 		return 0;
+	match(s, needle, body, n);
 	if (!(d[0] & 1))
 	{
 		if (fd < 0)

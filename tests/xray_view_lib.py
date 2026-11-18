@@ -1,6 +1,7 @@
 """The `dch --xray <n>` view and the picker's x (#175, XR5a): the harness
 and fixtures of its five test files (split for the pool, #365, #361):
-xray_view_test.py, xray_view_turns_test.py, xray_view_tasks_test.py,
+xray_view_test.py (+ xray_view_dup_test.py, xray_view_narrow_test.py,
+xray_view_narrow_keys_test.py), xray_view_turns_test.py, xray_view_tasks_test.py,
 xray_view_shell_test.py, xray_view_shell_more_test.py. Each imports this, so each gets its own T.
 
 The view runs on a pty this test owns (pty.fork), so it needs no terminal
@@ -1304,6 +1305,32 @@ def chord_rx():
 
 # o's repeats starting 300 ms on, one every 50 ms for 1 s, then a z
 REPEAT = [(0.3, b"o")] + [(0.05, b"o")] * 19 + [(0.3, b"z")]
+
+
+def narrow_row(name, cols=50):
+    """The card's Reply row for #412 of session `name` at `cols` columns."""
+    v = Pty([DCH, "--xray", name], rows=30, cols=cols,
+            env={"TMPDIR": TPD + "/", "NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.5)
+        for _ in range(6):
+            if "[Refs" in rows(v.out).get(2, ""):
+                break
+            v.key(b"\t", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Mentions: this session ", start=mark)
+        v.pump(1.0)
+        text = screen(v, 0)
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    return next((l for l in text.split("\n") if "Reply" in l and
+                 "#412" in l), ""), text
+
 
 
 def run_steps(*steps):

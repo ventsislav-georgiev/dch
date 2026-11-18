@@ -5407,6 +5407,26 @@ u8_ok(const unsigned char *p)
 	return 1;
 }
 
+/* query q over t (#499): exact (1, 0, -1 for no match), at m, ml long */
+static int
+sm(const char *q, const char *t, int exact, size_t m, size_t ml)
+{
+	struct xr_search *s = xr_search_new(q, 0);
+	size_t gm, gl;
+	int ge, ok;
+
+	if (!s)
+		return 0;
+	gm = xr_search_match(s, t, strlen(t), &gl, &ge);
+	ok = exact < 0 ? gm == SIZE_MAX
+	     : gm == m && gl == ml && ge == exact;
+	if (!ok)
+		fprintf(stderr, "sm(%s, %s): %zd %zu %d\n", q, t, (ssize_t)gm, gl,
+		        ge);
+	xr_search_free(s);
+	return ok;
+}
+
 #define SU(t, ts) "{\"type\":\"user\",\"timestamp\":\"" ts "\"," \
 	"\"message\":{\"content\":\"" t "\"}}\n"
 
@@ -5443,6 +5463,43 @@ t_search(void)
 	      xr_find("\xc3\x89", 2, "\xc3\xa9", 2) == SIZE_MAX &&
 	      xr_find("a[", 2, "a{", 2) == SIZE_MAX &&
 	      xr_find("ab", 2, "abc", 3) == SIZE_MAX);
+
+	/* #499: words in any order, stem folding, the phrase exact, quotes */
+	CHECK("search words: retry backoff finds backoff between retries, not "
+	      "exact, at the first word in the text",
+	      sm("retry backoff", "a backoff between retries", 0, 2, 7));
+	CHECK("search words: the phrase is exact, at the phrase",
+	      sm("retry backoff", "no; RETRY BACKOFF", 1, 4, 13) &&
+	      sm("needle", "x Needle", 1, 2, 6));
+	CHECK("search words: a word missing is no match",
+	      sm("retry backoff", "retries only", -1, 0, 0));
+	CHECK("search words: -s -es -ies -ied -ing -ed fold both ways",
+	      sm("retry", "retried", 0, 0, 7) && sm("retries", "retrying", 0, 0, 8) &&
+	      sm("pushing", "pushes", 0, 0, 6) && sm("pushes", "pushed", 0, 0, 6) &&
+	      sm("files", "the file", 0, 4, 4) && sm("making", "make", 0, 0, 4) &&
+	      sm("stopped", "stop", 0, 0, 4) && sm("running", "run", 0, 0, 3) &&
+	      sm("boxes", "box", 0, 0, 3) && sm("matches", "match", 0, 0, 5));
+	CHECK("search words: short and odd words do not fold",
+	      sm("this", "thi", -1, 0, 0) && sm("is", "i", -1, 0, 0) &&
+	      sm("string", "str", -1, 0, 0) && sm("class", "clas", -1, 0, 0) &&
+	      sm("status", "statu", -1, 0, 0) && sm("speed", "spe", -1, 0, 0) &&
+	      sm("uses", "us", -1, 0, 0) && sm("ties", "ty", -1, 0, 0));
+	CHECK("search words: a word under 3 bytes matches whole only (#503)",
+	      sm("a fix", "a quick fix", 0, 0, 1) &&
+	      sm("a fix", "fixing that", -1, 0, 0) &&
+	      sm("to do list", "todo list", -1, 0, 0) &&
+	      sm("to do list", "list: to do", 0, 0, 4) &&
+	      sm("\"to do\"", "todo", -1, 0, 0) && sm("to", "todo", 1, 0, 2));
+	CHECK("search words: a folded word is the stem, not a prefix (pushing: "
+	      "not pushover); a word as typed still is a substring",
+	      sm("pushing", "pushover", -1, 0, 0) &&
+	      sm("push", "a pushover", 1, 2, 4) && sm("ush", "pushing", 1, 1, 3));
+	CHECK("search words: a quoted query is literal, its quotes not searched",
+	      sm("\"push retry\"", "a PUSH retry", 1, 2, 10) &&
+	      sm("\"push retry\"", "retry push", -1, 0, 0) &&
+	      sm("\"pushes\"", "push", -1, 0, 0));
+	CHECK("search words: blanks around and between words are no word",
+	      sm("  retry \t backoff ", "backoff retried", 0, 0, 7));
 
 	/* case folding through a transcript, newest first, one hit a record
 	** a kind, and what never counts */
@@ -5506,7 +5563,8 @@ t_search(void)
 			{ "\"hi\"", 1 }, { "a\\b", 1 }, { "e/f", 1 },
 			{ "caf\xc3\xa9", 2 }, { "CAF\xc3\xa9", 2 },
 			{ "caf\xc3\x89", 0 }, { "\xc3\xa9", 2 },
-			{ "c\\nd", 0 }, { "c d", 0 }, { "\\u00e9", 0 },
+			{ "c\\nd", 0 }, { "\"c d\"", 0 }, { "c d", 1 },
+			{ "\\u00e9", 0 },
 		};
 
 		for (k = 0; k < sizeof row / sizeof row[0]; k++)
@@ -5813,6 +5871,26 @@ t_search(void)
 		             "\"quux.c\"},{") &&
 		      strstr(o, "\"who\":\"tool\",\"tool\":\"shell\",\"snippet\":"
 		             "\"Quux\"}]"));
+		free(o);
+	}
+	/* #499: Codex, words in any order; the phrase's hit ranks first */
+	{
+		static const char t[] =
+		    "{\"timestamp\":\"2026-11-10T10:00:00.000Z\",\"type\":"
+		    "\"response_item\",\"payload\":{\"type\":\"message\",\"role\":"
+		    "\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":"
+		    "\"the retry backoff\"}]}}\n"
+		    "{\"timestamp\":\"2026-11-10T10:00:01.000Z\",\"type\":"
+		    "\"response_item\",\"payload\":{\"type\":\"message\",\"role\":"
+		    "\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":"
+		    "\"backoff between retries\"}]}}\n";
+
+		o = search_of(t, sizeof t - 1, "retry backoff", 1);
+		CHECK("search words: Codex, the phrase first, then the newer "
+		      "reordered one",
+		      o && count_of(o, "\"who\":") == 2 &&
+		      strstr(o, "\"snippet\":\"the retry backoff\"},{") &&
+		      strstr(o, "\"snippet\":\"backoff between retries\"}]"));
 		free(o);
 	}
 

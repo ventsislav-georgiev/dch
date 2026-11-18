@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.109.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.110.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1297,7 +1297,10 @@ standard input is a request, as NDJSON:
 - `{"req":N,"argv":["--ref","#831","--full","--json"]}`: the flags after
   `--xray <name>`, `N` from 1 to 2147483647. Only the request forms are
   taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`),
-  `--chapter` and `--clear`. dch checks them by its own rules first; any
+  `--search` (with `--scope`; `["--search","push retry","--scope","project",
+  "--json"]`, one answer per request, the bytes `dch --xray <n> --search
+  ... --json` writes on the host), `--chapter` and `--clear`. A request
+  without `--json` is refused, so there is no text answer here. dch checks them by its own rules first; any
   other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
   value is answered `{"req":N,"stderr":"dch: ..."}` and
   `{"req":N,"exit":2,"why":"refused"}`, and nothing is sent.
@@ -1778,7 +1781,7 @@ after `<n>`'s own file (its `tally`) and before any other session is read:
 `{"schema":1,"resolved":{"kind","state","title","subtitle","lines"}}`,
 plus `first` for a file shown (below),
 `kind` `"commit"` or `"file"`, `lines` at most 14, each at most 200
-characters; the light scan never resolves a file (a commit: below). Every string is the text with
+characters; the light scan resolves a file by stat alone, and a commit (both below). Every string is the text with
 invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped. The resolver
 reads only the ref and `<n>`'s cwd, so with `--scope session` the line is
 just before `done`, and a wider read that a cap or the time limit stops
@@ -1793,9 +1796,22 @@ and after your
 `done`, only when that command gave no definition (a command that answers
 wins; one that fails or is unset leaves the built-in to run), and only
 when its `state` is `ok`: an unknown SHA, a cwd that is no repo, a git
-error or the deadline give no `resolved` line and no warning. A file ref
-is resolved with `--full` only. The card shows it as
+error or the deadline give no `resolved` line and no warning. The card shows it as
 `commit <subject>  <author> · <age> · <sha> · on HEAD`.
+
+A file ref of a live `<n>` gets a light `resolved` line too (#500), under
+the same define_command rule, from `lstat` and `realpath` alone: the file
+is never opened or read, so no `lines` and no `first`. The path is
+checked against the project exactly as `--full` does (the cwd's git root,
+the deny list, links, a symlink or non-regular file); a ref the rules
+refuse (outside the project, a secret name, a symlink, a FIFO) gives no
+line. An existing regular file is `state: "ok"` with its name as `title`
+and `<path> · modified 2026-11-18 14:03 UTC` (the mtime, UTC) as
+`subtitle`, whatever its size. One that does not exist is
+`state: "missing"`, `title: "Missing"`, the path as `subtitle`: a state of
+its own, so a client need not read the subtitle, and unlike `ok` it does
+not claim a file was found. `--full` is unchanged: a missing file gives
+no line, an existing one the 14-line window.
 
 - **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
   session runs nothing: `state: "ended"`. Otherwise dch runs git directly,
@@ -1922,11 +1938,36 @@ is resolved with `--full` only. The card shows it as
   that is gone, a symlink or not a regular file gives no `resolved` line.
 
 `dch --xray <n> --search <text> --json` finds where a word or a phrase was
-said in `<n>`'s own corpus and prints one object, the newest places first:
+said in `<n>`'s own corpus and prints one object, the places with the
+whole text first, then the rest, each newest first:
 `{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet"}],"more","partial","why","bytes"}`.
-`<text>` is literal: 2 to 200 bytes of UTF-8 with no control character and
+`<text>` is 2 to 200 bytes of UTF-8 with no control character and
 none of `--ref`'s bidi controls (`dch: bad search: 2 to 200 bytes, no control
 character`, exit 2). ASCII letters match in either case; nothing else folds.
+- **Words (#499).** `<text>` is split into words at spaces and tabs; a text
+  matches when it holds every word, in any order, so `retry backoff` finds
+  "…backoff between retries…". A text that holds `<text>` as typed (its
+  ends trimmed) is an exact match and ranks first. A word matches where it
+  is found as typed (inside a longer word too, as before: `push` finds
+  `pushover`), or where a run of ASCII letters has the same stem. A word
+  under 3 bytes (#503) matches only as a whole word, no ASCII letter or digit
+  before or after it (`a fix` finds "a quick fix", not "fixing that"; `to
+  do list` not "todo list"); a one-word text is unchanged. In
+  quotes (`"push retry"`, the quotes the first and last byte) the inside is
+  searched as one literal phrase, no words, no stems. A word of one text
+  value counts: a prompt, an answer, one of a tool call's input values, a
+  result.
+- **Stems.** ASCII only, a word's end, the first rule that fits, and only
+  when at least 3 bytes stay: `-ies`/`-ied` become `-y` (retries, retried:
+  retry); `-es` goes after s, x, z, ch, sh (pushes: push); `-ing` and `-ed`
+  go when the stem has a vowel (a e i o u y; pushing, pushed: push; not
+  string, shred) and not after `e` for `-ed` (speed stays), then a doubled
+  consonant other than l, s, z loses one (stopped: stop; running: run);
+  `-s` goes but not from `-ss`, `-us`, `-is` (files: file; class, status,
+  this stay). Then a last `e` goes (file, files, filed; make, making). So
+  `is`, `as`, `us` and `uses` never fold; irregular forms (ran, made) and
+  non-ASCII words do not match each other; a word that does not end in a
+  letter is matched only as typed.
 `--search -` (and `--ref -`) reads the text from standard input instead, so it
 never shows in dch's own `ps` line: `echo word | dch --xray <n> --search - --json`.
 (A [`define_command`](#your-own-definitions-define_command) that `--ref` runs
@@ -1955,7 +1996,8 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   has none there: a turn past the 3.8 range, a shell row still on the screen
   or outside a block). `offset` is the record's byte offset (a shell: its
   ring seq), `at` its time in seconds or `null`, `tool` the tool's name or
-  `null`, and `snippet` about 160 bytes around the match, cut at word
+  `null`, and `snippet` about 160 bytes around the match (the whole text,
+  else the word that comes first in the record), cut at word
   boundaries (the match whole), controls and runs of spaces as one space; it
   starts with `"… "` (U+2026, a space) when the window does not start at the
   text's start.
@@ -2009,7 +2051,7 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
 
 `--search` goes with no other flag but `--json` and `--scope` (`dch: bad
 usage: --search and --ref`, also with `--chapter`, `--clear` or `--follow`),
-and not in `--requests`; `--full` and `--budget-ms` stay `--ref`'s
+and is a `--requests` request (`--json` required there); `--full` and `--budget-ms` stay `--ref`'s
 (`dch: bad usage: --scope, --full and --budget-ms come with --ref`, the
 message `--scope` alone also gives with neither `--ref` nor `--search`). Nothing is written to disk, and the text is never logged or
 traced. On `host:name` it runs on that host's `dch serve`; a host whose dch

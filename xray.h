@@ -547,11 +547,12 @@ int xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 ** per session kind, before done. */
 void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
                       const char *text, const char *cwd, int live);
-/* #502, light only: a live session's commit ref, after define_command
+/* #502/#500, light only: a live session's commit ref (or file ref: stat
+** alone, ok or missing), after define_command
 ** answered nothing, gets the resolved line too when it is ok; any other
 ** state (not a repo, not a commit, a timeout) gives none. */
-void xr_scan_commit(struct xr_scan *x, const struct xr_span *sp,
-                    const char *text, const char *cwd, int live);
+void xr_scan_light(struct xr_scan *x, const struct xr_span *sp,
+                   const char *text, const char *cwd, int live);
 /* The parsers, for the units and fuzz_xref: git show's output as a commit
 ** block (1, else 0); a file's 14-line window around line (0: the first);
 ** --ref's line suffix (:line, :line:col, #L<line>; 0 for none); the
@@ -595,6 +596,12 @@ size_t xr_find(const char *hay, size_t n, const char *needle, size_t nl);
 struct xr_search;
 struct xr_search *xr_search_new(const char *text, long long t0);
 void xr_search_free(struct xr_search *s);
+/* The search's matcher over t[0..n) (#499): the phrase as typed (exact 1),
+** else, unquoted, every word in any order, stem-folded (sr_stem): the
+** first match's offset (*ml its length, the snippet's centre), SIZE_MAX
+** for none. */
+size_t xr_search_match(const struct xr_search *s, const char *t, size_t n,
+                       size_t *ml, int *exact);
 /* A transcript (codex: a Codex rollout) read from its end in windows cut at
 ** line starts, under xr_lim's bytes and ms; lines that hold the text's raw
 ** run are decoded, and a hit is a match in a typed prompt, assistant text, a
@@ -619,7 +626,7 @@ int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                     const char *why);
 /* --scope project|all (#498): the hits kept; one session's group, no newline:
 ** {"session","session_id","corpus","live","project","last_active",
-** "turn_title" (the newest hit's),"hits":[{"chapter","offset","at","who",
+** "turn_title" (the first hit's),"hits":[{"chapter","offset","at","who",
 ** "tool","turn_title","snippet"}…],"more","partial","why","bytes"};
 ** session_id and project null for "", last_active null for < 0. */
 size_t xr_search_hits(const struct xr_search *s);

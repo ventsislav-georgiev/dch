@@ -12,11 +12,13 @@
 ** its output is at most XR_SENT bytes of valid UTF-8, and the span's
 ** place in it holds the ref's bytes when the ref is valid text without
 ** controls (else the same count of bytes). The scalar after the leading
-** ellipsis is not a continuation (xr_u8_cont) unless the line has an
+** ellipsis and its spaces is not a continuation (cont, the oracle's own
+** list) unless the line has an
 ** ellipsis of its own (the classes: marks, variation selectors, keycap,
 ** skin tones; and not the second RI of a pair), nor when the ref itself starts on a mark. For the
 ** selected span xv_csent draws the sentence at EVERY width 8-130: valid UTF-8, within the width, the ref whole when
-** xv_fitlen says it fits, no continuation scalar after its ellipsis. */
+** xv_fitlen says it fits, no continuation scalar after its ellipsis and
+** spaces. */
 #include "../../xray.c"
 #include "../../picker.c"
 #include "../../xview.c"
@@ -44,6 +46,33 @@ isri(const char *p)
 {
 	return !memcmp(p, "\xf0\x9f\x87", 3) && (unsigned char)p[3] >= 0xa6 &&
 	       (unsigned char)p[3] <= 0xbf;
+}
+
+/* Bytes of a continuation scalar at p: the oracle's own list of the
+** classes (#504), so a range dropped from xr_u8_cont is still caught */
+static size_t
+cont(const char *p, size_t n)
+{
+	size_t a;
+	uint32_t c;
+
+	if (!n)
+		return 0;
+	c = u8_next((const unsigned char *)p, n, &a);
+	return (c >= 0x300 && c <= 0x36f) || c == 0x200d ||
+	       (c >= 0xfe00 && c <= 0xfe0f) || (c >= 0x1ab0 && c <= 0x1aff) ||
+	       (c >= 0x1dc0 && c <= 0x1dff) || (c >= 0x20d0 && c <= 0x20ff) ||
+	       (c >= 0xfe20 && c <= 0xfe2f) || (c >= 0x1f3fb && c <= 0x1f3ff) ?
+	       a : 0;
+}
+
+/* the offset past the spaces from i (#504: a mark after them leads too) */
+static size_t
+sp(const char *p, size_t i, size_t n)
+{
+	while (i < n && p[i] == ' ')
+		i++;
+	return i;
 }
 
 /* valid UTF-8 with no control the cut would blank */
@@ -83,10 +112,11 @@ draw(const char *o, size_t ss, size_t se, size_t k0, int own)
 		xv_csent(&m);
 		if (pk_col > pk_w || !valid((unsigned char *)pk_fb, pk_fn))
 			FAIL();
-		if (!own && !xr_u8_cont(ref, rl) && pk_fn >= 3 && !memcmp(pk_fb, "\xe2\x80\xa6", 3) &&
+		if (!own && !cont(ref, rl) && pk_fn >= 3 && !memcmp(pk_fb, "\xe2\x80\xa6", 3) &&
 		    memcmp(o, "\xe2\x80\xa6", 3) &&
-		    xr_u8_cont(pk_fb + 3, pk_fn - 3))
+		    (i = sp(pk_fb, 3, pk_fn), cont(pk_fb + i, pk_fn - i)))
 			FAIL();
+		i = 0;
 		if (room >= 1 && clean((const unsigned char *)ref, rl) &&
 		    xv_fitlen(ref, rl, room) == rl)
 		{
@@ -144,7 +174,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		    memcmp(o + ss, l + s, e - s))
 			FAIL();
 		if (!own && ss > 4 && !memcmp(o, "\xe2\x80\xa6 ", 4) &&
-		    xr_u8_cont(o + 4, ss - 4))
+		    (ol = sp(o, 4, ss), cont(o + ol, ss - ol)))
 			FAIL();
 		/* the excerpt body o[4..ss) is l[lo..s) when untouched: it does
 		** not start on the second RI of a pair (#495) */

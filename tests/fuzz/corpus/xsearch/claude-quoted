@@ -1,0 +1,3 @@
+h"retry backoff"{"type": "user", "timestamp": "2026-11-10T10:00:00Z", "message": {"content": "we tried the retry backoff"}}
+{"type": "user", "timestamp": "2026-11-10T10:00:01Z", "message": {"content": "a backoff between RETRIES"}}
+{"type": "user", "timestamp": "2026-11-10T10:00:02Z", "message": {"content": "Retrying, backoff: stopped files"}}
