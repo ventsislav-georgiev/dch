@@ -702,7 +702,8 @@ def fixture_said():
     lines += turn("ship the fix", "2026-11-10T13:00:00Z",
                   at(say(SAID), "2026-11-10T13:01:00Z"))
     lines += turn("is #412 merged?", "2026-11-10T14:00:00Z",
-                  at(say("yes"), "2026-11-10T14:01:00Z"))
+                  at(say("Checked it. Yes, #412 is merged now! Done."),
+                     "2026-11-10T14:01:00Z"))
     solo = "/home/demo/solo"
     os.makedirs(os.path.dirname(tl("x", "-home-demo-solo")), exist_ok=True)
     record("xv-sd", CSIDS[0], [dict(o, cwd=solo) if "cwd" in o else o
@@ -713,7 +714,8 @@ def test_said():
     """#455: a card with no definition shows its first mention's line as
     First said (prompt N); rows say You/Reply and the prompt; a light card
     says f scans, never 0 in 0 sessions."""
-    v = Pty([DCH, "--xray", "xv-sd"], env={"TMPDIR": TPD + "/"})
+    v = Pty([DCH, "--xray", "xv-sd"], env={"TMPDIR": TPD + "/",
+                                           "NO_COLOR": ""})
     try:
         v.wait(b"Prompts 5")
         v.pump(0.5)
@@ -730,13 +732,38 @@ def test_said():
               "first mention's line", "First said (prompt 4, ship the fix"
               in text and "Opened PR #412: idempotency" in text and
               "No definition found" not in text, text)
-        check("#455: rows say Reply and You and the prompt",
-              re.search(r"Reply +p4 .*Opened PR", text) is not None and
-              re.search(r"You +p5 .*is #412 merged", text) is not None,
-              text)
+        # #478: a header per turn, newest first, then its mentions (newest
+        # first) as who + the sentence around the ref
+        lines = text.split("\n")
+        at_ = [next((i for i, l in enumerate(lines) if re.search(x, l)), -1)
+               for x in (r"p5 is #412 merged\? +\d\d-\d\d \d\d:\d\d",
+                         r"Reply Yes, #412 is merged now! *$",
+                         r"You is #412 merged\? *$",
+                         r"p4 ship the fix +\d\d-\d\d",
+                         r"Reply Opened PR #412: idempotency key on "
+                         r"checkout, 24h TTL\.$")]
+        check("#478: the card groups by turn: p5's header, its two "
+              "mentions (Reply, You) with their sentences, then p4's",
+              -1 not in at_ and at_ == sorted(at_) and
+              at_[1] == at_[0] + 1 and at_[3] == at_[2] + 1 and
+              at_[4] == at_[3] + 1, (at_, text))
+        check("#478: the ref stands out in the sentence (an SGR on each side)",
+              re.search(rb"Yes, \033\[0;1[0-9;]*m#412\033\[0[0-9;]*m is merged",
+                        v.out) is not None, v.out[-1500:])
         check("#455: a light card says f scans, never 0 in 0 sessions",
               "this project: f scans" in text and
               "0 in 0 sessions" not in text, text)
+        # #478: Enter on a turn's header opens the reader at that turn
+        v.key(b"jj", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        ok = until(lambda: (v.pump(0.1), "ship the fix" in
+                            screen(v, mark))[1], 5)
+        text = screen(v, mark)
+        check("#478: Enter on p4's header opens the reader at turn 4",
+              ok and "Opened PR #412" in text and "is #412 merged" not in
+              text, text)
+        v.key(b"q", 0.5)
         v.key(b"q")
         v.key(b"q")
         v.exit()
@@ -877,8 +904,11 @@ def test_terms_live():
         ok = a.wait(b"Mentions: this session ", start=mark)
         settle(a)
         text = screen(a, mark)
-        rep = re.search(r"Reply +p2 +Fixed #412", text)
-        first = re.search(r"Reply +p1 +`ERR_LEDGER_SKEW` is raised", text)
+        # #478: grouped by turn, p2's header over p1's
+        rep = re.search(r"p2 fix it .*\n.*Reply +`ERR_LEDGER_SKEW` no "
+                        r"longer fires", text)
+        first = re.search(r"p1 why does the ledger skew .*\n.*Reply +"
+                          r"`ERR_LEDGER_SKEW` is raised", text)
         check("card #459: Enter on ERR_LEDGER_SKEW opens its card, the first "
               "mention as its definition, mentions newest first (p2 over "
               "p1)", ok and "ERR_LEDGER_SKEW" in text and

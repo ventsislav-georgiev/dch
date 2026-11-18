@@ -604,6 +604,93 @@ def test_refs():
           len(tl[0].encode()) <= 127 and tn.startswith(tl[0]),
           (tl, r.stdout[-400:]))
 
+    # #478: each mention's turn, the sentence around the ref, its span
+    long_l = " ".join("w%03d" % i for i in range(120))
+    long_r = " ".join("v%03d" % i for i in range(120))
+    nona = "\u00e9t\u00e9 \u00e7a " * 40
+    url = "https://example.com/" + "p" * 236
+    texts = ["Intro here. Then work on #831 please, it matters! Done.",
+             long_l + " fix #831 now " + long_r,
+             nona + "voil\u00e0 #831 \u00e7a " + nona,
+             "#831 opens it",
+             "- closes #831"]
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": texts[0]}]}},
+         {"type": "user", "timestamp": "2026-11-10T10:01:00Z",
+          "message": {"content": "\n".join(texts[1:])}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "x " * 260 + url + " y" * 160}]}}])
+    r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session",
+            "--full", "--json")
+    ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+    cut = lambda m: m.get("sentence", "").encode()[(m.get("span") or [0, 0])[0]:(m.get("span") or [0, 0])[1]].decode()
+    check("ref #478: turn/sentence/span follow line, in that order",
+          ms and all(list(m)[list(m).index("line") + 1:][:3] ==
+                     ["turn", "sentence", "span"] for m in ms), ms[:1])
+    sent = {m.get("sentence", ""): (m.get("turn"), (m.get("span") or [0, 0])) for m in ms}
+    check("ref #478: a ref mid-paragraph: its sentence, turn 1",
+          sent.get("Then work on #831 please, it matters!") == (1, [13, 17]),
+          sent)
+    check("ref #478: the ref at the text's start and in a list item at its "
+          "end, turn 2", sent.get("#831 opens it") == (2, [0, 4]) and
+          sent.get("closes #831") == (2, [7, 11]), sent)
+    lng = [m for m in ms if "fix #831" in m.get("sentence", "")]
+    nas = [m for m in ms if "voil\u00e0" in m.get("sentence", "")]
+    check("ref #478: a long sentence cut on both sides on words, marked, "
+          "<= 400 bytes, the ref whole in the middle",
+          len(lng) == 1 and lng[0].get("sentence", "").startswith("\u2026 w") and
+          lng[0].get("sentence", "").endswith(" \u2026") and
+          390 <= len(lng[0].get("sentence", "").encode()) <= 400 and
+          cut(lng[0]) == "#831" and
+          150 < lng[0].get("span", [0, 0])[0] < 250, lng)
+    check("ref #478: a non-ASCII sentence: cut on characters, the span's "
+          "bytes slice the ref exactly",
+          len(nas) == 1 and len(nas[0].get("sentence", "").encode()) <= 400 and
+          nas[0].get("sentence", "").startswith("\u2026 ") and cut(nas[0]) == "#831"
+          and "\ufffd" not in nas[0].get("sentence", ""), nas)
+    # (a) every span on scalar boundaries, never into a mark
+    bad = []
+    for m in ms:
+        b, (a, e) = m.get("sentence", "").encode(), (m.get("span") or [0, 0])
+        try:
+            ok = 0 <= a <= e <= len(b) and b[a:e].decode() == "#831"
+        except UnicodeDecodeError:
+            ok = False
+        if not ok:
+            bad.append(m)
+    check("ref #478: every span slices the ref on scalar boundaries",
+          len(ms) == 5 and not bad, bad)
+    r = dch("--xray", "xr-refs", "--ref", url, "--scope", "session",
+            "--full", "--json")
+    ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+    check("ref #478: a 256-byte URL in a 900-byte sentence stays whole, "
+          "marked on both sides",
+          len(ms) == 1 and ms[0].get("span") and cut(ms[0]) == url and
+          ms[0].get("sentence", "").startswith("\u2026 x") and
+          ms[0].get("sentence", "").endswith("y \u2026") and
+          len(ms[0].get("sentence", "").encode()) <= 400, ms)
+
+    # (b) a ref over 400 bytes: --ref takes 256, but a relative path's key
+    # is its absolute path (<= 1024), which the text may spell out: span
+    # null, the sentence cut from its start, still <= 400 bytes
+    deep = "/" + "d" * 600
+    big = deep + "/src/a.c"
+    history("xr-big", RSID, cfg, deep)
+    put([{"type": "user", "cwd": deep, "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "see " + big + " now"}}])
+    r = dch("--xray", "xr-big", "--ref", "src/a.c", "--scope", "session",
+            "--full", "--json")
+    ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+    check("ref #478: a 609-byte ref (a relative path's absolute spelling): "
+          "span null, the sentence cut from its start and marked",
+          len(ms) == 1 and "span" in ms[0] and ms[0]["span"] is None and
+          ms[0].get("sentence", "").startswith("see /ddd") and
+          ms[0].get("sentence", "").endswith(" \u2026") and
+          len(ms[0].get("sentence", "").encode()) <= 400, (ms, r.stdout[-300:]))
+
     # NIT-7 (#150): a relative path that only outgrows the key against the
     # session's cwd is no ref, as main's check says for a short one (exit 2)
     history("xr-deep", RSID, cfg, "/" + "d" * 1000)
@@ -2702,6 +2789,23 @@ def test_scope():
 ASID = "11111111-2222-4333-8444-5555555555c9"
 
 
+def turn_rows(got, how):
+    """#478: a mention's turn is its chapter's --json "i" (the view's pN),
+    null when its chapter is null; light's, null or --full's."""
+    bad = []
+    for form in ("light", "full"):
+        for i, a in got[form].items():
+            t = got[form + "_t"][i]
+            want = got["i"].get(a) if a else None
+            if t != want and not (form == "light" and t is None):
+                bad.append((form, i, a, t, want))
+    nul = [i for i, a in got["full"].items() if a is None]
+    check("ref #478: --full's turn is its chapter's --json i, null with a "
+          "null chapter%s" % how,
+          not bad and all(got["full_t"][i] is None for i in nul) and
+          any(t for t in got["full_t"].values()), (bad, got["full_t"]))
+
+
 def test_light_anchors():
     """Light --ref reads 1 MiB windows newest first, each by a fresh decoder:
     a mention before its window's first prompt, or under a prompt the full
@@ -2749,6 +2853,12 @@ def test_light_anchors():
             ls = ref_lines(r.stdout) or []
             got[form] = {l["mention"]["offset"] // 4096: l["mention"]["chapter"]
                          for l in ls if "mention" in l}
+            # #478: each mention's turn, by offset
+            got[form + "_t"] = {l["mention"]["offset"] // 4096:
+                                l["mention"].get("turn", "absent")
+                                for l in ls if "mention" in l}
+        rc, o, err = xray("xr-anch", "--json", env=env)
+        got["i"] = {c["anchor"]: c["i"] for c in (o or {}).get("chapters", [])}
         rc, o, err = search("xr-anch", "CT-12", env=env)
         got["search"] = {h["offset"] // 4096: h["chapter"]
                          for h in (o or {}).get("hits", [])}
@@ -2784,6 +2894,7 @@ def test_light_anchors():
           S[513] in (None, at(511)), S)
     check("light anchors: every light and --search anchor is --full's", not bad,
           bad)
+    turn_rows(got, "")
     check("light anchors: every light anchor opens with --chapter", not gone,
           gone)
     # past the range: head 1 MiB (lines 0-255, q255's lead open), the tail
@@ -2798,6 +2909,7 @@ def test_light_anchors():
         check("light anchors: tail from line %d: every light and --search "
               "anchor is --full's and opens with --chapter" % first,
               not bad and not gone, (bad, gone))
+        turn_rows(got, " (tail from line %d)" % first)
     os.unlink(tp)
 
 

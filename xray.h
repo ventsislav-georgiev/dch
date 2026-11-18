@@ -213,6 +213,7 @@ struct xr_hit
 	uint64_t off, unit, row;
 	long long at;
 	const char *chapter;
+	uint64_t turn;		/* the chapter's prompt number (#478), 0 unknown */
 	const char *who, *tool;	/* a Claude mention's speaker, else NULL */
 	const char *title, *passage, *rule;	/* a definition */
 };

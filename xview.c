@@ -109,6 +109,8 @@ struct xv_def
 struct xv_men
 {
 	char *session, *line, *chapter, *who, *tool;	/* who: "" none */
+	char *sent;		/* #478: the sentence, "" from an older host */
+	int ss, se;		/* the ref's bytes in sent, ss -1 none */
 	long long at, off;	/* off: -1 from a host that sends none */
 };
 
@@ -215,6 +217,7 @@ struct xv
 	char *cref;		/* --ref's text: the fullest form known (#415) */
 	char *cwarn;		/* done's define_warn (#405), else NULL */
 	int full, scope, cdone, cpartial, csel, ctop;
+	int chdr;		/* #478: on the header of csel's turn */
 	/* the selected mention's session and offset, followed as lines
 	** arrive (#304); cses NULL on the first row */
 	char *cses;
@@ -960,6 +963,7 @@ xv_card_free(struct xv *v)
 		xv_sfree(v->m[k].chapter);
 		xv_sfree(v->m[k].who);
 		xv_sfree(v->m[k].tool);
+		xv_sfree(v->m[k].sent);
 	}
 	v->nd = v->nm = 0;
 	xv_sfree(v->vkind);
@@ -1038,6 +1042,20 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		m.chapter = xv_str(p, o, "chapter");
 		m.who = xv_str(p, o, "who");
 		m.tool = xv_str(p, o, "tool");
+		m.sent = xv_str(p, o, "sentence");
+		m.ss = m.se = -1;
+		if ((i = xv_obj(p, o, "span", JSON_ARRAY)) >= 0 && i + 2 < p->ntok &&
+		    p->tok[i + 1].parent == i && p->tok[i + 2].parent == i &&
+		    isdigit((unsigned char)p->text[p->tok[i + 1].start]) &&
+		    isdigit((unsigned char)p->text[p->tok[i + 2].start]))
+		{
+			long long a = strtoll(p->text + p->tok[i + 1].start, NULL, 10);
+			long long e = strtoll(p->text + p->tok[i + 2].start, NULL, 10);
+
+			/* whole bytes of sent only: a hostile host's span is no index */
+			if (a >= 0 && a <= e && e <= (long long)strlen(m.sent))
+				m.ss = (int)a, m.se = (int)e;
+		}
 		/* light reads newest first, a window at a time (#262): a line
 		** before its window's first prompt has no chapter; this
 		** session's is the last one that starts before it */
@@ -1139,7 +1157,7 @@ xv_card(struct xv *v, const char *key, const char *text, const char *ref,
 			snprintf(v->status, sizeof v->status, "X-ray: out of memory");
 			return;
 		}
-		v->csel = v->ctop = 0;
+		v->csel = v->ctop = v->chdr = 0;
 		free(v->cses);
 		v->cses = NULL;
 	}
@@ -3197,12 +3215,100 @@ xv_row_ref(const struct xv *v, const struct xv_ref *r, int on)
 }
 
 /* The card: what the ref is, its definitions, counts and mentions. */
+/* #478: the card groups its mentions by turn. They come newest first per
+** session (#304), so a turn's are one run: m[k] opens one when its session
+** or chapter differs from the one above. */
+static int
+xv_run0(const struct xv *v, int k)
+{
+	return k == 0 || strcmp(v->m[k].session, v->m[k - 1].session) ||
+	       strcmp(v->m[k].chapter, v->m[k - 1].chapter);
+}
+
+/* The card's list row of mention k, or of its turn's header (hdr) */
+static int
+xv_crow(const struct xv *v, int k, int hdr)
+{
+	int j, r = 0;
+
+	for (j = 0; j <= k && j < v->nm; j++)
+		r += 1 + xv_run0(v, j);
+	return r - 1 - (hdr && k < v->nm && xv_run0(v, k));
+}
+
+/* List row r back to its mention, and whether it is the header */
+static void
+xv_cat(const struct xv *v, int r, int *k, int *hdr)
+{
+	int j;
+
+	*k = v->nm > 0 ? v->nm - 1 : 0;
+	*hdr = 0;
+	for (j = 0; j < v->nm; j++)
+	{
+		if (xv_run0(v, j) && r-- == 0)
+		{
+			*k = j, *hdr = 1;
+			return;
+		}
+		if (r-- == 0)
+		{
+			*k = j;
+			return;
+		}
+	}
+}
+
+static int
+xv_crows(const struct xv *v)
+{
+	return v->nm ? xv_crow(v, v->nm - 1, 0) + 1 : 0;
+}
+
+/* The selection d list rows on (headers too), or to row d when abs */
+static void
+xv_cmove(struct xv *v, int d, int abs)
+{
+	int r = abs ? d : xv_crow(v, v->csel, v->chdr) + d, n = xv_crows(v);
+
+	if (r >= n)
+		r = n - 1;
+	xv_cat(v, r < 0 ? 0 : r, &v->csel, &v->chdr);
+}
+
+/* A mention's sentence, its ref standing out as a search match does; on a
+** narrow row the words before it give way so the ref shows. An older
+** host's mention: its line. */
+static void
+xv_csent(const struct xv_men *m)
+{
+	const char *s = m->sent;
+	size_t a = 0, ss = (size_t)m->ss, se = (size_t)m->se;
+	int room = pk_w - pk_col - 2;
+
+	if (!s[0] || m->ss < 0)
+	{
+		pk_txt(s[0] ? s : m->line);
+		return;
+	}
+	while (a < ss && xv_fitlen(s + a, se - a, room) < se - a)
+		while (++a < ss && ((unsigned char)s[a] & 0xc0) == 0x80)
+			;
+	if (a)
+		pk_txt(xv_ell());
+	xv_txtn(s + a, ss - a);
+	pk_set(pk_p(PK_ACCB));
+	xv_txtn(s + ss, se - ss);
+	pk_set("");
+	pk_txt(s + se);
+}
+
 static void
 xv_draw_card(struct xv *v, int win)
 {
 	char b[600], w[40];
 	const char *ge = v->cdone && !v->cpartial ? "" : "\xe2\x89\xa5";
-	int k, rows = 0, first = -1, last = -1, mw;
+	int k, rows = 0, first = -1, last = -1, mw, sel, n, r;
 	int running = v->kid[XV_CK].pid > 0;
 
 	if (!pk_utf)
@@ -3388,48 +3494,72 @@ xv_draw_card(struct xv *v, int win)
 	}
 	pk_eol();
 	rows++;
-	/* the mentions, a list */
+	/* the mentions, a list: a header per turn, newest first (#478) */
 	mw = win - rows;
 	if (mw < 1)
 		mw = 1;
-	xv_clamp(&v->csel, &v->ctop, v->nm, mw);
-	for (k = v->ctop; rows < win; k++, rows++)
+	if (v->csel >= v->nm)
+		v->csel = v->nm - 1, v->chdr = 0;
+	if (v->csel < 0)
+		v->csel = 0;
+	sel = xv_crow(v, v->csel, v->chdr);
+	n = xv_crows(v);
+	xv_clamp(&sel, &v->ctop, n, mw);
+	if (n)
+		xv_cat(v, sel, &v->csel, &v->chdr);
+	for (r = v->ctop; rows < win; r++, rows++)
 	{
 		pk_line();
-		if (k < v->nm)
+		if (r < n)
 		{
-			const struct xv_men *m = &v->m[k];
+			const struct xv_men *m;
+			int hdr, c, other;
 
-			xv_lead(k == v->csel);
-			xv_when(m->at, w, sizeof w);
-			pk_set("2");
-			pk_fit(w, 13);
-			/* who said it and under which prompt, as Search's head */
+			xv_cat(v, r, &k, &hdr);
+			m = &v->m[k];
+			c = xv_rch(v, m->chapter);
+			other = strcmp(m->session, v->session) != 0;
+			xv_lead(r == sel);
+			if (hdr)
 			{
-				int c = xv_rch(v, m->chapter);
-
+				/* the turn: pN, its title, its time */
+				pk_set("1");
+				if (c >= 0)
+				{
+					snprintf(w, sizeof w, "%c%d ", xv_noun(v)[0], c + 1);
+					pk_txt(w);
+					pk_txtto(v->ch[c].title, pk_w - 14);
+					xv_when(v->ch[c].at, w, sizeof w);
+					pk_set("2");
+					pk_txt("  ");
+					pk_txt(w);
+				}
+				else
+				{
+					pk_set("2");
+					pk_txt(other ? m->session : "no prompt");
+				}
+			}
+			else
+			{
+				pk_txt("  ");
+				pk_set("2");
+				if (c < 0)	/* no header time: its own */
+				{
+					xv_when(m->at, w, sizeof w);
+					pk_fit(w, 13);
+				}
 				pk_fit(!strcmp(m->who, "user") ? "You"
 				       : !strcmp(m->who, "assistant") ? "Reply"
 				       : m->tool[0] ? m->tool
 				       : !strcmp(m->who, "tool") ? "Tool" : "", 6);
-				if (c >= 0)
-					snprintf(w, sizeof w, "%c%d",
-					         xv_noun(v)[0], c + 1);
-				else
-					w[0] = '\0';
-				pk_fit(w, 5);
+				pk_set("");
+				xv_csent(m);
 			}
-			if (strcmp(m->session, v->session))
-			{
-				pk_fit(m->session, 16);
-				pk_txt(" ");
-			}
-			pk_set("");
-			pk_txt(m->line);
-			if (k == v->csel)
+			if (r == sel)
 				pk_pad(pk_w);
 		}
-		else if (k == 0)
+		else if (r == 0)
 		{
 			pk_set("2");
 			pk_txt(running ? "  " : !xv_lines_ok(v, v->session)
@@ -4988,12 +5118,12 @@ xv_key(struct xv *v, int c)
 		m = v->csel < v->nm ? &v->m[v->csel] : NULL;
 		switch (c)
 		{
-		case 'j': case PK_DOWN: v->csel++; xv_cpin(v); break;
-		case 'k': case PK_UP: v->csel--; xv_cpin(v); break;
-		case PK_PGDN: v->csel += v->win / 2; xv_cpin(v); break;
-		case PK_PGUP: v->csel -= v->win / 2; xv_cpin(v); break;
-		case 'g': case PK_HOME: v->csel = 0; xv_cpin(v); break;
-		case 'G': case PK_END: v->csel = v->nm - 1; xv_cpin(v); break;
+		case 'j': case PK_DOWN: xv_cmove(v, 1, 0); xv_cpin(v); break;
+		case 'k': case PK_UP: xv_cmove(v, -1, 0); xv_cpin(v); break;
+		case PK_PGDN: xv_cmove(v, v->win / 2, 0); xv_cpin(v); break;
+		case PK_PGUP: xv_cmove(v, -(v->win / 2), 0); xv_cpin(v); break;
+		case 'g': case PK_HOME: xv_cmove(v, 0, 1); xv_cpin(v); break;
+		case 'G': case PK_END: xv_cmove(v, INT_MAX, 1); xv_cpin(v); break;
 		case 'f':
 			xv_card(v, v->ckey, v->ctext, v->cref, 1, v->scope);
 			break;
@@ -5006,8 +5136,9 @@ xv_key(struct xv *v, int c)
 			xv_copy(v);
 			break;
 		case '\r': case '\n':
+			/* a turn's header opens the reader at the turn (#478) */
 			if (m && m->chapter[0] && !strcmp(m->session, v->session))
-				xv_read(v, m->chapter, v->ctext);
+				xv_read(v, m->chapter, v->chdr ? NULL : v->ctext);
 			else if (m)
 				snprintf(v->status, sizeof v->status, "%s",
 				         m->chapter[0] ? "another session's prompt: "
