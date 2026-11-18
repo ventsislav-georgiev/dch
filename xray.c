@@ -12541,7 +12541,6 @@ sr_trim(struct xr_search *s)
 	for (k = 0; k < s->n; k++)
 	{
 		struct sr_hit *h = sr_nth(s, k);
-		size_t j;
 
 		for (j = 0; j < n && !sr_same(&o[j], h); j++)
 			;
