@@ -730,6 +730,30 @@ def test_refs():
           len(ms) == 1 and s.startswith("\u2026 ") and
           not "\u0300" <= s[2] <= "\u036f" and
           sb[sp[0]:sp[1]].decode() == purl, ms)
+    # #495: a keycap is not cut off its base, flag pairs do not re-pair
+    bad = []
+    for k in range(8):
+        for unit, ok in (("1\ufe0f\u20e3", lambda c: c[0] != "\u20e3"),
+                         ("\U0001f1e7\U0001f1ec",
+                          lambda c: c[0] != "\U0001f1ec")):
+            tx = unit * 120 + "a" * k
+            put([{"type": "user", "cwd": "/home/demo/proj",
+                  "timestamp": "2026-11-10T10:00:00Z",
+                  "message": {"content": "start"}},
+                 {"type": "assistant", "message": {"content": [
+                     {"type": "text", "text": tx + " " + purl + " " + unit * 120}]}}])
+            r = dch("--xray", "xr-refs", "--ref", purl, "--scope", "session",
+                    "--full", "--json")
+            ms = [l["mention"] for l in ref_lines(r.stdout) or []
+                  if "mention" in l]
+            s = ms[0].get("sentence", "") if ms else ""
+            sp = (ms[0].get("span") or [0, 0]) if ms else [0, 0]
+            if not (len(ms) == 1 and s.startswith("\u2026 ") and ok(s[2:])
+                    and s.encode()[sp[0]:sp[1]].decode() == purl):
+                bad.append((k, unit, s[:12]))
+    check("ref #495: after the left ellipsis no lone keycap U+20E3 and no "
+          "flag cut to its second regional indicator, at every offset",
+          not bad, bad)
     put([{"type": "user", "cwd": "/home/demo/proj",
           "timestamp": "2026-11-10T10:00:00Z",
           "message": {"content": "start"}},

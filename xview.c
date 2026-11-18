@@ -3346,6 +3346,7 @@ xv_csent(const struct xv_men *m)
 		p = a;
 		while (a < ss && (k = xr_u8_cont(s + a, ss - a)))
 			a += k;
+		a += xr_ri2(s, a, ss);
 		if (a && (unsigned char)s[a - 1] > ' ')
 		{
 			size_t b = a;

@@ -13,7 +13,8 @@
 ** place in it holds the ref's bytes when the ref is valid text without
 ** controls (else the same count of bytes). The scalar after the leading
 ** ellipsis is not a continuation (xr_u8_cont) unless the line has an
-** ellipsis of its own, nor when the ref itself starts on a mark. For the
+** ellipsis of its own (the classes: marks, variation selectors, keycap,
+** skin tones; and not the second RI of a pair), nor when the ref itself starts on a mark. For the
 ** selected span xv_csent draws the sentence at EVERY width 8-130: valid UTF-8, within the width, the ref whole when
 ** xv_fitlen says it fits, no continuation scalar after its ellipsis. */
 #include "../../xray.c"
@@ -35,6 +36,14 @@ valid(const unsigned char *u, size_t n)
 			return 0;
 	}
 	return 1;
+}
+
+/* a regional indicator U+1F1E6-1F1FF at p (4 readable bytes) */
+static int
+isri(const char *p)
+{
+	return !memcmp(p, "\xf0\x9f\x87", 3) && (unsigned char)p[3] >= 0xa6 &&
+	       (unsigned char)p[3] <= 0xbf;
 }
 
 /* valid UTF-8 with no control the cut would blank */
@@ -137,6 +146,19 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (!own && ss > 4 && !memcmp(o, "\xe2\x80\xa6 ", 4) &&
 		    xr_u8_cont(o + 4, ss - 4))
 			FAIL();
+		/* the excerpt body o[4..ss) is l[lo..s) when untouched: it does
+		** not start on the second RI of a pair (#495) */
+		if (!own && ss > 8 && !memcmp(o, "\xe2\x80\xa6 ", 4) && s >= ss - 4 &&
+		    !memcmp(l + s - (ss - 4), o + 4, ss - 4) && isri(o + 4))
+		{
+			size_t lo = s - (ss - 4);
+			int odd = 0;
+
+			for (; lo >= 4 && isri(l + lo - 4); lo -= 4)
+				odd ^= 1;
+			if (odd)
+				FAIL();
+		}
 		if (s == sel)
 			draw(o, ss, se, d[1] & 7, own);
 	}
