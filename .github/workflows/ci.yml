@@ -41,6 +41,9 @@ jobs:
 
       - name: Test
         run: make test
+        # per-file seconds in the log, longest first (#393)
+        env:
+          DCH_TEST_TIMES: 1
 
   # Lite client binary driving a session spawned by a full master: the verb
   # client side is protocol-only, so every verb must work cross-build.
