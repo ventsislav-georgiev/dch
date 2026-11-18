@@ -420,19 +420,11 @@ def test_order():
     finally:
         v.close()
     want = ["FOUR2", "FOUR", "THREE2", "THREE", "TWO2", "TWO", "ONE2", "ONE"]
-    v = order_card("xv-o2", b"\x12")
+    # the clock off (the card's light child is xray_main): ASan spent the
+    # 300 ms budget on the first window, 2 of 8 mentions, on every retry
+    v = order_card("xv-o2", b"\x12", env={"DCH_XRAY_NOCLOCK": "1"})
     try:
         got, _ = card_rows(v)
-        # ASan can spend the card's fixed 300 ms budget on the first window
-        # (2 of 8 mentions seen); the budget has no override, so the strict
-        # row runs on a fresh card, the files now cached, up to 4 more times
-        for _ in range(4 if os.environ.get("DCH_TEST_NO_BUDGET") else 0):
-            if got == want:
-                break
-            v.key(b"q")
-            v.close()
-            v = order_card("xv-o2", b"\x12")
-            got, _ = card_rows(v)
         # A loaded runner (ASan in CI) can spend the 300 ms budget before the
         # oldest windows: a cut drops only older windows (#377), so a prefix,
         # and the card then says so ("(f for more)", xv_draw_card).

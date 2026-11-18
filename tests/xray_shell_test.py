@@ -614,25 +614,51 @@ def test_chapter_shell():
 
 def typed_blocks(n, nblocks, body, done):
     """A live shell of nblocks typed OSC 133 blocks, each printing body (sh
-    commands); one --send per block, so each has input between B and C."""
+    commands); one typed line per block, each sent only once that block's
+    B has come out of an attached mirror (the master parses a B before it
+    forwards it), so each has input between B and C (7.3). One mirror types
+    them all: 1300 dch --send starts outran the file's 10 min under ASan, and
+    unpaced parallel sends forged blocks (1086 of 1300)."""
+    import fcntl, pty, select, signal, termios
     prog = ("i=0; while [ $i -lt %d ]; do printf '\\033]133;A\\007$ "
             "\\033]133;B\\007'; read cmd; printf '\\033]133;C\\007'; %s"
             "printf '\\033]133;D;0\\007'; i=$((i+1)); done; echo %s''DONE; "
             "sleep 300") % (nblocks, body, done)
     r = dch("--spawn", n, "--size", "200x24", "sh", "-c", prog)
     check("%s: spawned" % n, r.returncode == 0, r.stderr)
-    wait_for(lambda: "$" in screen(n), 5)
-    if SANITIZED:
-        # 1300 sequential ASan dch starts outran the file's 10 min; four at a
-        # time (the input is the same "x\n", the row tolerates a raced B)
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(4) as ex:
-            list(ex.map(lambda _: dch("--send", n, "x\n"), range(nblocks)))
-    else:
-        for _ in range(nblocks):
-            dch("--send", n, "x\n")
-            time.sleep(0.005)
-    return wait_for(lambda: done + "DONE" in screen(n), 60)
+    wait_for(lambda: "$" in screen(n), 5)	# block 0's B is in
+    ws = struct.pack("HHHH", 24, 200, 0, 0)
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, ws)
+        os.execve(DCH, [DCH, "-f", "-a", n], ENV)
+    os.set_inheritable(fd, False)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, ws)
+    mark, tail, bs, ok = b"\033]133;B\007", b"", 0, True
+    try:
+        end = time.time() + 10	# the attach's redraw: its input path is up
+        while b"$" not in tail and time.time() < end:
+            if select.select([fd], [], [], 0.1)[0]:
+                tail = (tail + os.read(fd, 65536))[-64:]
+        tail = b""
+        for i in range(nblocks):
+            os.write(fd, b"x\n")
+            if i == nblocks - 1:	# the last line through before the detach
+                mark, bs = (done + "DONE").encode(), i
+            end = time.time() + 30
+            while bs <= i and time.time() < end:	# block i+1's B
+                if select.select([fd], [], [], 0.2)[0]:
+                    s = tail + os.read(fd, 65536)
+                    bs += s.count(mark)
+                    tail = s[1 - len(mark):]
+            if bs <= i:
+                ok = False
+                break
+    finally:
+        os.kill(pid, signal.SIGUSR1)	# detach
+        os.close(fd)
+        os.waitpid(pid, 0)
+    return ok and wait_for(lambda: done + "DONE" in screen(n), 60)
 
 
 def test_ref_shell_caps():
@@ -651,7 +677,7 @@ def test_ref_shell_caps():
         check("refcap: 1300 blocks typed", typed_blocks(n, 1300, body, "RC"))
         rc, o, err = xray(n, "--json")
         p9 = [x for x in (o or {}).get("refs", []) if x["key"] == "ticket:PROJ-9"]
-        # a block whose input raced its B is forged (7.3): about 1300
+        # the blocks still on screen are not in the ring yet: about 1300
         count = p9[0]["count"] if p9 else 0
         check("refcap: the index counts ~1300 blocks, 3 definitions",
               rc == 0 and count > 1200 and p9[0]["definitions"] == 3,
