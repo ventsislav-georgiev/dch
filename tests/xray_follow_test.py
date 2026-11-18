@@ -910,10 +910,17 @@ def test_follow_slow_cmd():
         check("slow command (#468): after a reset with two 4.8 s commands, "
               "a ref 0.3 s later comes within %.1f s (LOW-UB1)" % quick,
               d6 is not None and d6 < quick, d6)
+        # the last answer: r1, or r2 when a cadence run landed before the
+        # reset was seen (a loaded box); never the built-in block
+        pre = [o["task"]["id"] for o in fl.objs()[:k6 + max(i, 0)]
+               if "task" in o and "id" in o["task"]]
         check("slow command (#468): the reset's snapshot is followed by the "
               "last answer's tasks block, then the memory block",
-              i >= 0 and snap_blocks(ob, i) and ob[i + 2].get("task", {})
-              .get("id") == "r1", ob[i:i + 8])
+              i >= 0 and snap_blocks(ob, i) and pre and
+              ob[i + 2].get("task", {}).get("id") == pre[-1],
+              (pre[-1:], [(hdr_of(o) or next((k for k in o if k != "schema"),
+                                              "?"), o.get("task", {}).get("id"),
+                           o.get("source")) for o in ob[i:i + 8]]))
         r6 = fl.wait(lambda o: "task" in o and o["task"]["id"] == "r2", 12,
                      frm=k6)
         ob = fl.objs(k6)
