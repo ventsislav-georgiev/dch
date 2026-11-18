@@ -1283,6 +1283,37 @@ def test_search_words():
     rc, o, err = search("xr-sw", "backoff absent")
     check("search words: a word missing is no hit",
           rc == 0 and o["hits"] == [], (rc, o, err))
+    rc, o, err = search("xr-sw", "a b")
+    check("search words: a 1-2 letter word ends a phrase hit on a word "
+          "bound ('a b' is no phrase in 'a backoff') (NIT-UO6)",
+          rc == 0 and o["hits"] == [], (rc, o, err))
+    rc, o, err = search("xr-sw", "backoff retry")
+    rc2, r2, err2 = search("xr-sw", "backoff Backoff retry backoff")
+    check("search words: a word said again gives the same hits (NIT-UO6)",
+          rc == rc2 == 0 and o["hits"] and r2["hits"] == o["hits"],
+          (o, r2, err2))
+    # LOW-UO5: an old phrase hit past 60 newer word-only turns stays, first
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for i, t in enumerate(["the retry backoff phrase itself", "todo"] +
+                              ["backoff then retry %d" % i
+                               for i in range(60)]):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/wproj",
+                                "timestamp": ts(i % 60),
+                                "message": {"content": t}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "timestamp": ts(i % 60),
+                                "message": {"content": [
+                                    {"type": "text", "text": "ok"}]}}) + "\n")
+    rc, o, err = search("xr-sw", "retry backoff")
+    snips = [h["snippet"] for h in (o or {}).get("hits", [])]
+    check("search words: an old phrase hit survives the 50-turn cap, first, "
+          "then the newest 49 turns, more (LOW-UO5)",
+          rc == 0 and len(snips) == 50 and
+          snips[0] == "the retry backoff phrase itself" and
+          snips[1] == "backoff then retry 59" and o["more"] is True,
+          (rc, len(snips), o and o["more"], snips[:3] + snips[-3:], err))
+    rc, o, err = search("xr-sw", "do")
+    check("search words: 'do' is no hit in 'todo' (NIT-UO6)",
+          rc == 0 and o["hits"] == [], (rc, o, err))
 
 
 def test_search():

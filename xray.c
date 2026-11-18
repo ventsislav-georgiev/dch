@@ -11937,8 +11937,13 @@ struct xr_search
 	size_t tl;
 	size_t po, pl;		/* the phrase: the text trimmed, or unquoted */
 	struct sr_word w[XR_SEARCH_MAX / 2 + 1];
-	size_t nw;
+	size_t nw;		/* each word once (NIT-UO6) */
 	int quoted;
+	int b0, b1;		/* the phrase starts, ends on a word bound: its
+				** first, last word under 3 bytes (NIT-UO6) */
+	int look;		/* the turns are full: on for the phrase's hits
+				** alone, which go first (LOW-UO5) */
+	struct sr_word ph;	/* the phrase's prefilter runs */
 	struct sr_hit hit[SR_SLOTS];
 	size_t n, h0;		/* a shell's are a ring from h0, oldest first */
 	uint64_t total, bytes;
@@ -12113,17 +12118,24 @@ size_t
 xr_search_match(const struct xr_search *s, const char *t, size_t n,
                 size_t *ml, int *exact)
 {
-	size_t m, best = SIZE_MAX, bl = 0, l, i;
+	size_t m, best = SIZE_MAX, bl = 0, l, i, p;
 
 	*exact = 0;
 	*ml = 0;
 	if (!t)
 		return SIZE_MAX;
-	if ((m = xr_find(t, n, s->text + s->po, s->pl)) != SIZE_MAX)
+	for (p = 0; p < n &&
+	     (m = xr_find(t + p, n - p, s->text + s->po, s->pl)) != SIZE_MAX;
+	     p = m + 1)
 	{
-		*ml = s->pl;
-		*exact = 1;
-		return m;
+		m += p;
+		if ((!s->b0 || !m || !sr_alnum(t[m - 1])) &&
+		    (!s->b1 || m + s->pl == n || !sr_alnum(t[m + s->pl])))
+		{
+			*ml = s->pl;
+			*exact = 1;
+			return m;
+		}
 	}
 	if (s->quoted)
 		return SIZE_MAX;
@@ -12176,10 +12188,24 @@ xr_search_new(const char *text, long long t0)
 		        fold((unsigned char)text[i + k - 1]) == 'y'));
 		if (!w->rl)	/* "y" */
 			w->rl = w->len, w->lit = 1;
+		s->b1 = !w->lit && w->len < 3 && sr_alnum(text[j - 1]);
+		if (s->nw == 1)
+			s->b0 = !w->lit && w->len < 3 && sr_alnum(text[i]);
 		sr_runs(text + i, w);
 		while (j < b && (unsigned char)text[j] <= ' ')
 			j++;
+		/* a word said again matches where it did */
+		for (k = 0; k + 1 < s->nw; k++)
+			if (s->w[k].len == w->len &&
+			    !xr_find(text + s->w[k].off, w->len, text + w->off, w->len))
+			{
+				memset(w, 0, sizeof *w);
+				s->nw--;
+				break;
+			}
 	}
+	s->ph.rl = (uint8_t)s->pl;
+	sr_runs(text + s->po, &s->ph);
 	return s;
 }
 
@@ -12304,15 +12330,32 @@ sr_region(const struct xr_search *s, uint64_t o)
 
 /* A hit of kind who at off, its text t[0..n) matched at m (tool: malloc'd,
 ** taken). A transcript's hit past XR_SEARCH_HITS sets more and stops the
-** search; a shell's ring keeps the newest XR_SEARCH_HITS. */
+** search, but for the phrase's; a shell's ring keeps the newest
+** XR_SEARCH_HITS. */
 static void
 sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
        const char *t, size_t n, size_t m, size_t ml, int exact)
 {
 	struct sr_hit *h;
+	size_t i;
 
 	s->total++;
 	if (!s->shell && s->n == SR_SLOTS)
+	{
+		/* full: a phrase's hit takes the oldest word-only one's slot
+		** (LOW-UO5) */
+		for (i = s->n; i > 0 && s->hit[i - 1].exact; i--)
+			;
+		if (!exact || !i)
+		{
+			free(tool);
+			return;
+		}
+		sr_hit_free(&s->hit[i - 1]);
+		memmove(&s->hit[i - 1], &s->hit[i], (s->n - i) * sizeof *s->hit);
+		memset(&s->hit[--s->n], 0, sizeof *s->hit);
+	}
+	else if (s->look && !exact)
 	{
 		free(tool);
 		return;
@@ -12333,7 +12376,13 @@ sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
 	h->exact = exact;
 	/* a transcript's chapter: from its window's decoder (sr_chapters) */
 	h->pend = !s->shell && sr_region(s, off) != 1;
-	s->more |= s->n == SR_SLOTS;
+	if (s->n < SR_SLOTS)
+		return;
+	s->more = 1;
+	/* on for the phrase's hits while a word-only one is left */
+	for (i = 0; i < s->n && s->hit[i].exact; i++)
+		;
+	s->look = !s->shell && i < s->n;
 }
 
 /* One record being read: its offset and time, the kinds it already hit. */
@@ -12634,6 +12683,15 @@ sr_codex(struct xr_search *s, const struct json_parser *p, struct sr_rec *r,
 	free(t);
 }
 
+/* the raw line l[0..n) cannot hold q's root t[0..q->rl) once decoded */
+static int
+sr_absent(const char *l, size_t n, const char *t, const struct sr_word *q)
+{
+	return xr_find(l, n, t + q->run, q->runl) == SIZE_MAX &&
+	       (!q->nonascii || xr_find(l, n, "\\u", 2) == SIZE_MAX ||
+	        xr_find(l, n, t + q->asc, q->ascl) == SIZE_MAX);
+}
+
 /* w's line k: its hits, if it holds the text once decoded */
 static void
 sr_line(struct xr_search *s, const struct sr_win *w)
@@ -12644,17 +12702,13 @@ sr_line(struct xr_search *s, const struct sr_win *w)
 	struct sr_rec r;
 	char *ts;
 
-	/* the raw prefilter, every word's root (the decode alone decides) */
+	/* the raw prefilter, every word's root, and the phrase when only its
+	** hits are looked for (the decode alone decides) */
 	for (i = 0; i < s->nw; i++)
-	{
-		const struct sr_word *q = &s->w[i];
-		const char *t = s->text + q->off;
-
-		if (xr_find(l, n, t + q->run, q->runl) == SIZE_MAX &&
-		    (!q->nonascii || xr_find(l, n, "\\u", 2) == SIZE_MAX ||
-		     xr_find(l, n, t + q->asc, q->ascl) == SIZE_MAX))
+		if (sr_absent(l, n, s->text + s->w[i].off, &s->w[i]))
 			return;
-	}
+	if (s->look && sr_absent(l, n, s->text + s->po, &s->ph))
+		return;
 	/* as the decoder takes a line (xr_claude_line) */
 	if (memchr(l, '\0', n) || tokens_max(l, n) > XR_LINE_TOKENS)
 		return;
@@ -12800,37 +12854,40 @@ sr_same(const struct sr_hit *a, const struct sr_hit *b)
 	       !strcmp(a->chapter, b->chapter);
 }
 
-/* Hit k's turn is new: no newer hit is under it */
+/* Hit k's turn is new: no newer hit at least ex exact is under it */
 static int
-sr_newturn(struct xr_search *s, size_t k)
+sr_newturn(struct xr_search *s, size_t k, int ex)
 {
 	size_t j;
 
 	for (j = 0; j < k; j++)
-		if (sr_same(sr_nth(s, j), sr_nth(s, k)))
+		if (sr_nth(s, j)->exact >= ex && sr_same(sr_nth(s, j), sr_nth(s, k)))
 			return 0;
 	return 1;
 }
 
-/* The turns of the hits whose chapter is known */
+/* The turns of the hits whose chapter is known, at least ex exact */
 static size_t
-sr_turns(struct xr_search *s)
+sr_turns(struct xr_search *s, int ex)
 {
 	size_t k, n = 0;
 
 	for (k = 0; k < s->n; k++)
-		n += !sr_nth(s, k)->pend && sr_newturn(s, k);
+		n += sr_nth(s, k)->exact >= ex && !sr_nth(s, k)->pend &&
+		     sr_newturn(s, k, ex);
 	return n;
 }
 
-/* Only the newest XR_SEARCH_TURNS turns' hits stay, newest first; more
-** when one goes (#457). Every chapter known or null by now. */
+/* Only XR_SEARCH_TURNS turns' hits stay: the phrase's first, then the
+** rest, each newest first (#499; LOW-UO5: an older phrase's turn before a
+** newer word-only one); more when one goes (#457). Every chapter known or
+** null by now. */
 static void
 sr_trim(struct xr_search *s)
 {
-	struct sr_hit *o;
-	size_t k, n = 0, t = 0, j;
-	int cut = 0;
+	struct sr_hit *o, l;
+	size_t k, n = 0, t = 0, j, i;
+	int cut = 0, ex;
 
 	/* the hit past the cap (the oldest of SR_SLOTS) is not kept: the oldest
 	** kept turn is cut only when that hit is under it too */
@@ -12846,45 +12903,41 @@ sr_trim(struct xr_search *s)
 	}
 	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
 		return;		/* out of memory: the hits stay as they are */
-	for (k = 0; k < s->n; k++)
-	{
-		struct sr_hit *h = sr_nth(s, k);
-
-		for (j = 0; j < n && !sr_same(&o[j], h); j++)
-			;
-		if (j == n && t == XR_SEARCH_TURNS)
+	if (cut)	/* its turn: chapter and pend are all sr_same reads */
+		memcpy(&l, sr_nth(s, s->n - 1), sizeof l);
+	for (ex = 2; ex-- > 0;)
+		for (k = 0; k < s->n; k++)
 		{
-			s->more = 1;
-			cut = 0;	/* the cut (oldest) turn went with the turn cap */
-			sr_hit_free(h);
-			continue;
+			struct sr_hit *h = sr_nth(s, k);
+
+			if (h->exact != ex)
+				continue;
+			for (j = 0; j < n && !sr_same(&o[j], h); j++)
+				;
+			if (j == n && t == XR_SEARCH_TURNS)
+				s->more = 1, sr_hit_free(h);
+			else
+			{
+				t += j == n;
+				o[n++] = *h;
+				memset(h, 0, sizeof *h);
+			}
+			h->exact = -1;	/* taken */
 		}
-		t += j == n;
-		o[n++] = *h;
-		memset(h, 0, sizeof *h);
-	}
-	/* at the hit cap the oldest kept turn may be cut: drop it whole,
-	** unless it is the only one (UC2) */
+	/* at the hit cap the oldest turn may be cut: drop it whole, unless it
+	** is the only one kept (UC2) */
 	if (cut && t > 1)
 	{
-		struct sr_hit l = o[n - 1];
-
-		do
-			sr_hit_free(&o[--n]);
-		while (n && sr_same(&o[n - 1], &l));
-		s->more = 1;
+		for (j = i = 0; j < n; j++)
+			if (sr_same(&o[j], &l))
+				sr_hit_free(&o[j]), s->more = 1;
+			else
+				o[i++] = o[j];
+		n = i;
 	}
-	/* back as the printer reads them (a shell's oldest first from 0), the
-	** caps taken: the phrase's hits first, then the rest, each newest
-	** first (#499) */
-	t = 0;
-	for (j = 2; j-- > 0;)
-		for (k = 0; k < n; k++)
-			if (o[k].exact == (int)j)
-			{
-				s->hit[s->shell ? n - 1 - t : t] = o[k];
-				t++;
-			}
+	/* back as the printer reads them (a shell's oldest first from 0) */
+	for (k = 0; k < n; k++)
+		s->hit[s->shell ? n - 1 - k : k] = o[k];
 	s->n = n;
 	s->h0 = 0;
 	free(o);
@@ -12945,9 +12998,10 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 	{
 		long long now = xr_now_ms();
 
-		if (stop < 0 && s->more)
+		if (stop < 0 && s->more && !s->look)
 			stop = now;
-		if (s->more && (!sr_pending(s) || now - stop >= XR_LOOKBACK_MS))
+		if (s->more && !s->look &&
+		    (!sr_pending(s) || now - stop >= XR_LOOKBACK_MS))
 			break;
 		if (s->bytes >= xr_lim.bytes || now - s->t0 >= xr_lim.ms)
 		{
@@ -12998,17 +13052,20 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 		}
 		/* no whole line starts here: one over xr_lim.line, skipped */
 		end = i < (size_t)(end - start) ? start + i : start;
-		for (w.k = w.nln; !s->more && w.k-- > 0;)
+		for (w.k = w.nln; (!s->more || s->look) && w.k-- > 0;)
 			sr_line(s, &w);
 		pd = sr_pending(s);
 		if (rc == 0 && pd && sr_chapters(s, &w) < 0)
 			rc = -1;
 		/* a 51st turn (#457), counted again when a hit or a chapter
-		** may have come */
-		if (!s->more && (pd || s->n != seen))
+		** may have come; the phrase's own 51st ends the look on */
+		if ((!s->more || s->look) && (pd || s->n != seen))
 		{
 			seen = s->n;
-			s->more = sr_turns(s) > XR_SEARCH_TURNS;
+			if (sr_turns(s, 1) > XR_SEARCH_TURNS)
+				s->more = 1, s->look = 0;
+			else if (sr_turns(s, 0) > XR_SEARCH_TURNS)
+				s->more = s->look = 1;
 		}
 	}
 	if (end > 0 && !s->more && rc == 0)

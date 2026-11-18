@@ -5510,7 +5510,8 @@ t_search(void)
 	      sm("a fix", "fixing that", -1, 0, 0) &&
 	      sm("to do list", "todo list", -1, 0, 0) &&
 	      sm("to do list", "list: to do", 0, 0, 4) &&
-	      sm("\"to do\"", "todo", -1, 0, 0) && sm("to", "todo", 1, 0, 2));
+	      sm("\"to do\"", "todo", -1, 0, 0) && sm("to", "todo", -1, 0, 0) &&
+	      sm("\"to\"", "todo", 1, 0, 2));
 	CHECK("search words: a folded word is the stem, not a prefix (pushing: "
 	      "not pushover); a word as typed still is a substring",
 	      sm("pushing", "pushover", -1, 0, 0) &&
