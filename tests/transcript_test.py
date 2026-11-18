@@ -488,6 +488,38 @@ def main():
                                                description="Meta fifo",
                                                background=True))
 
+            # the read budget by bytes (#491), no timing: a window reads
+            # ~1.07 MB of a 1.2 MB filler, so 16 MB is gone after 16 of them.
+            # Subagent files are read in readdir order: bbud's result file is
+            # made the last one (20 fillers before it), bctl's the 5th.
+            pb = shell("bbud", "'sleep 120'")
+            pc = shell("bctl", "'sleep 120'")
+            tb, tc = started(pb), started(pc)
+            src = os.path.join(tmp, "bud.jsonl")
+            with open(src, "w") as f:
+                f.write(filler(max(tb, tc) + 5, 1200))
+            names = ["agent-aBUD%02d.jsonl" % k for k in range(22)]
+            for nm in names:
+                shutil.copyfile(src, os.path.join(sub, nm))
+            order = [n for n in os.listdir(sub) if n in names]
+            for nm, sid_, t_ in ((order[4], "bctl", tc),
+                                 (order[-1], "bbud", tb)):
+                with open(os.path.join(sub, nm), "r+") as f:	# same inode
+                    f.truncate(0)
+                    f.write(result("toolu_" + sid_, sid_, t_, nm[6:-6]))
+            check("budget fixture: result files at readdir positions 4, 21",
+                  [n for n in os.listdir(sub) if n in names] == order)
+            got = {s.get("id"): s for s in (field(h, "shells") or [])
+                   if isinstance(s, dict)}
+            check("5th subagent file: shell found (%s)" % got.get("bctl"),
+                  got.get("bctl", {}).get("agent") == order[4][6:-6])
+            check("result past 16 MB of subagent reads: id, pid, started, "
+                  "command only (%s)" % got.get("bbud"),
+                  got.get("bbud") == {"id": "bbud", "pid": pb, "started": tb,
+                                      "command": "sleep 120"})
+            for nm in names:
+                os.unlink(os.path.join(sub, nm))
+
             # cost bounded per call (#487): 32 shells no transcript names x
             # 250 subagent files of 1.2 MB, every line since they started
             # (hard links: one file on disk). 1.102.0 read ~1 MB a pair.
