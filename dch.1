@@ -1763,6 +1763,8 @@ the hits of the newest 50 turns are kept (a turn is a prompt's chapter or
 a shell's command, a hit under none a turn of its own), at most 500, a
 turn's newest first, and a 51st turn or a 501st hit sets
 .BR more:true .
+At the 500-hit cap the turn it cut is left out whole, unless it is the
+only turn (then its newest 500).
 It goes with no other flag but
 .B \-\-json
 and not in

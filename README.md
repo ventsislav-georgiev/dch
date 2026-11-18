@@ -1933,7 +1933,8 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   The hits of the newest 50 turns are kept (a turn is a prompt's chapter,
   a shell's command; a hit under no chapter is a turn of its own), at most
   500 hits, a turn's newest first; a 51st turn or a 501st hit makes
-  `more: true`. A shell reads its ring and screen as `--ref` does.
+  `more: true`. At the 500-hit cap the turn it cut is left out whole, so
+  every turn kept is whole, unless it is the only turn (then its newest 500). A shell reads its ring and screen as `--ref` does.
 
 `--search` goes with no other flag but `--json` (`dch: bad usage: --search
 and --ref`, also with `--chapter`, `--clear` or `--follow`), and not in
