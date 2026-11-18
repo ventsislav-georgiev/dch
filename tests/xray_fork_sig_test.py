@@ -30,6 +30,8 @@ DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 RSID = "11111111-2222-4333-8444-5555555555d1"
 BURSTS = int(os.environ.get("XFS_BURSTS", "6"))
 BURST = b"\r" + b"f" * 8 + b"h"
+# ASan: the view digests a burst slower, so a key's settle and every wait stretch
+SLOW = 3 if "ASAN_OPTIONS" in os.environ else 1
 RESTORE = b"\033[?1049l"
 POP = b"\033[<u"
 fails = [0]
@@ -94,7 +96,7 @@ class Pty:
         return self.rc
 
     def wait(self, what, secs=10.0, start=0):
-        end = time.time() + secs
+        end = time.time() + secs * SLOW
         while what not in self.out[start:] and time.time() < end:
             self.pump(0.1)
             if self.rc is not None:
@@ -102,14 +104,14 @@ class Pty:
         return what in self.out[start:]
 
     def exit(self, secs=10.0):
-        end = time.time() + secs
+        end = time.time() + secs * SLOW
         while self.reap() is None and time.time() < end:
             self.pump(0.1)
         return self.rc
 
     def key(self, b, settle=0.3):
         os.write(self.fd, b)
-        self.pump(settle)
+        self.pump(settle * SLOW)
 
     def close(self):
         if self.reap() is None:

@@ -645,8 +645,11 @@ def main():
         reused.wait()
         check("empty dead-pid, non-pid and reused-pid records: no re-read "
               "(%d)" % waited, waited == 0)
+        # the wait is 100ms of sleeps; ASan's noise is as large, so there the
+        # "read again" count above (0 vs 20 on the base) is the proof
         check("... and no wait: fastest of 10 %.0fms vs %.0fms clean"
-              % (slow * 1000, clean * 1000), slow - clean < 0.06)
+              % (slow * 1000, clean * 1000),
+              bool(no_budget) or slow - clean < 0.06)
 
         # --- CLAUDE_CONFIG_DIR is honoured --------------------------------
         e = "tt-cfg"

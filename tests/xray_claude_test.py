@@ -2828,9 +2828,6 @@ def test_scope():
         "content": "pad id: 933 " + "y" * 1000}}) + "\n" for _ in range(1000))
     for k in range(10, 71):
         put(k, P, ["#931 in %d" % k], 1794300100 + k)
-        with open(os.path.join(cfg, "projects", key(P), sid(k) + ".jsonl"),
-                  "a") as f:
-            f.write(big)
     before = files(S)
     rc, ls, opens, order, err = ref("#931", "--scope", "all", "--full")
     d = ls[-1]
@@ -2838,6 +2835,13 @@ def test_scope():
           rc == 0 and opens == 64 and d["files"] == 64 and d["partial"] and
           d["why"] == "files" and order[:3] == ["s0", "s70", "s69"] and
           "s3" not in order, (opens, d, order[:4], err))
+    # the 1 MB bodies come after the files cap row: 61 of them scanned under
+    # ASan outlast the 10 s time cap (not raisable), turning why files into time
+    for k in range(10, 71):
+        with open(os.path.join(cfg, "projects", key(P), sid(k) + ".jsonl"),
+                  "a") as f:
+            f.write(big)
+    before = files(S)
     t0 = time.time()
     # untraced: DCH_DEBUG's lines cost more than the 50 ms budget
     rc, ls, opens, order, err = ref("#933", "--scope", "all",

@@ -622,9 +622,16 @@ def typed_blocks(n, nblocks, body, done):
     r = dch("--spawn", n, "--size", "200x24", "sh", "-c", prog)
     check("%s: spawned" % n, r.returncode == 0, r.stderr)
     wait_for(lambda: "$" in screen(n), 5)
-    for _ in range(nblocks):
-        dch("--send", n, "x\n")
-        time.sleep(0.005)
+    if SANITIZED:
+        # 1300 sequential ASan dch starts outran the file's 10 min; four at a
+        # time (the input is the same "x\n", the row tolerates a raced B)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(4) as ex:
+            list(ex.map(lambda _: dch("--send", n, "x\n"), range(nblocks)))
+    else:
+        for _ in range(nblocks):
+            dch("--send", n, "x\n")
+            time.sleep(0.005)
     return wait_for(lambda: done + "DONE" in screen(n), 60)
 
 

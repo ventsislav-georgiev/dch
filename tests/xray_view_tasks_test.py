@@ -242,23 +242,23 @@ def test_memory():
 def test_memory_big():
     """#323: 20000 memories: the tab and the whole list fast."""
     t0 = time.time()
+    x = 4 if os.environ.get("DCH_TEST_NO_BUDGET") else 1  # sanitizer: 16.3 s seen
     v = Pty([DCH, "--xray", "xv-mb"], rows=30, cols=100)
     try:
-        ok = tabbar(v, "Memory ", 15)
+        ok = tabbar(v, "Memory ", 15 * x)
         dt = time.time() - t0
-        ok2 = tabbar(v, "Memory 20000", 15)
+        ok2 = tabbar(v, "Memory 20000", 15 * x)
         dt2 = time.time() - t0
         # a bound for a hang, not a speed target: 1.75 to 4.17 s measured,
         # by the machine's load (#325)
         check("Memory big: the tab in %.2f s, all 20000 rows in %.2f s "
-              "(under 15)" % (dt, dt2), ok and ok2 and dt2 < 15,
+              "(under %g)" % (dt, dt2, 15 * x), ok and ok2 and dt2 < 15 * x,
               rows(v.out).get(2))
         mem_tab(v)
         mark = len(v.out)
         s = time.time()
         v.key(b"G", 0)
         ok = v.wait(b"\xe2\x96\x8c m", 5, start=mark)
-        x = 4 if os.environ.get("DCH_TEST_NO_BUDGET") else 1  # sanitizer
         check("Memory big: G painted within %g s (%.3f s)" %
               (0.5 * x, time.time() - s), ok and time.time() - s < 0.5 * x and
               re.search(r"m\d{5}", head(v)), head(v))

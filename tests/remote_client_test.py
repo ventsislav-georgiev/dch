@@ -2499,7 +2499,9 @@ def main(part="a"):
             st, more = reap(pid, fd, 5)
             out += more
             check("a tampered cache in the picker: only label hosts, in range",
-                  b"srv:\x1b[0mkeep" in out and b"spoof" not in out
+                  # live-pending or (slow ASan) already-stale paint of keep
+                  (b"srv:\x1b[0mkeep" in out or b"srv:keep" in out)
+                  and b"spoof" not in out
                   and b"\xe2\x80\xae" not in out and b"future" not in out,
                   (st, out))
 
