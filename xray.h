@@ -104,9 +104,12 @@ void xr_chapters_free(struct xr_chapters *c);
 const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,
                                        size_t i);
 
-/* Bytes of a continuation scalar at s: combining mark, ZWJ, VS16, skin tone;
-** else 0 (#488). */
+/* Bytes of a continuation scalar at s: combining mark (0300, 1AB0, 1DC0,
+** 20D0 incl. keycap, FE20 blocks), ZWJ, variation selector, skin tone;
+** else 0 (#488, #495). */
 size_t xr_u8_cont(const char *s, size_t n);
+/* 4 when the regional indicator at l+lo is the second of a flag pair, so a
+** cut steps past it; else 0 (#495). */
 size_t xr_ri2(const char *l, size_t lo, size_t s);
 
 /* ---- identity (3.1) ---------------------------------------------------- */

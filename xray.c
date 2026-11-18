@@ -79,7 +79,7 @@ xr_u8_cont(const char *s, size_t n)
 		return 0;
 	c = u8_next((const unsigned char *)s, n, &a);
 	return (c >= 0x300 && c <= 0x36f) || c == 0x200d ||
-	       (c >= 0xfe00 && c <= 0xfe0f) || c == 0x20e3 ||
+	       (c >= 0xfe00 && c <= 0xfe0f) ||
 	       (c >= 0x1ab0 && c <= 0x1aff) || (c >= 0x1dc0 && c <= 0x1dff) ||
 	       (c >= 0x20d0 && c <= 0x20ff) || (c >= 0xfe20 && c <= 0xfe2f) ||
 	       (c >= 0x1f3fb && c <= 0x1f3ff) ? a : 0;
