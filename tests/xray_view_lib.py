@@ -488,7 +488,8 @@ def shown(v, mark):
 
 # ---- the card's mentions, newest first (#304, QA 1.62.0 MED-V13) -----------
 
-OSIDS = ["11111111-2222-4333-8444-5555555555%02x" % k for k in (0xa1, 0xa2, 0xa3)]
+OSIDS = ["11111111-2222-4333-8444-5555555555%02x" % k
+         for k in (0xa1, 0xa2, 0xa3, 0xa4)]
 
 
 def fixture_order():
@@ -512,6 +513,16 @@ def fixture_order():
                 lines += [say("pad " * 50000)] * 6     # 1.2 MB
         record(name, sid, lines, *(("-home-demo-proj2", P + "2") if big
                                    else ()))
+    # xv-o4 (#469): a Bash call and its result, each saying o/r#77; a project
+    # of its own, so no other card shows them
+    os.makedirs(os.path.dirname(tl(OSIDS[3], "-home-demo-proj3")),
+                exist_ok=True)
+    record("xv-o4", OSIDS[3], turn("prompt TOOLS", "2026-11-10T10:00:00Z",
+        call("tb1", "Bash", {"command": "gh pr view https://github.com/o/r/pull/77"}),
+        {"type": "user", "message": {"content": [{
+            "type": "tool_result", "tool_use_id": "tb1",
+            "content": "note RESULT says o/r#77"}]}}),
+        "-home-demo-proj3", P + "3")
     record("xv-o3", OSIDS[2], turn("prompt PIN", "2026-11-10T10:00:00Z") +
            [at(say("note %03d says PROJ-9" % k),
                "2026-11-10T10:%02d:%02dZ" % (k // 60, k % 60))
@@ -528,15 +539,15 @@ def card_rows(v):
     return [w for _, w in got], [w for s, w in got if s]
 
 
-def order_card(name, keys, secs=20.0):
-    """name's view, PROJ-9's card opened by ^R, settled."""
+def order_card(name, keys, secs=20.0, term="PROJ-9"):
+    """name's view, term's card opened by ^R, settled."""
     v = Pty([DCH, "--xray", name], 40, 100)
     v.wait(b"Prompts ", secs)
     v.pump(0.5)
-    v.key(b"/PROJ-9", 0.5)
+    v.key(b"/" + term.encode(), 0.5)
     mark = len(v.out)
     v.key(keys, 0.5)
-    v.wait(b"PROJ-9  light", secs, start=mark)
+    v.wait(term.encode() + b"  light", secs, start=mark)
     settle(v, secs)
     return v
 

@@ -471,6 +471,20 @@ def test_order():
         v.close()
 
 
+def test_tool_mention():
+    """#469: the card's row for a Bash result names its call's tool."""
+    v = order_card("xv-o4", b"\x12", term="o/r#77")
+    try:
+        scr = rows(v.out)
+        res = [scr[k] for k in sorted(scr) if "RESULT says" in scr[k]]
+        check("card #469: a Bash result's mention row reads Bash, not Tool",
+              len(res) == 1 and "Bash" in res[0] and "Tool" not in res[0],
+              res)
+        v.key(b"q")
+    finally:
+        v.close()
+
+
 def test_tmp():
     v, scr, text = refs_tab("xv-tp")
     try:
@@ -872,7 +886,7 @@ def test_terms_live():
 def main():
     run_steps(fixture, test_refusals, test_view, fixture_refs, test_refs,
               fixture_latest, test_latest, test_lookup, fixture_order,
-              test_order, fixture_tmp, test_tmp, test_memory_live,
+              test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
               fixture_said, test_said, fixture_terms, test_terms,
               test_terms_live)

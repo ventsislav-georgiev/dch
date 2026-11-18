@@ -5055,6 +5055,7 @@ struct rcall
 	char *cmd;		/* RC_BASH: <= XR_BASH_MAX bytes */
 	size_t cl;
 	char chapter[48];	/* the call's chapter anchor, "" for none */
+	char name[48];		/* the call's tool name, for its result's mention */
 	uint64_t off;
 	long long at;
 };
@@ -5913,6 +5914,7 @@ rc_push(struct xr_claude *d, const char *id, int kind)
 	c = &d->calls[d->ncalls++];
 	memset(c, 0, sizeof *c);
 	snprintf(c->id, sizeof c->id, "%s", id);
+	snprintf(c->name, sizeof c->name, "%s", d->tool ? d->tool : "");
 	c->kind = kind;
 	c->off = d->off;
 	c->at = d->at;
@@ -6203,6 +6205,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	if (!d->rk.hit)
 		goto out;
 	d->who = "tool";
+	d->tool = rr->paired && *rr->c.name ? rr->c.name : NULL;
 	if (!rr->paired)
 		ch_anchor(d, a);
 	rm_claude(d, &r, rr->paired ? rr->c.chapter : a);
@@ -6258,6 +6261,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	free(cr.cov);
 out:
 	d->who = who;
+	d->tool = NULL;
 	free(r.cov);
 	if (body != t)
 		free(body);
