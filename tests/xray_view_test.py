@@ -690,6 +690,8 @@ def test_reply_live():
 
 CSIDS = ["11111111-2222-4333-8444-5555555555f%d" % k for k in (7,)]
 SAID = "Opened PR #412: idempotency key on checkout, 24h TTL."
+# paragraphs before SAID in turn 4's reply: a mention's open scrolls past them
+PAD = "Padding alpha.\n\n" + "".join("Padding %d.\n\n" % k for k in range(30))
 
 
 def fixture_said():
@@ -700,7 +702,7 @@ def fixture_said():
         lines += turn("filler %d" % k, "2026-11-10T1%d:00:00Z" % k,
                       at(say("nothing here"), "2026-11-10T1%d:01:00Z" % k))
     lines += turn("ship the fix", "2026-11-10T13:00:00Z",
-                  at(say(SAID), "2026-11-10T13:01:00Z"))
+                  at(say(PAD + SAID), "2026-11-10T13:01:00Z"))
     lines += turn("is #412 merged?", "2026-11-10T14:00:00Z",
                   at(say("Checked it. Yes, #412 is merged now! Done."),
                      "2026-11-10T14:01:00Z"))
@@ -761,8 +763,20 @@ def test_said():
                             screen(v, mark))[1], 5)
         text = screen(v, mark)
         check("#478: Enter on p4's header opens the reader at turn 4",
-              ok and "Opened PR #412" in text and "is #412 merged" not in
+              ok and "Padding alpha" in text and "is #412 merged" not in
               text, text)
+        # a header opens at the turn's top; a mention scrolls to the ref
+        check("#478: Enter on a header opens at the turn's top, not the ref",
+              "Padding alpha" in text and "Opened PR #412" not in text, text)
+        v.key(b"q", 0.5)
+        mark = len(v.out)
+        v.key(b"j\r", 1.0)
+        ok = until(lambda: (v.pump(0.1), "ship the fix" in
+                            screen(v, mark))[1], 5)
+        text = screen(v, mark)
+        check("#478: Enter on a mention opens at the ref, its turn's top "
+              "scrolled off", ok and "Opened PR #412" in text and
+              "Padding alpha" not in text, text)
         v.key(b"q", 0.5)
         v.key(b"q")
         v.key(b"q")
