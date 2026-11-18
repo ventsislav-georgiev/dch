@@ -258,8 +258,9 @@ def test_memory_big():
         s = time.time()
         v.key(b"G", 0)
         ok = v.wait(b"\xe2\x96\x8c m", 5, start=mark)
-        check("Memory big: G painted within 0.5 s (%.3f s)" %
-              (time.time() - s), ok and time.time() - s < 0.5 and
+        x = 4 if os.environ.get("DCH_TEST_NO_BUDGET") else 1  # sanitizer
+        check("Memory big: G painted within %g s (%.3f s)" %
+              (0.5 * x, time.time() - s), ok and time.time() - s < 0.5 * x and
               re.search(r"m\d{5}", head(v)), head(v))
         v.key(b"q")
         check("Memory big: q exits 0", v.exit() == 0, v.out[-80:])

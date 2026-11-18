@@ -279,7 +279,7 @@ def test_claude():
             rc, o, err = xray(n, "--json")
             dt = time.time() - t0
             check("claude: 3 lines of %dk unclosed openers (%s) in %.2fs "
-                  "(< 2 s)" % (cnt // 1000, what, dt), rc == 0 and o and dt < 2 and
+                  "(< 2 s)" % (cnt // 1000, what, dt), rc == 0 and o and (SANITIZED or dt < 2) and
                   [c["title"] for c in o["chapters"][1:]] == [
                       "".join(op(k) for k in range(6))[:120]] * 3,
                   (rc, dt, o and o["chapters"][:2], err))
@@ -2265,7 +2265,7 @@ def test_cancel():
         check("cancel: SIGTERM mid-scan ends it at once (%.3fs, the whole "
               "scan %.2fs), no done" % (dt, full),
               running and b'"first"' in first and p.returncode == -15 and
-              dt < 0.5 and b'"done"' not in rest, (p.returncode, rest[-300:]))
+              (SANITIZED or dt < 0.5) and b'"done"' not in rest, (p.returncode, rest[-300:]))
 
         p = subprocess.Popen(argv, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, env=ENV)
