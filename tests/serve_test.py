@@ -150,7 +150,7 @@ def main():
                "--clear exclude each other"),
               (["--memory", "--scope", "session", "--json"],
                "--scope, --full and --budget-ms come with --ref"),
-              (["--search", "ab", "--scope", "session", "--json"],
+              (["--search", "ab", "--full", "--json"],
                "--scope, --full and --budget-ms come with --ref")]
         no += [(["--search", t, "--json"], "bad search: 2 to 200 bytes, no control character")
                for t in ["", "x", "s" * 201, "a\x01b", "a\x1bb", "a\x7fb",

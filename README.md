@@ -393,6 +393,7 @@ dch --xray <n> --follow --json                  # the same object, then its delt
 dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
 dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
+dch --xray <n> --search <text> --scope all --json  # the same over every session with a corpus, hits grouped by session (project: <n>'s project only; no --json: text)
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
@@ -1953,9 +1954,49 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   `more: true`. At the 500-hit cap the turn it cut is left out whole, so
   every turn kept is whole, unless it is the only turn (then its newest 500). A shell reads its ring and screen as `--ref` does.
 
-`--search` goes with no other flag but `--json` (`dch: bad usage: --search
-and --ref`, also with `--chapter`, `--clear` or `--follow`), and not in
-`--requests`. Nothing is written to disk, and the text is never logged or
+- **Across sessions (#498).** `--scope project` or `--scope all` searches
+  `<n>`'s corpus as above, then the other sessions' files exactly as
+  [`--ref --scope`](#x-ray-queries---xray) finds them (the live sessions and
+  the History records, one per agent id; each Claude transcript or Codex
+  rollout mapped by name, never a ring): `project` the ones in `<n>`'s
+  project dir, newest `lastSeen` first, `all` then the other project dirs,
+  the dir with the newest session first. `--scope session`, or no `--scope`,
+  is the one-session object above. Each file is searched as `<n>`'s, with its
+  own 50-turn and 500-hit caps; together they stop at `--ref`'s file cap
+  (64 files, `why: "files"`) and its 10 s counted from dch's start
+  (`why: "time"`), so the newest sessions come first and a cut drops the
+  oldest. The answer is one object:
+  `{"schema":1,"session","session_id","text","scope","sessions":[…],"searched","partial","why"}`,
+  `searched` the files read, `partial`/`why` a cap that stopped it.
+  `sessions` holds `<n>`'s group first (also with no hit), then each other
+  session that has a hit, in the order read:
+  `{"session","session_id","corpus","live","project","last_active","turn_title","hits":[{"chapter","offset","at","who","tool","turn_title","snippet"}],"more","partial","why","bytes"}`.
+  As on `--ref`'s other-session `mention` lines, `session_id` is the
+  session's own id (`null` when none) and `last_active` its last activity in
+  epoch seconds (another session's: its `lastSeen`, as History holds it;
+  `<n>`'s: its file's last write; `null` for a shell), so a client groups by
+  `session_id` when both sides have one, else by name. A hit's `turn_title`
+  is its chapter's title (`null` with a `null` chapter); the group's is its
+  newest hit's. `project` is the session's project dir key. Example:
+
+  ```json
+  {"schema":1,"session":"api","session_id":"3f…","text":"push retry","scope":"all","sessions":[
+    {"session":"api","session_id":"3f…","corpus":"claude","live":true,"project":"-home-me-api","last_active":1794300000,"turn_title":"plan the release","hits":[{"chapter":"f36cb:0","offset":125,"at":1794299990,"who":"assistant","tool":null,"turn_title":"plan the release","snippet":"see the Push Retry note"}],"more":false,"partial":false,"why":null,"bytes":226},
+    {"session":"cli","session_id":"9a…","corpus":"claude","live":false,"project":"-home-me-cli","last_active":1794200000,"turn_title":"the push retry thing again","hits":[…],"more":false,"partial":false,"why":null,"bytes":4096}],
+   "searched":3,"partial":false,"why":null}
+  ```
+- **Text.** Without `--json` (a local `<n>` only; `host:name` still needs
+  `--json`), `--search` prints text instead: per session a line with its
+  name, its last activity in local time and its hit count (`, more` past a
+  cap), then per turn its title (`(no turn title)` for none) and that turn's
+  hits as `who[ tool]: snippet`, indented; a cap that stopped a scoped search
+  ends it with `(stopped at the files|time cap: N sessions searched)`.
+
+`--search` goes with no other flag but `--json` and `--scope` (`dch: bad
+usage: --search and --ref`, also with `--chapter`, `--clear` or `--follow`),
+and not in `--requests`; `--full` and `--budget-ms` stay `--ref`'s
+(`dch: bad usage: --scope, --full and --budget-ms come with --ref`, the
+message `--scope` alone also gives with neither `--ref` nor `--search`). Nothing is written to disk, and the text is never logged or
 traced. On `host:name` it runs on that host's `dch serve`; a host whose dch
 predates `--search` says `dch: <host>: the host's dch does not know --search`
 (exit 1).

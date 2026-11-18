@@ -11538,6 +11538,7 @@ struct sr_hit
 				** chapter holds one an older window may
 				** still merge away, #299) */
 	char *tool, *snip;
+	char *title;		/* its chapter's title (#498), NULL for none */
 	char chapter[40];
 };
 
@@ -11604,6 +11605,7 @@ sr_hit_free(struct sr_hit *h)
 {
 	free(h->tool);
 	free(h->snip);
+	free(h->title);
 	memset(h, 0, sizeof *h);
 }
 
@@ -12077,6 +12079,15 @@ sr_line(struct xr_search *s, const struct sr_win *w)
 	dch_json_free(&p);
 }
 
+/* h under c: its anchor and (#498) its title */
+static void
+sr_chapter(struct sr_hit *h, const struct xr_chapter *c)
+{
+	snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
+	free(h->title);
+	h->title = c->title[0] ? strdup(c->title) : NULL;
+}
+
 /* The chapters of w's lines, by a fresh decoder (as light --ref's windows):
 ** a pending hit is under the newest chapter at or before it, unless that is
 ** the window's first (the turn began in an older window; one a prompt began
@@ -12159,13 +12170,13 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 			h->pend = 0, h->chapter[0] = '\0';
 		else if (h->pend == 1 && c && (i || !wa))
 		{
-			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
+			sr_chapter(h, c);
 			h->pend = 0;
 		}
 		/* #299: begun by a prompt, it may be merged into an older one */
 		else if (h->pend == 1 && c && !c->partial)
 		{
-			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
+			sr_chapter(h, c);
 			h->pend = 2;
 		}
 		/* begun by an image, a prompt then joined: the full decode's
@@ -12485,33 +12496,39 @@ xr_search_ring_end(struct xr_search *s)
 	sr_trim(s);
 }
 
-int
-xr_search_print(FILE *f, const struct xr_search *s, const char *session,
-                const char *session_id, const char *corpus, const char *why)
+/* Hit k as printed, newest first */
+static const struct sr_hit *
+sr_shown(const struct xr_search *s, size_t k)
+{
+	return &s->hit[s->shell ? (s->h0 + s->n - 1 - k) % SR_SLOTS : k];
+}
+
+/* An object's tail: "hits" to "bytes" and the '}' (titled: each hit's
+** turn_title, #498) */
+static void
+sr_put_hits(FILE *f, const struct xr_search *s, const char *why, int titled)
 {
 	size_t k;
 
 	if (!why && s->partial)
 		why = s->why;
-	fputs("{\"schema\":1,\"session\":", f);
-	xr_put_str(f, session);
-	fputs(",\"session_id\":", f);
-	xr_put_str(f, session_id);
-	fprintf(f, ",\"corpus\":\"%s\",\"text\":", corpus);
-	xr_put_str(f, s->text);
 	fputs(",\"hits\":[", f);
 	for (k = 0; k < s->n; k++)
 	{
-		/* newest first: a transcript's are, a shell's ring is oldest first */
-		const struct sr_hit *h = &s->hit[s->shell ? (s->h0 + s->n - 1 - k)
-		                                  % SR_SLOTS : k];
+		const struct sr_hit *h = sr_shown(s, k);
+		int ch = h->chapter[0] && !h->pend;
 
 		fputs(k ? ",{\"chapter\":" : "{\"chapter\":", f);
-		put_or_null(f, h->chapter[0] && !h->pend ? h->chapter : NULL);
+		put_or_null(f, ch ? h->chapter : NULL);
 		fprintf(f, ",\"offset\":%llu,\"at\":", (unsigned long long)h->off);
 		put_at(f, h->at);
 		fprintf(f, ",\"who\":\"%s\",\"tool\":", sk_name[h->who]);
 		put_or_null(f, h->tool);
+		if (titled)
+		{
+			fputs(",\"turn_title\":", f);
+			put_or_null(f, ch ? h->title : NULL);
+		}
 		fputs(",\"snippet\":", f);
 		xr_put_str(f, h->snip ? h->snip : "");
 		fputc('}', f);
@@ -12519,8 +12536,77 @@ xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 	fprintf(f, "],\"more\":%s,\"partial\":%s,\"why\":",
 	        s->more ? "true" : "false", why ? "true" : "false");
 	put_or_null(f, why);
-	fprintf(f, ",\"bytes\":%llu}\n", (unsigned long long)s->bytes);
+	fprintf(f, ",\"bytes\":%llu}", (unsigned long long)s->bytes);
+}
+
+int
+xr_search_print(FILE *f, const struct xr_search *s, const char *session,
+                const char *session_id, const char *corpus, const char *why)
+{
+	fputs("{\"schema\":1,\"session\":", f);
+	xr_put_str(f, session);
+	fputs(",\"session_id\":", f);
+	xr_put_str(f, session_id);
+	fprintf(f, ",\"corpus\":\"%s\",\"text\":", corpus);
+	xr_put_str(f, s->text);
+	sr_put_hits(f, s, why, 0);
+	fputc('\n', f);
 	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
+}
+
+size_t
+xr_search_hits(const struct xr_search *s)
+{
+	return s->n;
+}
+
+void
+xr_search_group(FILE *f, const struct xr_search *s, const char *session,
+                const char *session_id, const char *corpus, int live,
+                const char *project, long long last_active, const char *why)
+{
+	const struct sr_hit *h = s->n ? sr_shown(s, 0) : NULL;
+
+	fputs("{\"session\":", f);
+	xr_put_str(f, session);
+	fputs(",\"session_id\":", f);
+	put_or_null(f, session_id && session_id[0] ? session_id : NULL);
+	fprintf(f, ",\"corpus\":\"%s\",\"live\":%s,\"project\":", corpus,
+	        live ? "true" : "false");
+	put_or_null(f, project && project[0] ? project : NULL);
+	fputs(",\"last_active\":", f);
+	put_at(f, last_active);
+	fputs(",\"turn_title\":", f);
+	put_or_null(f, h && h->chapter[0] && !h->pend ? h->title : NULL);
+	sr_put_hits(f, s, why, 1);
+}
+
+void
+xr_search_text(FILE *f, const struct xr_search *s, const char *session,
+               long long last_active)
+{
+	const char *prev = "";
+	char when[32] = "";
+	struct tm tm;
+	time_t t = (time_t)last_active;
+	size_t k;
+
+	if (last_active > 0 && localtime_r(&t, &tm))
+		strftime(when, sizeof when, "  %Y-%m-%d %H:%M", &tm);
+	fprintf(f, "%s%s  %zu hit%s%s\n", session, when, s->n,
+	        s->n == 1 ? "" : "s", s->more ? ", more" : "");
+	for (k = 0; k < s->n; k++)
+	{
+		const struct sr_hit *h = sr_shown(s, k);
+		const char *ti = h->chapter[0] && !h->pend && h->title ? h->title
+		                 : "(no turn title)";
+
+		if (strcmp(ti, prev))	/* a header per turn, as the card's */
+			fprintf(f, "  %s\n", ti);
+		prev = ti;
+		fprintf(f, "    %s%s%s: %s\n", sk_name[h->who], h->tool ? " " : "",
+		        h->tool ? h->tool : "", h->snip ? h->snip : "");
+	}
 }
 
 /* ---- --tasks (#319): the session's task list -------------------------------- */

@@ -612,6 +612,20 @@ void xr_search_ring_end(struct xr_search *s);
 int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                     const char *session_id, const char *corpus,
                     const char *why);
+/* --scope project|all (#498): the hits kept; one session's group, no newline:
+** {"session","session_id","corpus","live","project","last_active",
+** "turn_title" (the newest hit's),"hits":[{"chapter","offset","at","who",
+** "tool","turn_title","snippet"}…],"more","partial","why","bytes"};
+** session_id and project null for "", last_active null for < 0. */
+size_t xr_search_hits(const struct xr_search *s);
+void xr_search_group(FILE *f, const struct xr_search *s, const char *session,
+                     const char *session_id, const char *corpus, int live,
+                     const char *project, long long last_active,
+                     const char *why);
+/* --search without --json (#498): the session's line (name, last activity
+** in local time, the hit count), then per turn its title and its hits. */
+void xr_search_text(FILE *f, const struct xr_search *s, const char *session,
+                    long long last_active);
 
 /* ---- --tasks (#319): the session's task list ---------------------------- */
 #define XR_TASKS       50000		/* tasks kept: the newest */
