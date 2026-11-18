@@ -416,6 +416,10 @@ pyrun "the --xray view of host:name: the chord's failure lines, re-arm, suspend"
 # against fake commands (clock, caps, group cleanup, no shell)
 pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
 pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
+# 45-55 s each, last in the queue before: the pool's tail waited on them (#393)
+pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
+pyrun "remote hosts: dark hosts, stalled readers, hostile lines (#180)" remote_client_more_test.py
+pyrun "--ls-json --remote --follow: the list as a stream, watch and polled hosts" ls_follow_test.py
 # #405: define_command, a ref no transcript defines: --ref's lines, the card
 pyrun "xray define_command: definitions from the user's command, limits, the card" xray_define_test.py
 # xray_shell_test.py's and xray_claude_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
@@ -556,12 +560,9 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
     pyrun "a signalled master's history end names the sender" signal_sender_test.py
     pyrun "--cmd survives empty reply frames" cmd_frames_test.py
-    pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
     pyrun "dch serve: the ctl grace, a stalled reader, 16 peers that never read (#124, #201)" serve_timing_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
-    pyrun "remote hosts: dark hosts, stalled readers, hostile lines (#180)" remote_client_more_test.py
     pyrun "remote history: --history --remote, picker History rows, --ls-json cwd" remote_history_test.py
-    pyrun "--ls-json --remote --follow: the list as a stream, watch and polled hosts" ls_follow_test.py
     pyrun "the Windows client's checks, against this dch" windows_client_test.py
 fi
 
