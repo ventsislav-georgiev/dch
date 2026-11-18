@@ -1153,7 +1153,7 @@ light scan stops at another session's first result), `f` its whole set.
 opens that session's reader at that turn (`q` comes back to the card);
 `]` `[` do not turn there. Other projects' sessions (`p`), sessions on a
 remote host's view and a shell session keep titles and counts only, as
-before 1.103.0. It opens light, as `--ref` does without `--full`.
+before 1.104.0. It opens light, as `--ref` does without `--full`.
 `f` runs the full scan, `p` scans other projects too (again: this project
 only), `o` attaches to the session as in the list, `y` copies the ref to the
 clipboard (OSC 52). The card's other-projects key changed in 1.61.0: it was
@@ -1737,7 +1737,7 @@ terminal or with a remote `host:name` the ref is a plain `-`, so `dch: not a ref
   200. `--full` reads oldest first, as before. A live shell's lines and
   another project's session's give titles and counts only: no `mention`, no
   `passage`; another session of `<n>`'s project gives its `mention` lines
-  (since 1.103.0), never a `passage`.
+  (since 1.104.0), never a `passage`.
 - **Range.** `--ref` (light and `--full`) reads a transcript past `--json`'s
   range (the first 16 MiB and the newest 256 MiB) too, under the same
   budget, 10 s and 1 GiB caps, so a ref in the middle of a file over 272 MiB
