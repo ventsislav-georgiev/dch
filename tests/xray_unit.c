@@ -1321,24 +1321,26 @@ t_scan_scope(void)
 	CHECK("scope: light, <n>'s own result does not stop it",
 	      xr_scan_tick(x, 10) == 0);
 	xr_scan_file(x, 10, 0, 0, 0);
-	CHECK("scope: the next file is read", xr_scan_next(x, "o", "p", 0, 1) == 0);
+	CHECK("scope: the next file is read", xr_scan_next(x, "o", "id2", "p", 0, 1, -1) == 0);
 	hit831(&k, 1, "Title");
 	hit831(&k, 1, NULL);
 	CHECK("scope: another session's first result stops it",
 	      xr_scan_tick(x, 10) != 0);
 	xr_scan_file(x, 10, 0, 0, 0);
-	CHECK("scope: no file after the stop", xr_scan_next(x, "o2", "p", 0, 1));
+	CHECK("scope: no file after the stop", xr_scan_next(x, "o2", "id2", "p", 0, 1, -1));
 	(void)xr_scan_done(x);
 	xr_scan_free(x);
 	fclose(f);
 	CHECK("scope: first says project; <n>'s line carries its chapter",
 	      b && strstr(b, "\"scope\":\"project\"") &&
-	      strstr(b, "\"mention\":{\"session\":\"n\",\"chapter\":\"f1:0\""));
+	      strstr(b, "\"mention\":{\"session\":\"n\",\"session_id\":\"id\","
+	                "\"chapter\":\"f1:0\""));
 	CHECK("scope: light, another session's definition has no passage, "
-	      "chapter null, and no mention line",
+	      "chapter null; its project's: its mention line, its id (#479)",
 	      b && strstr(b, "\"definition\":{\"session\":\"o\"") &&
 	      !strstr(b, "\"passage\"") && strstr(b, "\"chapter\":null") &&
-	      !strstr(b, "\"mention\":{\"session\":\"o\""));
+	      strstr(b, "\"mention\":{\"session\":\"o\",\"session_id\":\"id2\"")
+	      && strstr(b, "\"last_active\":null"));
 	CHECK("scope: done why first, counts per scope, all null",
 	      b && strstr(b, "\"why\":\"first\"") &&
 	      strstr(b, "\"counts\":{\"session\":1,\"project\":1,"
@@ -1358,23 +1360,26 @@ t_scan_scope(void)
 		(void)xr_scan_first(x, "id", XR_ISSUE, "#831");
 		xr_scan_sink(x, &k);
 		xr_scan_file(x, 10, 0, 0, 0);
-		CHECK("scope: file 2 of 3", xr_scan_next(x, "a", "p", 0, 1) == 0);
+		CHECK("scope: file 2 of 3", xr_scan_next(x, "a", "id2", "p", 0, 1, -1) == 0);
 		hit831(&k, 1, NULL);
 		hit831(&k, 2, NULL);
 		xr_scan_file(x, 10, 0, 0, 0);
-		CHECK("scope: file 3 of 3", xr_scan_next(x, "b", "q", 0, 0) == 0);
+		CHECK("scope: file 3 of 3", xr_scan_next(x, "b", "id3", "q", 0, 0, -1) == 0);
 		hit831(&k, 1, "Other");
 		hit831(&k, 1, NULL);
 		xr_scan_file(x, 10, 0, 0, 0);
 		CHECK("scope: a 4th file is not opened (64 in production)",
-		      xr_scan_next(x, "c", "q", 0, 0) != 0);
+		      xr_scan_next(x, "c", "id3", "q", 0, 0, -1) != 0);
 		(void)xr_scan_done(x);
 		xr_scan_free(x);
 	}
 	fclose(f);
 	CHECK("scope: full, other sessions' lines carry the passage",
 	      b && strstr(b, "\"passage\":\"a passage\"") &&
-	      strstr(b, "\"mention\":{\"session\":\"a\",\"chapter\":null"));
+	      strstr(b, "\"mention\":{\"session\":\"a\",\"session_id\":\"id2\","
+	                "\"chapter\":\"f1:0\"") &&	/* its project's: #479 */
+	      strstr(b, "\"mention\":{\"session\":\"b\",\"session_id\":\"id3\","
+	                "\"chapter\":null"));
 	CHECK("scope: done why files, all counted",
 	      b && strstr(b, "\"partial\":true") && strstr(b, "\"why\":\"files\"") &&
 	      strstr(b, "\"counts\":{\"session\":0,\"project\":2,"
@@ -1395,7 +1400,7 @@ t_scan_scope(void)
 	if (x)
 		xr_scan_file(x, 100, 0, 0, 0);
 	CHECK("scope: a used-up bytes cap opens no next file",
-	      x && xr_scan_next(x, "a", "p", 0, 1) != 0);
+	      x && xr_scan_next(x, "a", "id2", "p", 0, 1, -1) != 0);
 	xr_scan_free(x);
 	if (f)
 		fclose(f);

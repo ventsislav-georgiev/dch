@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.103.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.104.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1141,13 +1141,24 @@ host whose dch takes no such ref says so in the status line.
 A ref's card shows its definitions (two or more as "N definitions"), its
 first and latest mention, its counts (this session, this project, all
 projects) and its mentions: this session's first, then each other session's
-as the scan finds them, newest first within each, also after `f`; the
-selected mention stays selected while lines arrive. It opens light, as `--ref` does without `--full`.
+as the scan finds them (this project's newest first), newest first within
+each, also after `f`; the selected mention stays selected while lines
+arrive. Another session of this project shows as a group headed `also
+discussed in <session>, <age>` (the age from that session's last activity,
+as `last_active` gives it), then its turns as this session's are (pN, the
+turn's title, the time of its newest mention there, then each mention's
+sentence); a light card holds that session's first-found turn only (the
+light scan stops at another session's first result), `f` its whole set.
+`Enter` on that group's header or on one of its turns' headers or mentions
+opens that session's reader at that turn (`q` comes back to the card);
+`]` `[` do not turn there. Other projects' sessions (`p`), sessions on a
+remote host's view and a shell session keep titles and counts only, as
+before 1.104.0. It opens light, as `--ref` does without `--full`.
 `f` runs the full scan, `p` scans other projects too (again: this project
 only), `o` attaches to the session as in the list, `y` copies the ref to the
 clipboard (OSC 52). The card's other-projects key changed in 1.61.0: it was
 `o`, which now opens the session everywhere in the view. `Enter` on a mention in this session reads
-its prompt. A shell session's light card shows titles and counts only; `f`
+its prompt (in another session of this project: that session's prompt). A shell session's light card shows titles and counts only; `f`
 shows its lines.
 
 The line under the tabs names the corpus: `Shell · last N rows`, `Shell · no
@@ -1162,7 +1173,7 @@ not clear X-ray; run `clear`".
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks, Memory; a narrow window drops the counts, then shows the current tab and the whole neighbours that fit, `‹` `›` where more are) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt; Memory: the prompt that wrote or loaded it |
+| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt (a header's turn; another session of this project: in its reader); Memory: the prompt that wrote or loaded it |
 | `/` | filter; Search: type the text to search; Prompts, Responses: a bare number (`/5` `Enter`) selects that prompt, so `Enter` reads it | reader: find in its text (case folded, the matches stand out); `Enter` goes to the first match below the top line |
 | `n` `N` | | reader, after `/`: the next / previous match |
 | `r` | Responses: the refs in the selected item's lines, the lowest first | reader: the refs in the lines shown, the lowest first ("no refs in view" when none); `j` `k` move, `Enter` opens the card, `q` there comes back to the reader at the same line, `q` or `Esc` closes the list |
@@ -1680,7 +1691,7 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
 `progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
 `files`, `bytes`, `lines_too_long`, and `define_warn` when a
-[`define_command`](#your-own-definitions-define_command) gave none). A Claude `mention` line carries `who` (`user`, `assistant` or `tool`) and `tool` (the tool's name for a call's own text, else `null`), as Search hits do, a Claude mention only. Every `mention` line also carries, right after `line`: `turn`, the prompt number of its chapter (the `i` of that chapter in `--json`'s `chapters`, the pN the view shows), `null` when unknown: a null `chapter`, another session's line, a shell's ring, or a light scan's window that starts past the file's start (`--full` fills it in); `sentence`, the sentence holding the ref, taken from the mention's text line: from past the last `. `, `? ` or `! ` before the ref to the first one after it, the line's ends and a list item's `- `/`* `/`+ ` marker as bounds, trimmed, at most 400 bytes; cut, it is cut on a word (on a UTF-8 character when the word would drop more than half of that side's room: CJK text with no spaces, a long hash) with `… ` leading and/or ` …` ending it, and the ref itself is never cut; controls show as spaces (and an invalid byte as `?`), one byte each; and `span`, `[start, end]`, the UTF-8 byte offsets of the ref inside `sentence` (0 <= start <= end <= its byte length, on character boundaries, never inside a `…` mark), so `sentence` bytes `[start, end)` are the ref exactly as written. `span` is `null` only for a ref longer than 400 bytes (a relative path whose absolute spelling is in the text can be; the sentence is then cut from its start); a ref of 393 to 400 bytes in a longer sentence comes alone with the marks that fit. The card groups the mentions by turn, newest first, mentions with no turn last: a header per turn (pN, its title, its time), then its mentions, each as You, Reply or the tool and the sentence with the ref standing out as a Search match does; `Enter` on a mention reads that place, on a header the turn. With no definition the card shows the first mention's line as `First said (prompt N, <title>): ...`, and a light card says `this project: f scans` where `f` has not counted it, never `0 in 0 sessions`. `<ref>` is 1 to 256 bytes of UTF-8 with no
+[`define_command`](#your-own-definitions-define_command) gave none). A Claude `mention` line carries `who` (`user`, `assistant` or `tool`) and `tool` (the tool's name for a call's own text, else `null`), as Search hits do, a Claude mention only. Every `mention` line also carries `session_id` right after `session`: the session's own id (a Claude session's `session_id`, a Codex thread's id, a shell's ring id; `null` when none), stable when the session is renamed, so a client groups by it. `chapter` is `null` on another project's session's line (`<n>`'s and its project's other sessions' lines carry theirs; `dch --xray <session_id> --chapter <chapter>` reads another session's, while it runs by its name). Every `mention` line also carries, right after `line`: `turn`, the prompt number of its chapter in its own session (the `i` of that chapter in that session's `--json` `chapters`, the pN the view shows), `null` when unknown: a null `chapter`, another project's session's line, a shell's ring, or a light scan's window that starts past the file's start (`--full` fills it in); on a line of another session of `<n>`'s project `turn` is followed by `turn_title` (that chapter's title, `null` with a `null` turn) and `last_active` (that session's last activity, epoch seconds, as `--ls-json` and History hold it, `null` when unknown), the two the card's headers show; `sentence`, the sentence holding the ref, taken from the mention's text line: from past the last `. `, `? ` or `! ` before the ref to the first one after it, the line's ends and a list item's `- `/`* `/`+ ` marker as bounds, trimmed, at most 400 bytes; cut, it is cut on a word (on a UTF-8 character when the word would drop more than half of that side's room: CJK text with no spaces, a long hash) with `… ` leading and/or ` …` ending it, and the ref itself is never cut; controls show as spaces (and an invalid byte as `?`), one byte each; and `span`, `[start, end]`, the UTF-8 byte offsets of the ref inside `sentence` (0 <= start <= end <= its byte length, on character boundaries, never inside a `…` mark), so `sentence` bytes `[start, end)` are the ref exactly as written. `span` is `null` only for a ref longer than 400 bytes (a relative path whose absolute spelling is in the text can be; the sentence is then cut from its start); a ref of 393 to 400 bytes in a longer sentence comes alone with the marks that fit. The card groups the mentions by turn, newest first, mentions with no turn last: a header per turn (pN, its title, its time), then its mentions, each as You, Reply or the tool and the sentence with the ref standing out as a Search match does; `Enter` on a mention reads that place, on a header the turn. With no definition the card shows the first mention's line as `First said (prompt N, <title>): ...`, and a light card says `this project: f scans` where `f` has not counted it, never `0 in 0 sessions`. `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd. `--ref -` reads the ref from standard input like `--search -`
@@ -1724,7 +1735,9 @@ terminal or with a remote `host:name` the ref is a plain `-`, so `dch: not a ref
   is found inside the budget too. Its lines come newest window first, in
   file order within a window, and the file's `mention` lines are its newest
   200. `--full` reads oldest first, as before. A live shell's lines and
-  another session's give titles and counts only: no `mention`, no `passage`.
+  another project's session's give titles and counts only: no `mention`, no
+  `passage`; another session of `<n>`'s project gives its `mention` lines
+  (since 1.104.0), never a `passage`.
 - **Range.** `--ref` (light and `--full`) reads a transcript past `--json`'s
   range (the first 16 MiB and the newest 256 MiB) too, under the same
   budget, 10 s and 1 GiB caps, so a ref in the middle of a file over 272 MiB

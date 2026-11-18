@@ -112,6 +112,12 @@ struct xv_men
 	char *sent;		/* #478: the sentence, "" from an older host */
 	int ss, se;		/* the ref's bytes in sent, ss -1 none */
 	long long at, off;	/* off: -1 from a host that sends none */
+	/* #479: a line of this project's other session (its last_active
+	** came: seen, the epoch s, -1 null), its prompt number (0 null), the
+	** turn's title and the session's id; same 0 for any other line */
+	int same, live;
+	long long seen, turn;
+	char *ttitle, *sid;
 };
 
 struct xv_ent
@@ -238,6 +244,7 @@ struct xv
 	int rwho;		/* its who's first letter */
 	char *rtool;		/* and its tool */
 	char *ranchor, *rturn;	/* the chapter shown; one being turned to */
+	char *rn;		/* #479: the reader's session when not v's */
 	long long rat;
 	int rtrunc, rtop, rw, rloaded;
 	int rend, redge;	/* open at its end; the hint said at that end */
@@ -964,6 +971,8 @@ xv_card_free(struct xv *v)
 		xv_sfree(v->m[k].who);
 		xv_sfree(v->m[k].tool);
 		xv_sfree(v->m[k].sent);
+		xv_sfree(v->m[k].ttitle);
+		xv_sfree(v->m[k].sid);
 	}
 	v->nd = v->nm = 0;
 	xv_sfree(v->vkind);
@@ -1033,7 +1042,11 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		    xv_grow(&v->m, &v->am, v->nm, sizeof m) < 0)
 			return;
 		m.session = xv_str(p, o, "session");
-		if (!xv_lines_ok(v, m.session))
+		/* #479: this project's other sessions' lines, light too; a
+		** remote view keeps titles and counts only for them */
+		m.same = !v->hl && dch_json_field(p, o, "last_active") >= 0 &&
+		         strcmp(v->corpus ? v->corpus : "", "shell");
+		if (!m.same && !xv_lines_ok(v, m.session))
 		{
 			xv_sfree(m.session);
 			return;
@@ -1077,6 +1090,11 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		}
 		m.at = xv_num(p, o, "at", -1);
 		m.off = off;
+		m.seen = xv_num(p, o, "last_active", -1);
+		m.turn = xv_num(p, o, "turn", 0);
+		m.ttitle = xv_str(p, o, "turn_title");
+		m.sid = xv_str(p, o, "session_id");
+		m.live = xv_bool(p, o, "live");
 		/* newest first within a file (#304): above its file's older
 		** lines, so light's windows (newest first, each in file order)
 		** and --full (oldest first) both list newest first; files keep
@@ -2086,7 +2104,7 @@ xv_rquery(struct xv *v, const char *anchor)
 	char *av[5], a[200];
 
 	snprintf(a, sizeof a, "%s", anchor);
-	av[0] = v->n;
+	av[0] = v->rn ? v->rn : v->n;
 	av[1] = "--chapter";
 	av[2] = a;
 	av[3] = "--json";
@@ -2225,6 +2243,8 @@ xv_back(struct xv *v)
 		xv_read_free(v);
 		free(v->rturn);
 		v->rturn = NULL;
+		free(v->rn);
+		v->rn = NULL;
 		v->strip = v->filtering = 0;
 		v->rq[0] = '\0';
 		/* a memory's card opens the reader too (#323) */
@@ -3225,32 +3245,45 @@ xv_run0(const struct xv *v, int k)
 	       strcmp(v->m[k].chapter, v->m[k - 1].chapter);
 }
 
-/* The card's list row of mention k, or of its turn's header (hdr) */
+/* The header rows above mention k: its turn's (1), and over that (2) its
+** session's when m[k] opens a run of this project's other session (#479) */
+static int
+xv_hdrs(const struct xv *v, int k)
+{
+	return xv_run0(v, k) + (v->m[k].same && (k == 0 ||
+	       strcmp(v->m[k].session, v->m[k - 1].session)));
+}
+
+/* The card's list row of mention k, or of its header hdr (1 the turn's,
+** 2 the session's) */
 static int
 xv_crow(const struct xv *v, int k, int hdr)
 {
 	int j, r = 0;
 
 	for (j = 0; j <= k && j < v->nm; j++)
-		r += 1 + xv_run0(v, j);
-	return r - 1 - (hdr && k < v->nm && xv_run0(v, k));
+		r += 1 + xv_hdrs(v, j);
+	if (k < v->nm && hdr > xv_hdrs(v, k))
+		hdr = xv_hdrs(v, k);
+	return r - 1 - hdr;
 }
 
-/* List row r back to its mention, and whether it is the header */
+/* List row r back to its mention, and which header (0 the mention) */
 static void
 xv_cat(const struct xv *v, int r, int *k, int *hdr)
 {
-	int j;
+	int j, h;
 
 	*k = v->nm > 0 ? v->nm - 1 : 0;
 	*hdr = 0;
 	for (j = 0; j < v->nm; j++)
 	{
-		if (xv_run0(v, j) && r-- == 0)
-		{
-			*k = j, *hdr = 1;
-			return;
-		}
+		for (h = xv_hdrs(v, j); h > 0; h--)
+			if (r-- == 0)
+			{
+				*k = j, *hdr = h;
+				return;
+			}
 		if (r-- == 0)
 		{
 			*k = j;
@@ -3533,7 +3566,40 @@ xv_draw_card(struct xv *v, int win)
 			c = xv_rch(v, m->chapter);
 			other = strcmp(m->session, v->session) != 0;
 			xv_lead(r == sel);
-			if (hdr)
+			if (hdr == 2)
+			{
+				/* #479: the project's other session, its last activity */
+				pk_age((long)m->seen, w, sizeof w);
+				pk_set("2");
+				pk_txt("also discussed in ");
+				pk_set("1");
+				pk_txtto(m->session, pk_w - 16);
+				pk_set("2");
+				if (w[0])
+				{
+					pk_txt(", ");
+					pk_txt(w);
+					pk_txt(strcmp(w, "now") ? " ago" : "");
+				}
+			}
+			else if (hdr && m->same)
+			{
+				/* its turn: pN, its title, its newest mention's time */
+				pk_set("1");
+				if (m->turn > 0)
+				{
+					snprintf(w, sizeof w, "%c%lld ", xv_noun(v)[0],
+					         m->turn);
+					pk_txt(w);
+				}
+				pk_txtto(m->ttitle[0] ? m->ttitle : xv_noun(v),
+				         pk_w - 14);
+				xv_when(m->at, w, sizeof w);
+				pk_set("2");
+				pk_txt("  ");
+				pk_txt(w);
+			}
+			else if (hdr)
 			{
 				/* the turn: pN, its title, its time */
 				pk_set("1");
@@ -3557,7 +3623,7 @@ xv_draw_card(struct xv *v, int win)
 			{
 				pk_txt("  ");
 				pk_set("2");
-				if (c < 0)	/* no header time: its own */
+				if (c < 0 && !m->same)	/* no header time: its own */
 				{
 					xv_when(m->at, w, sizeof w);
 					pk_fit(w, 13);
@@ -5149,9 +5215,25 @@ xv_key(struct xv *v, int c)
 			xv_copy(v);
 			break;
 		case '\r': case '\n':
-			/* a turn's header opens the reader at the turn (#478) */
-			if (m && m->chapter[0] && !strcmp(m->session, v->session))
+			/* a turn's header opens the reader at the turn (#478); this
+			** project's other session's: in its reader (#479), by
+			** name while it runs, else by its id */
+			free(v->rn);
+			v->rn = NULL;
+			if (m && m->chapter[0] && m->same &&
+			    !(v->rn = strdup(m->sid[0] && !m->live ? m->sid
+			                     : m->session)))
+				snprintf(v->status, sizeof v->status,
+				         "X-ray: out of memory");
+			else if (m && m->chapter[0] && (m->same ||
+			         !strcmp(m->session, v->session)))
+			{
 				xv_read(v, m->chapter, v->chdr ? NULL : v->ctext);
+				if (m->same)
+					snprintf(v->status, sizeof v->status, "%s, %s",
+					         m->session, m->ttitle[0] ? m->ttitle
+					         : "its prompt");
+			}
 			else if (m)
 				snprintf(v->status, sizeof v->status, "%s",
 				         m->chapter[0] ? "another session's prompt: "
@@ -5367,6 +5449,7 @@ xv_free(struct xv *v)
 	xv_sfree(v->rwant);
 	free(v->ranchor);
 	free(v->rturn);
+	free(v->rn);
 	free(v->ch);
 	free(v->rf);
 	free(v->vis);

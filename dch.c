@@ -13114,7 +13114,8 @@ xr_ref_others(struct xr_scan *sc, int scope, const char *self,
 	m = xr_mapped(self, project, scope == 2, &v);
 	for (k = 0; k < m && rc == 0; k++)
 	{
-		if (xr_scan_next(sc, v[k].name, v[k].project, v[k].live, v[k].same))
+		if (xr_scan_next(sc, v[k].name, v[k].sid, v[k].project, v[k].live,
+		                 v[k].same, v[k].seen))
 			break;
 		if ((rc = xr_ref_file(sc, v[k].path, &v[k].st, v[k].codex)) == -2)
 			rc = 0;	/* gone since the lookup: not read */

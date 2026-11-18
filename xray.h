@@ -214,6 +214,7 @@ struct xr_hit
 	long long at;
 	const char *chapter;
 	uint64_t turn;		/* the chapter's prompt number (#478), 0 unknown */
+	const char *ttitle;	/* #479: that chapter's title, NULL unknown */
 	const char *who, *tool;	/* a Claude mention's speaker, else NULL */
 	const char *title, *passage, *rule;	/* a definition */
 };
@@ -252,10 +253,11 @@ int xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 ** project, 2 all */
 void xr_scan_scope(struct xr_scan *x, int scope);
 /* The next file after <n>'s (3.4's order): another session's, same: in
-** <n>'s project dir. 0 read it; nonzero the scan stopped (a cap, the
-** budget, a result in light mode), so no more files. */
-int xr_scan_next(struct xr_scan *x, const char *session, const char *project,
-                 int live, int same);
+** <n>'s project dir; sid its id, seen its last activity (epoch s, -1 none).
+** 0 read it; nonzero the scan stopped (a cap, the budget, a result in light
+** mode), so no more files. */
+int xr_scan_next(struct xr_scan *x, const char *session, const char *sid,
+                 const char *project, int live, int same, long long seen);
 /* the --ref tick: bytes so far; nonzero once the scan should stop */
 int xr_scan_tick(void *ctx, uint64_t bytes);
 /* one file read: its held mentions and its tally (partial: range-capped) */

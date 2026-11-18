@@ -2853,11 +2853,11 @@ def test_scope():
           d["files"] < 64, (d, err))
     rc, ls, opens, order, err = ref("#931", "--scope", "all")
     d = ls[-1]
-    check("light: stops at the first other session's result, titles and "
-          "counts only for it",
+    check("light: stops at the first other session's result; that "
+          "same-project session's lines go too (#479)",
           rc == 0 and d["why"] == "first" and order == ["s0", "s70"] and
-          not any("mention" in l and l["mention"]["session"] != "s0"
-                  for l in ls), (order, d, err))
+          {l["mention"]["session"] for l in ls if "mention" in l} ==
+          {"s0", "s70"}, (order, d, err))
     after = files(S)
     check("scope: nothing written by a full and a light --scope all "
           "(names, sizes, mtimes)", after == before,
@@ -3849,6 +3849,92 @@ def test_terms():
         os.unlink(tp)
 
 
+def test_recall():
+    """#479: a ref's other same-project sessions carry their own turns:
+    s1 (the project's other session) says #412 in its turns 2 and 3, s2 (another
+    project) once. s1's lines have chapter, turn, turn_title, session_id and
+    last_active, light and --full; s2's keep chapter and turn null and no
+    passage fields; <n>'s line has its session_id; and --chapter on s1's id
+    opens the turn its line names."""
+    S = os.path.join(T, "recall")
+    home = os.path.join(S, "home")
+    cfg = os.path.join(home, ".claude")
+    sockdir = os.path.join(S, "dch-%d" % os.getuid())
+    hdir = os.path.join(S, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for d in (home, hdir):
+        os.makedirs(d)
+    env = dict(ENV, XDG_RUNTIME_DIR=S, XDG_STATE_HOME=os.path.join(S, "state"),
+               HOME=home)
+    sid = lambda k: "33333333-4444-4555-8666-%012d" % k
+
+    def put(k, cwd, asks, updated):
+        pdir = os.path.join(cfg, "projects", key(cwd))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid(k) + ".jsonl"), "w") as f:
+            for t, a in enumerate(asks):
+                f.write(json.dumps({"type": "user", "cwd": cwd,
+                                    "timestamp": "2026-11-1%dT10:0%d:00Z"
+                                    % (k, t), "message": {"content": a}})
+                        + "\n")
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text": "ok %d" % t}]}})
+                        + "\n")
+        rec = {"name": "rc%d" % k, "cwd": cwd, "end": "exited",
+               "argv": ["claude"], "started": 1794299400,
+               "updated": updated, "ended": updated, "sock_dir": sockdir,
+               "agent": {"session_id": sid(k), "cwd": cwd,
+                         "config_dir": cfg}}
+        with open(os.path.join(hdir, "rc%d.json" % k), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    P, O = "/home/demo/recall", "/home/demo/far"
+    put(0, P, ["mine: see #412 today"], 1794300000)
+    put(1, P, ["start", "Plan the cache. Then fix #412 first.",
+               "Is #412 done?", "bye"], 1794300050)
+    put(2, O, ["far away #412 here"], 1794300070)
+    for mode in ((), ("--full",)):
+        r = dch("--xray", "rc0", "--ref", "#412", "--scope", "all", *mode,
+                "--json", env=env)
+        ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+        by = lambda n: [m for m in ms if m["session"] == n]
+        m1 = sorted(by("rc1"), key=lambda m: m["offset"])
+        tag = " ".join(("",) + mode)
+        check("recall #479: the project's other session's lines carry its "
+              "turns 2 and 3, their titles and chapters, its id and last "
+              "activity%s" % tag, r.returncode == 0 and
+              # light: its first hit ends the scan (R5), so turn 2 only
+              [m.get("turn") for m in m1] == [2, 3][:2 if mode else 1] and
+              [m.get("turn_title") for m in m1] ==
+              ["Plan the cache. Then fix #412 first.",
+               "Is #412 done?"][:2 if mode else 1] and
+              all(m.get("chapter") and m.get("session_id") == sid(1) and
+                  m.get("last_active") == 1794300050 for m in m1) and
+              m1[0].get("sentence") == "Then fix #412 first.",
+              (mode, [(m.get("turn"), m.get("last_active"), m.get("sentence"),
+                       m.get("turn_title")) for m in m1], r.stderr))
+        check("recall #479: <n>'s line has its session_id%s" % tag,
+              [m.get("session_id") for m in by("rc0")] == [sid(0)], ms)
+        if mode:
+            m2 = by("rc2")
+            check("recall #479: another project's line keeps chapter and "
+                  "turn null, no turn_title or last_active",
+                  len(m2) == 1 and m2[0]["chapter"] is None and
+                  m2[0]["turn"] is None and "turn_title" not in m2[0] and
+                  "last_active" not in m2[0] and
+                  m2[0].get("session_id") == sid(2), m2)
+        else:
+            check("recall #479: light sends no other project's line",
+                  not by("rc2"), ms)
+    rc, o, err = 1, None, "no chapter on its line"
+    if len(m1) == 2 and m1[1].get("chapter"):
+        rc, o, err = xray(sid(1), "--chapter", m1[1]["chapter"], "--json",
+                          env=env)
+    check("recall #479: --chapter on the other session's id opens the "
+          "turn its line names", rc == 0 and o and
+          "Is #412 done?" in json.dumps(o), (rc, err, str(o)[:300]))
+
+
 def main():
     try:
         test_names()
@@ -3883,6 +3969,7 @@ def main():
         test_ent_bounds()
         test_many_mentions()
         test_terms()
+        test_recall()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

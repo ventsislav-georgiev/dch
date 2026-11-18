@@ -511,10 +511,12 @@ def test_scope():
 
         r = dch("--xray", "xx-a", "--ref", "#61", "--json")
         ls, ts_ = tallies(r)
+        # #479: this project's other sessions (xx-h, xx-b) send their lines
+        # in light mode too; another project's (xx-c) never does
         others = [x for x in ls if "mention" in x and
-                  x["mention"]["session"] != "xx-a"]
-        check("light, a Codex <n>: its rollout first; another session's "
-              "file gives counts only, and its first result stops the scan",
+                  x["mention"]["session"] not in ("xx-a", "xx-h", "xx-b")]
+        check("light, a Codex <n>: its rollout first; another project's "
+              "file gives no lines, and the first result stops the scan",
               r.returncode == 0 and ts_[:1] == ["xx-a"] and not others and
               (ls[-1]["why"] == "first" and len(ts_) == 2 or
                ls[-1]["why"] == "budget"), r.stdout + r.stderr)
