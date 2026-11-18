@@ -3001,7 +3001,7 @@ def test_search_scope():
                HOME=home)
     sid = lambda k: "33333333-3333-4444-8555-%012d" % k
 
-    def put(k, cwd, turns, updated):
+    def put(k, cwd, turns, updated, tool=None):
         pdir = os.path.join(cfg, "projects", key(cwd))
         os.makedirs(pdir, exist_ok=True)
         with open(os.path.join(pdir, sid(k) + ".jsonl"), "w") as f:
@@ -3010,6 +3010,12 @@ def test_search_scope():
                                     "timestamp": "2026-11-1%dT10:0%d:00Z"
                                     % (k, i), "message": {"content": ask}})
                         + "\n")
+                if tool:
+                    f.write(json.dumps({"type": "assistant", "message": {
+                        "content": [{"type": "tool_use", "id": "t%d" % i,
+                                     "name": tool, "input": {
+                                         "command": "push retry"}}]}})
+                            + "\n")
                 f.write(json.dumps({"type": "assistant", "message": {
                     "content": [{"type": "text", "text": answer}]}}) + "\n")
         rec = {"name": "q%d" % k, "cwd": cwd, "end": "exited",
@@ -3143,6 +3149,19 @@ def test_search_scope():
           r.returncode == 0 and "pwn" in r.stdout and not any(
               c in r.stdout for c in "\x1b\x07\x7f\u009b"),
           (r.returncode, r.stdout, r.stderr))
+    # bidi controls (RLO; LRI..PDI) in a title and a tool name reorder the
+    # terminal's line: blanked too (the tool name's strip is NIT-UO7)
+    put(5, P, [("push retry \u202etxt.exe \u2066lri\u2069 \u061c\u200f",
+                "ok")], 1794300050, tool="Ba\u202esh\u2066x\u2069\x07")
+    for a in ((), ("--scope", "project")):
+        r = dch("--xray", "q5", "--search", "push retry", *a, env=env)
+        check("search %s: text output blanks RLO, LRI..PDI and ALM/RLM "
+              "and BEL from a turn title and a tool name"
+              % (" ".join(a) or "plain"),
+              r.returncode == 0 and "txt.exe" in r.stdout and
+              "Ba sh x  " in r.stdout and not any(
+                  c in r.stdout for c in "\x07\u202e\u2066\u2069\u061c\u200f"),
+              (r.returncode, r.stdout, r.stderr))
 
 
 def test_search_answer():

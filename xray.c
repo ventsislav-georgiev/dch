@@ -13341,7 +13341,9 @@ xr_search_group(FILE *f, const struct xr_search *s, const char *session,
 }
 
 /* s for a terminal: C0, DEL and C1 controls (U+0080-009F) as a space, so a
-** transcript's title or tool name can't send escape sequences (#498) */
+** transcript's title or tool name can't send escape sequences (#498); the
+** bidi controls too (U+061C, 200E/F, 202A-E, 2066-9), which reorder the
+** line after them */
 static void
 sr_put_plain(FILE *f, const char *s)
 {
@@ -13352,6 +13354,12 @@ sr_put_plain(FILE *f, const char *s)
 			fputc(' ', f);
 		else if (*u == 0xc2 && u[1] >= 0x80 && u[1] <= 0x9f)
 			fputc(' ', f), u++;
+		else if ((*u == 0xd8 && u[1] == 0x9c) ||
+		         (*u == 0xe2 && u[1] == 0x80 && (u[2] == 0x8e ||
+		          u[2] == 0x8f || (u[2] >= 0xaa && u[2] <= 0xae))) ||
+		         (*u == 0xe2 && u[1] == 0x81 && u[2] >= 0xa6 &&
+		          u[2] <= 0xa9))
+			fputc(' ', f), u += *u == 0xd8 ? 1 : 2;
 		else
 			fputc(*u, f);
 }
@@ -13391,7 +13399,9 @@ xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 			fputc(' ', f);
 			sr_put_plain(f, h->tool);
 		}
-		fprintf(f, ": %s\n", h->snip ? h->snip : "");	/* sr_snip: clean */
+		fputs(": ", f);
+		sr_put_plain(f, h->snip ? h->snip : "");	/* sr_snip: no C0/C1 */
+		fputc('\n', f);
 	}
 }
 
