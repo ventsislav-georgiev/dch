@@ -534,6 +534,20 @@ def test_light_file(n, repo, plain):
         check("light #500: %s: no resolved line" % label,
               r.returncode == 0 and not rv and ls and
               ls[-1].get("done") is True, r.stdout[-300:])
+    os.symlink(plain, os.path.join(repo, "outlink"))
+    with open(os.path.join(plain, "there.c"), "w") as f:
+        f.write("t\n")
+    for label, text in (("target missing", "outlink/none.c:1"),
+                        ("target present", "outlink/there.c:1")):
+        for full in (False, True)[:1 + (label == "target missing")]:
+            r, ls, rv = ref(n, text, full=full)
+            check("light #510: a symlinked dir out, %s%s: no line"
+                  % (label, " (--full)" if full else ""),
+                  r.returncode == 0 and not rv and ls and
+                  ls[-1].get("done") is True, r.stdout[-300:])
+    r, ls, rv = ref(n, "src/gone.c:3", full=False)
+    check("light #510: a missing file in the project: still missing",
+          len(rv) == 1 and rv[0]["state"] == "missing", rv)
     r, ls, rv = ref(n, "big.light:1", full=False)
     check("light #500: over 2 MB: ok by stat, not too_large",
           len(rv) == 1 and rv[0]["state"] == "ok", rv)

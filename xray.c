@@ -11660,7 +11660,21 @@ res_file(const char *key, const char *text, const char *cwd, int light,
 	** SIGTERM, and res_root has already walked the same mount */
 	if (lstat(p, &st) != 0 && light && errno == ENOENT)
 	{
-		/* #500: its own state, so a client need not parse the subtitle */
+		/* #500: its own state, so a client need not parse the subtitle;
+		** #510: only when the nearest existing parent is really inside
+		** (a symlinked dir out must not tell what lies beyond it) */
+		char *sl;
+
+		strcpy(rp, p);
+		while ((sl = strrchr(rp, '/')) && sl > rp &&
+		       (*sl = '\0', lstat(rp, &st) != 0 && errno == ENOENT))
+			;
+		if (!rr[0] || !realpath(rp, shown) || !res_under(shown, rr))
+		{
+			res_set(r, "outside_project",
+			        "Outside this session's project");
+			return 1;
+		}
 		res_set(r, "missing", "Missing");
 		return 1;
 	}
