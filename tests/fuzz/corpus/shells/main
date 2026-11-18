@@ -1,0 +1,2 @@
+{"isSidechain":false,"type":"assistant","timestamp":"2026-11-16T23:59:59.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_f1","name":"Bash","input":{"command":"sleep 1","run_in_background":true,"description":"Run it"}}]}}
+{"isSidechain":false,"type":"user","timestamp":"2026-11-17T00:00:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_f1","content":"running"}]},"toolUseResult":{"backgroundTaskId":"bfuzz","interrupted":false,"isImage":false,"noOutputExpected":false,"stderr":"","stdout":""}}
