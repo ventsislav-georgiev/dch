@@ -1287,6 +1287,37 @@ def test_dup():
             v.exit()
         finally:
             v.close()
+    # #493: the age goes first, the name stays whole; a header whose
+    # transcript is gone says so, never the engine's "no x-ray corpus"
+    v = dup_card(30)
+    try:
+        text = screen(v, 0)
+        check("#493: at 30 columns xv-dc's ended header keeps its whole name "
+              "and drops the age", re.search(r"discussed in xv-dc$", text,
+              re.M) and not re.search(r"xv-dc, \d+d", text), text)
+    finally:
+        v.close()
+    # a status line of 30 columns cuts the sentence: the wide card
+    v = dup_card(100)
+    try:
+        os.unlink(tl(DSIDS[3], "-home-demo-dup"))
+        for _ in range(12):
+            if any("\u258c" in l and re.search(r"discussed in xv-dc, \d+d", l)
+                   for l in rows(v.out).values()):
+                break
+            v.key(b"j", 0.4)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        ok = until(lambda: (v.pump(0.1), "transcript is gone" in
+                            screen(v, mark))[1], 5)
+        text = screen(v, mark)
+        check("#493: Enter on a header whose transcript is gone says so, not "
+              "'no x-ray corpus'", ok and "no x-ray corpus" not in text, text)
+        v.key(b"q")
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
 
 
 def main():
