@@ -5831,10 +5831,32 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 	** spoof session identity. (TERM below is only defaulted when absent
 	** or dumb — a caller-supplied TERM legitimately wins.) */
 	strip_caller_agent();
-	for (rc = 0; rc < spawn_env_n; rc++)
-		putenv(spawn_env[rc]);
-	for (rc = 0; rc < spawn_unset_n; rc++)
-		unsetenv(spawn_unset[rc]);
+	{
+		/* Socket-location keys are dch's own, like DCH_SESSION: --env/
+		** --unset must not point the session's dch calls elsewhere (#471). */
+		static const char *const keep[] = { "DCH_SOCKET_DIR", "XDG_RUNTIME_DIR" };
+		char *own[2];
+		int k;
+
+		for (k = 0; k < 2; k++)
+		{
+			const char *v = getenv(keep[k]);
+
+			own[k] = v ? strdup(v) : NULL;
+		}
+		for (rc = 0; rc < spawn_env_n; rc++)
+			putenv(spawn_env[rc]);
+		for (rc = 0; rc < spawn_unset_n; rc++)
+			unsetenv(spawn_unset[rc]);
+		for (k = 0; k < 2; k++)
+		{
+			if (own[k])
+				setenv(keep[k], own[k], 1);
+			else
+				unsetenv(keep[k]);
+			free(own[k]);
+		}
+	}
 	setenv("DCH_SESSION", name, 1);
 	/* Headless spawns often run where TERM is unset or "dumb" (cron, CI,
 	** daemons); the mirror is xterm-compatible, so give TUIs a terminal

@@ -3224,7 +3224,11 @@ sets it empty) and
 every session the revive starts, after the login shell's environment
 .RB ( DCH_LOGIN_ENV ),
 so they win over what the rc files export;
-.B DCH_SESSION
+.BR DCH_SESSION ,
+.BR DCH_SOCKET_DIR ,
+.B XDG_RUNTIME_DIR
+(also under
+.BR \-\-spawn " " \-\-env )
 and the
 .B TERM
 default stay dch's. They are local only: with a remote name or
