@@ -12,6 +12,10 @@ import tempfile, threading, time
 from xray_cli_lib import *  # noqa: E402,F401,F403
 from xray_cli_lib import X  # noqa: E402,F401
 
+# #467 took the near-cap rows from 16.0-17.0 MB to 13-14.3 MB: 15 MiB
+# (15.7 MB) holds that gain (NIT-UD1)
+NEARCAP = 15 << 20
+
 
 def test_claude():
     n = "xc-cl"
@@ -220,7 +224,7 @@ def test_claude():
         check("claude: near-cap lines answer", rc == 0 and
               out.startswith("{"), (rc, out[:200]))
         rss_ok("claude: near-cap lines (6000 chapters, 20 x 1 MiB pastes)",
-               rss)
+               rss, NEARCAP)
         # #192: the same with every chapter auto and its summary at the
         # cap (120 4-byte scalars, 480 bytes): summaries are held out of
         # line, at most 256 KiB of them (XR_SUMMARIES), so only these
@@ -247,7 +251,7 @@ def test_claude():
               o["chapters"][0].get("auto") is True and
               "summary" not in o["chapters"][0], (rc, out[:200]))
         rss_ok("claude: near-cap auto lines (6000 auto chapters with 480-byte "
-               "summaries, 20 x 1 MiB pastes)", rss)
+               "summaries, 20 x 1 MiB pastes)", rss, NEARCAP)
         # the long ids still pair: a quiet Grep's failed result shows no
         # error; an orphan result (no pairing) would mark the chapter
         put([{"type": "assistant", "message": {"content": [

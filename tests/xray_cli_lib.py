@@ -85,13 +85,13 @@ def maxrss(argv, env):
     return r.returncode, r.stdout, int(m.group(1)) if m else 1 << 62
 
 
-def rss_ok(what, rss):
-    """The 16 MiB budget (3.8); skipped, visibly, under sanitizers."""
+def rss_ok(what, rss, limit=16 << 20):
+    """The 16 MiB budget (3.8) unless a tighter limit; skipped under sanitizers."""
     if SANITIZED:
         print("  skip %s: %.1f MB, no RSS budget under ASan" % (what, rss / 1e6))
         return
-    check("%s: under 16 MB (3.8): %.1f MB" % (what, rss / 1e6),
-          rss < 16 << 20, "no DCH_MAXRSS helper" if not HELPER else rss)
+    check("%s: under %.1f MiB: %.1f MB" % (what, limit / 2**20, rss / 1e6),
+          rss < limit, "no DCH_MAXRSS helper" if not HELPER else rss)
 
 
 # ---- a live Claude and the open seam --------------------------------------
