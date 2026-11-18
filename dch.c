@@ -13962,9 +13962,10 @@ xf_job_kill(struct xf *f, int b)
 	if (f->job[b] > 0)
 	{
 		kill(f->job[b], SIGTERM);
+		/* out of xf_sig's reach before the reap frees the pid */
+		xf_jobs[b] = 0;
 		while (waitpid(f->job[b], NULL, 0) < 0 && errno == EINTR)
 			;
-		xf_jobs[b] = 0;
 	}
 	if (f->jfd[b] >= 0)
 		close(f->jfd[b]);
