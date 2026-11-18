@@ -539,9 +539,9 @@ def card_rows(v):
     return [w for _, w in got], [w for s, w in got if s]
 
 
-def order_card(name, keys, secs=20.0, term="PROJ-9"):
+def order_card(name, keys, secs=20.0, term="PROJ-9", env=None):
     """name's view, term's card opened by ^R, settled."""
-    v = Pty([DCH, "--xray", name], 40, 100)
+    v = Pty([DCH, "--xray", name], 40, 100, env)
     v.wait(b"Prompts ", secs)
     v.pump(0.5)
     v.key(b"/" + term.encode(), 0.5)

@@ -2851,7 +2851,10 @@ def test_scope():
           % (d.get("files", -1), time.time() - t0),
           rc == 0 and d.get("why") == "budget" and d["partial"] and
           d["files"] < 64, (d, err))
-    rc, ls, opens, order, err = ref("#931", "--scope", "all")
+    # the clock off: under ASan the 300 ms budget ran out on s70's 1 MB
+    # (why budget); the first-result stop is what this row holds
+    rc, ls, opens, order, err = ref("#931", "--scope", "all",
+                                    env=dict(dbg, DCH_XRAY_NOCLOCK="1"))
     d = ls[-1]
     check("light: stops at the first other session's result; that "
           "same-project session's lines go too (#479)",

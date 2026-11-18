@@ -895,9 +895,11 @@ def test_follow_slow_cmd():
             f.write(json.dumps({"id": "r1", "title": "Before"}) + "\n")
         e6 = cfg("reset", "sleep 4.8; cat %s" % rows, "exec sleep 4.8")
         fl = Follow(n, e6, ["--tasks", "--memory"])
-        # a run killed at xcmd's 5 s wall on a loaded box answers on the
-        # next cadence run (~15 s): wait for that, not 15 s flat
-        fl.wait(lambda o: "task" in o and o["task"]["id"] == "r1", 25)
+        # a run killed at xcmd's 5 s wall on a loaded box (xcmd.c: only a
+        # "stopped early" warn, no rows) answers on the next cadence run, 15 s
+        # after its end: a deadline of a few runs, not one
+        slow = 60
+        fl.wait(lambda o: "task" in o and o["task"]["id"] == "r1", slow)
         with open(rows, "w") as f:
             f.write(json.dumps({"id": "r2", "title": "After"}) + "\n")
         k6 = len(fl.got)
@@ -923,7 +925,7 @@ def test_follow_slow_cmd():
               (pre[-1:], [(hdr_of(o) or next((k for k in o if k != "schema"),
                                               "?"), o.get("task", {}).get("id"),
                            o.get("source")) for o in ob[i:i + 8]]))
-        r6 = fl.wait(lambda o: "task" in o and o["task"]["id"] == "r2", 12,
+        r6 = fl.wait(lambda o: "task" in o and o["task"]["id"] == "r2", slow,
                      frm=k6)
         ob = fl.objs(k6)
         j = next((j for j, o in enumerate(ob) if "task" in o and
