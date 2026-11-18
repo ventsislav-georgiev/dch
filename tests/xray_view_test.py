@@ -858,8 +858,8 @@ def test_terms_live():
             lambda: (a.pump(0.2), "in the last reply" in shown(a, mark) and
                      (lite or "on screen now" in shown(a, mark)))[1], 10)
         text = shown(a, mark)
-        want = (("in the last reply", "PAY-219", "#412", "test_retry_timeout",
-                 "ERR_LEDGER_SKEW") if lite else
+        want = (("in the last reply", "PAY-219", "#412", "LedgerClock",
+                 "test_retry_timeout", "ERR_LEDGER_SKEW") if lite else
                 ("on screen now", "#412", "ERR_LEDGER_SKEW",
                  "in the last reply", "PAY-219", "test_retry_timeout"))
         at_ = [text.find(x) for x in want]
@@ -870,8 +870,9 @@ def test_terms_live():
               and text.count("ERR_LEDGER_SKEW") == 1 and
               "TOOL_ONLY_TERM" not in text, text)
         mark = len(a.out)
-        # its row: the on-screen group's second (lite: the reply's fourth)
-        a.key(b"jjj" if lite else b"j", 0.5, full=True)
+        # its row: the on-screen group's second (lite: the reply's fifth,
+        # LedgerClock's row before it, #473)
+        a.key(b"jjjj" if lite else b"j", 0.5, full=True)
         a.key(b"\r", 0.5, full=True)
         ok = a.wait(b"Mentions: this session ", start=mark)
         settle(a)
