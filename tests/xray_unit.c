@@ -1063,6 +1063,14 @@ t_grammar(void)
 		  "`README.md` `main.c` `pkg.json` `FooBar` `retry budget` "
 		  "`dry_run` `fs.readFile()` `Foo::bar()`", XR_PROSE | XR_TERMS,
 		  "term:FooBar term:dry_run" },
+		/* #476: a known extension on any base is a file, a lowercase
+		** dotfile too; names with another last dot stay terms */
+		{ "`docker-compose.yml` `package-lock.json` `tsconfig.base.json` "
+		  "`README.MD` `node.js` `.env` `.gitignore` `socket.io` "
+		  "`github.com` `os.path` `Math.max` `v1.2` `py3.11` `ASP.NET` "
+		  "`a.b`", XR_PROSE | XR_TERMS,
+		  "term:socket.io term:github.com "
+		  "term:os.path term:Math.max term:v1.2 term:py3.11 term:ASP.NET term:a.b" },
 		{ "x/foo_bar a.foo_bar foo_bar.c foo_bar@x.org Foo_Bar a_b "
 		  "a__bc ab_cd_ MAX_RETRY", XR_PROSE | XR_TERMS,
 		  "term:MAX_RETRY" },
@@ -5645,6 +5653,25 @@ t_search(void)
 	      strstr(o, "\"more\":true"));
 	free(o);
 
+	/* NIT-UF1: 40 turns of 25 hits: the cap lands on a turn boundary, hit
+	** 501 is under an older turn, so 20 whole turns (500 hits) stay, more */
+	for (n = 0, k = 0; k < 1000; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n, k % 25 ?
+		                      "{\"type\":\"assistant\",\"message\":{"
+		                      "\"content\":[{\"type\":\"text\",\"text\":"
+		                      "\"hit %03zu\"}]}}\n" :
+		                      "{\"type\":\"user\",\"cwd\":\"/x\",\"message\":"
+		                      "{\"content\":\"hit %03zu\"}}\n", k);
+	o = search_of(big, n, "hit ", 0);
+	CHECK("search: the cap on a turn boundary keeps 20 whole turns "
+	      "(20 x 25), more (NIT-UF1)",
+	      o && count_of(o, "\"who\":") == 500 &&
+	      strstr(o, "\"snippet\":\"hit 999\"") &&
+	      strstr(o, "\"snippet\":\"hit 500\"") &&
+	      !strstr(o, "\"snippet\":\"hit 499\"") &&
+	      strstr(o, "\"more\":true"));
+	free(o);
+
 	/* #457: one turn of 600 answers keeps its newest 500 (the hard cap),
 	** more; 2 turns of 30 hits keep all 60, no more */
 	n = (size_t)snprintf(big, sizeof big, "{\"type\":\"user\",\"cwd\":"
@@ -5908,6 +5935,70 @@ t_search(void)
 		      strstr(b, "\"more\":true"));
 		if (b && count_of(b, "\"who\":") != 100)
 			fprintf(stderr, "  got: %.600s\n", b);
+		free(b);
+		xr_search_free(s);
+	}
+	/* NIT-UF1: 40 blocks of 25 hits (the command, 24 rows): the ring cap
+	** is on a block boundary: 20 whole blocks (500 hits), more */
+	{
+		static struct xr_rec r[40 * 30];
+		static char rows[40 * 24][12];
+		struct xr_chapters c;
+		struct xr_shell sh;
+		struct xr_search *s = xr_search_new("ROW", 0);
+		char *b = NULL;
+		size_t bl = 0, rn = 0, q = 0;
+		FILE *f;
+
+		for (k = 0; k < 40; k++)
+		{
+			r[rn].kind = RING_K_MARK, r[rn++].text = "A";
+			r[rn].kind = RING_K_PROMPT, r[rn++].text = "$";
+			r[rn].kind = RING_K_MARK, r[rn++].text = "B";
+			r[rn].kind = RING_K_INPUT, r[rn++].text = "cmd ROW";
+			r[rn].kind = RING_K_MARK, r[rn].flags = RING_F_INPUT;
+			r[rn++].text = "C";
+			for (size_t j = 0; j < 24; j++, q++, rn++)
+			{
+				snprintf(rows[q], sizeof rows[0], "ROW %04zu", q);
+				r[rn].kind = RING_K_OUTPUT, r[rn].text = rows[q];
+			}
+			r[rn].kind = RING_K_MARK, r[rn].flags = RING_F_EXIT;
+			r[rn++].text = "D;0";
+		}
+		for (k = 0; k < rn; k++)
+		{
+			r[k].seq = 500 + k;
+			r[k].t = 2000 + (uint32_t)k;
+			r[k].len = strlen(r[k].text);
+		}
+		xr_shell_begin(&sh, &c);
+		for (k = 0; s && k < rn; k++)
+		{
+			xr_shell_feed(&sh, &r[k]);
+			xr_search_rec(s, &sh, &r[k]);
+		}
+		xr_shell_end(&sh);
+		xr_chapters_free(&c);
+		if (s)
+		{
+			xr_search_ring_end(s);
+			if ((f = open_memstream(&b, &bl)))
+			{
+				xr_search_print(f, s, "s", "m1", "shell", NULL);
+				fclose(f);
+			}
+		}
+		CHECK("search: shell: the cap on a block boundary keeps 20 whole "
+		      "blocks (500 hits), more (NIT-UF1)",
+		      b && count_of(b, "\"who\":") == 500 &&
+		      count_of(b, "\"snippet\":\"cmd ROW\"") == 20 &&
+		      strstr(b, "\"snippet\":\"ROW 0959\"") &&
+		      strstr(b, "\"snippet\":\"ROW 0480\"") &&
+		      !strstr(b, "\"snippet\":\"ROW 0479\"") &&
+		      strstr(b, "\"more\":true"));
+		if (b && count_of(b, "\"who\":") != 500)
+			fprintf(stderr, "  got: %.300s\n", b);
 		free(b);
 		xr_search_free(s);
 	}

@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.98.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.99.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1574,7 +1574,9 @@ character that is not a letter or digit, or a lower-to-upper hump:
 prose (`` `#412` `` and `` `src/a.c` `` stay what they are; `` `foo` `` and
 `` `1234` `` are nothing) and is not code: a flag (`` `--json` ``, `` `-v` ``),
 a `K=V` assignment (`` `RETRY_MAX=3` ``), a call (`` `parseN()` ``,
-`` `foo(x)` ``) or a bare filename (`` `README.md` ``) is no term. Terms come from prompts, assistant text and
+`` `foo(x)` ``) or a bare filename (a name of letters, digits, `_`, `.`, `-` whose last extension is a
+common file one: `` `README.md` ``, `` `docker-compose.yml` ``, or a lowercase dotfile: `` `.env` ``) is no term; `` `os.path` ``,
+`` `github.com` `` and `` `v1.2` `` stay terms. Terms come from prompts, assistant text and
 compact summaries only: never from tool input or output, a notice, a harness
 prompt (a task notification) or a shell's ring, and the view's on-screen
 scan does not look for them. They count against a text block's 128 like

@@ -584,6 +584,26 @@ def test_refs():
     new = sorted(set(files(T)) - set(before) - {trace})
     check("ref: nothing written by a --ref", not new, new)
 
+    # #477: a long non-ASCII tool name is cut on a character boundary
+    tn = "mcp_" + "\u00e9" * 70
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "tool_use", "id": "m1", "name": tn, "input": {"q": "x"}}]}},
+         {"type": "user", "toolUseResult": {"stdout": "# #831 note"},
+          "message": {"content": [
+              {"type": "tool_result", "tool_use_id": "m1",
+               "content": "# #831 note"}]}}])
+    r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session",
+            "--full", "--json")
+    tl = [l["mention"].get("tool") for l in ref_lines(r.stdout) or []
+          if "mention" in l and l["mention"].get("who") == "tool"]
+    check("ref: a long non-ASCII tool name is cut at a character, <= 127 bytes",
+          len(tl) == 1 and tl[0] and "\ufffd" not in tl[0] and
+          len(tl[0].encode()) <= 127 and tn.startswith(tl[0]),
+          (tl, r.stdout[-400:]))
+
     # NIT-7 (#150): a relative path that only outgrows the key against the
     # session's cwd is no ref, as main's check says for a short one (exit 2)
     history("xr-deep", RSID, cfg, "/" + "d" * 1000)
