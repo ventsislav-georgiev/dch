@@ -1224,10 +1224,12 @@ def test_groups():
         check("#457: shadow mode: 6 groups, newest first, the tab says "
               "Search 6", ok and [n for n, _, _ in g] ==
               ["#7", "#6", "#5", "#4", "#3", "#1"], (g, rows(v.out).get(2)))
+        # #3's reply "Added shadow_mode: true…" holds both words: a hit since
+        # the words match in any order (#499), not only as the phrase
         check("#457: a You hit that is its title is no line; a reply's hit "
               "is a Reply line under its turn",
               [[w for w, _ in ps] for _, _, ps in g] ==
-              [["Reply"], [], ["Reply"], ["Reply"], [], ["Reply"]] and
+              [["Reply"], [], ["Reply"], ["Reply"], ["Reply"], ["Reply"]] and
               g[2][1] == "ship the ledger fix in shadow mode first" and
               g[2][2][0][1][0].startswith("Ledger fix runs"), g)
         v.key(b"q")
