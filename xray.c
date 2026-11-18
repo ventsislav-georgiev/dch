@@ -11500,7 +11500,8 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 	if (x->cancel || x->out_full || !(r = malloc(sizeof *r)))
 		return;
 	if (res_ref(sp, text, cwd, live, light, r) &&
-	    (!light || !strcmp(r->state, "ok") || !strcmp(r->state, "missing")) && (m = ln_open(&b, &bl)))
+	    (!light || !strcmp(r->state, "ok") ||
+	     !strcmp(r->state, "missing")) && (m = ln_open(&b, &bl)))
 	{
 		fputs("{\"schema\":1,\"resolved\":{\"kind\":", m);
 		xr_put_str(m, r->kind);
