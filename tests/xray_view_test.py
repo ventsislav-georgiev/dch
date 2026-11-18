@@ -771,6 +771,49 @@ def test_said():
         v.close()
 
 
+NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6,)]
+
+
+def fixture_narrow():
+    """xv-nw: one reply with 99 words before #412, alone in its project."""
+    solo = "/home/demo/narrow"
+    words = " ".join("w%03d" % k for k in range(1, 100))
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-narrow")), exist_ok=True)
+    record("xv-nw", NSIDS[0], [dict(o, cwd=solo) if "cwd" in o else o
+                               for o in turn("go", "2026-11-10T13:00:00Z",
+                                  at(say(words + " so #412 holds."),
+                                     "2026-11-10T13:01:00Z"))],
+           "-home-demo-narrow", solo)
+
+
+def test_narrow():
+    """NIT-UH2: a mention row cut to 50 columns starts on a whole word."""
+    v = Pty([DCH, "--xray", "xv-nw"], rows=30, cols=50,
+            env={"TMPDIR": TPD + "/", "NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.5)
+        for _ in range(6):
+            if "[Refs" in rows(v.out).get(2, ""):
+                break
+            v.key(b"\t", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Mentions: this session ", start=mark)
+        v.pump(1.0)
+        text = screen(v, 0)
+        row = next((l for l in text.split("\n") if "Reply" in l and
+                    "#412" in l), "")
+        check("NIT-UH2: the narrow row starts on a whole word after the "
+              "ellipsis and keeps #412", re.search(ELL + r"w\d\d\d ", row)
+              is not None and "so #412" in row, text)
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
 TSIDS = ["11111111-2222-4333-8444-5555555555e%d" % k for k in (8, 9)]
 TDEF = "`ERR_LEDGER_SKEW` is raised when the ledger clock drifts past 5 s."
 TREPLY = ("Fixed #412. `ERR_LEDGER_SKEW` no longer fires; covered by "
@@ -928,7 +971,8 @@ def main():
               fixture_latest, test_latest, test_lookup, fixture_order,
               test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
-              fixture_said, test_said, fixture_terms, test_terms,
+              fixture_said, test_said, fixture_narrow, test_narrow,
+              fixture_terms, test_terms,
               test_terms_live)
 
 
