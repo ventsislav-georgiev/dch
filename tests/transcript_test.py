@@ -505,9 +505,11 @@ def main():
             for r in json.loads(out or "[]"):
                 if r.get("name") == h:
                     got = {s["id"]: s for s in r.get("shells", [])}
+            # ASan (the nightly) runs slower; 1.102.0 took 8 s unsanitized
+            lim = 6 if "ASAN_OPTIONS" in os.environ else 2
             check("32 unnamed shells x 250 subagent files: --ls-json in "
-                  "%.2f s (< 2 s), main's shell still found" % took,
-                  took < 2 and got.get("bsh6main", {}).get("agent",
+                  "%.2f s (< %d s), main's shell still found" % (took, lim),
+                  took < lim and got.get("bsh6main", {}).get("agent",
                                                            MISSING) is None
                   and len(got) >= 38)
             os.unlink(os.path.join(sessdir, "%d.json" % hp))
