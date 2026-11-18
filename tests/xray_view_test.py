@@ -1003,6 +1003,87 @@ def test_terms_live():
         dch("-k", "xv-tv")
 
 
+RCSIDS = ["11111111-2222-4333-8444-479000000%03d" % k for k in (1, 2, 3)]
+
+
+def fixture_recall():
+    """#479: xv-ra and xv-rb share /home/demo/recall; xv-rb says #412 in its
+    turns 2 and 3; xv-rc, in another project, says it once."""
+    for k, (name, proj, asks) in enumerate((
+            ("xv-ra", "recall", ["mine: see #412 today"]),
+            ("xv-rb", "recall", ["start", "Plan the cache. Then fix #412 first.",
+                                 "Is #412 done?", "bye"]),
+            ("xv-rc", "farproj", ["far away #412 here"]))):
+        cwd = "/home/demo/" + proj
+        lines = []
+        for t, a in enumerate(asks):
+            lines += turn(a, "2026-11-1%dT1%d:00:00Z" % (k, t),
+                          at(say("ok %d" % t), "2026-11-1%dT1%d:01:00Z" % (k, t)))
+        os.makedirs(os.path.dirname(tl("x", "-home-demo-" + proj)),
+                    exist_ok=True)
+        record(name, RCSIDS[k], [dict(o, cwd=cwd) if "cwd" in o else o
+                                 for o in lines], "-home-demo-" + proj, cwd)
+
+
+def test_recall():
+    """#479: the card's other same-project session: a session header (its
+    name, its age), its turns newest first with their sentences; Enter on
+    the session header or a turn header opens that session's reader there."""
+    v = Pty([DCH, "--xray", "xv-ra"], env={"TMPDIR": TPD + "/",
+                                           "NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.5)
+        for _ in range(6):
+            if "[Refs" in rows(v.out).get(2, ""):
+                break
+            v.key(b"\t", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Mentions: this session ", start=mark)
+        mark = len(v.out)
+        v.key(b"f", 0.5)
+        until(lambda: (v.pump(0.1), "in 1 sessions" in screen(v, mark))[1], 10)
+        v.pump(0.5)
+        text = screen(v, 0)
+        lines = text.split("\n")
+        at_ = [next((i for i, l in enumerate(lines) if re.search(x, l)), -1)
+               for x in (r"p1 mine: see #412 today",
+                         r"You mine: see #412 today",
+                         r"also discussed in xv-rb, \d+[mhd] ago",
+                         r"p3 Is #412 done\? +\d\d-\d\d \d\d:\d\d",
+                         r"You Is #412 done\? *$",
+                         r"p2 Plan the cache\. Then fix #412 first\.",
+                         r"You Then fix #412 first\. *$")]
+        check("#479: the card: this session's turn, then 'also discussed in "
+              "xv-rb, <age>', its p3 and p2 headers each over its sentence",
+              -1 not in at_ and at_ == list(range(at_[0], at_[0] + 7)) and
+              "xv-rc" not in text and "far away" not in text, (at_, text))
+        v.key(b"j", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        ok = until(lambda: (v.pump(0.1), "ok 2" in screen(v, mark))[1], 5)
+        text = screen(v, mark)
+        check("#479: Enter on xv-rb's header opens its reader at its newest "
+              "turn (p3)", ok and "Is #412 done?" in text and "Plan the cache"
+              not in text, text)
+        v.key(b"q", 0.5)
+        v.key(b"jjj", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        ok = until(lambda: (v.pump(0.1), "ok 1" in screen(v, mark))[1], 5)
+        text = screen(v, mark)
+        check("#479: Enter on xv-rb's p2 header opens its reader at p2",
+              ok and "Plan the cache" in text and "Is #412 done?" not in
+              text, text)
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
 def main():
     run_steps(fixture, test_refusals, test_view, fixture_refs, test_refs,
               fixture_latest, test_latest, test_lookup, fixture_order,
@@ -1010,7 +1091,7 @@ def main():
               fixture_reply, test_reply, test_reply_live,
               fixture_said, test_said, fixture_narrow, test_narrow, test_narrow_cjk,
               fixture_terms, test_terms,
-              test_terms_live)
+              test_terms_live, fixture_recall, test_recall)
 
 
 if __name__ == "__main__":

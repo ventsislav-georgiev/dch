@@ -1,6 +1,6 @@
 {"schema":1,"first":{"session":"screen","session_id":"m1a2b3c4d5e6f7a94","key":"pull:o/r#831","shape":"pull","text":"o/r#831","project":"-T-work-screen","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
-{"schema":1,"mention":{"session":"screen","chapter":"s281474976730001","at":1794300000,"line":"# o/r#831 Old title","turn":null,"sentence":"# o/r#831 Old title","span":[2,9],"offset":281474976730005,"live":true,"project":"-T-work-screen"}}
+{"schema":1,"mention":{"session":"screen","session_id":"m1a2b3c4d5e6f7a94","chapter":"s281474976730001","at":1794300000,"line":"# o/r#831 Old title","turn":null,"sentence":"# o/r#831 Old title","span":[2,9],"offset":281474976730005,"live":true,"project":"-T-work-screen"}}
 {"schema":1,"definition":{"session":"screen","live":true,"project":"-T-work-screen","at":1794300000,"title":"Old title","passage":null,"rule":"D1","offset":281474976730005,"chapter":"s281474976730001"}}
-{"schema":1,"mention":{"session":"screen","chapter":null,"at":0,"line":"screen o/r#831 here","turn":null,"sentence":"screen o/r#831 here","span":[7,14],"offset":281474976730043,"live":true,"project":"-T-work-screen"}}
+{"schema":1,"mention":{"session":"screen","session_id":"m1a2b3c4d5e6f7a94","chapter":null,"at":0,"line":"screen o/r#831 here","turn":null,"sentence":"screen o/r#831 here","span":[7,14],"offset":281474976730043,"live":true,"project":"-T-work-screen"}}
 {"schema":1,"tally":{"session":"screen","live":true,"project":"-T-work-screen","count":2,"definitions":1,"partial":false,"mentions_dropped":0}}
 {"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":199,"lines_too_long":0}

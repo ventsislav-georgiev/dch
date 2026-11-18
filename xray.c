@@ -2180,6 +2180,7 @@ struct remit
 	long long at;
 	const char *chapter;
 	uint64_t turn;		/* the chapter's prompt number, 0 unknown */
+	const char *ttitle;	/* #479: that chapter's title, NULL unknown */
 	const char *who, *tool;	/* user, assistant or tool (its name) */
 	uint64_t *ctr;		/* Claude: each mention its own unit */
 	uint64_t unit, row;	/* shell: the block and the row */
@@ -2231,6 +2232,7 @@ rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
 	h.at = r->at;
 	h.chapter = r->chapter;
 	h.turn = r->turn;
+	h.ttitle = r->ttitle;
 	h.who = r->who;
 	h.tool = r->tool;
 	if (title)
@@ -4277,6 +4279,8 @@ struct xr_scan
 	int live, full, shell, budget;
 	int scope, other, same;	/* --scope; this file another session's, in
 				** <n>'s project dir */
+	const char *sid;	/* this file's session id (#479) */
+	long long seen;		/* another session's last activity, -1 none */
 	long long t0;
 	long long blocked;	/* ms blocked writing to the reader: not the
 				** budget's, not --full's 10 s (#236) */
@@ -4656,8 +4660,11 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	}
 	fputs("{\"schema\":1,\"mention\":{\"session\":", m);
 	xr_put_str(m, x->session);
+	fputs(",\"session_id\":", m);
+	put_or_null(m, x->sid);
 	fputs(",\"chapter\":", m);
-	put_or_null(m, x->other ? NULL : h->chapter);	/* <n>'s only */
+	/* <n>'s and its project's other sessions' only (#479) */
+	put_or_null(m, x->other && !x->same ? NULL : h->chapter);
 	fputs(",\"at\":", m);
 	put_at(m, h->at);
 	if (h->who)	/* Claude's only */
@@ -4672,10 +4679,17 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	/* #478: the turn, and the sentence around the ref with its bytes */
 	ref_sentence(h->line, h->ll, h->sp->s, h->sp->e, sent, &ss, &se);
 	fputs(",\"turn\":", m);
-	if (h->turn && !x->other)
+	if (h->turn && (!x->other || x->same))
 		fprintf(m, "%llu", (unsigned long long)h->turn);
 	else
 		fputs("null", m);
+	if (x->other && x->same)	/* #479: what the card's headers show */
+	{
+		fputs(",\"turn_title\":", m);
+		put_or_null(m, h->turn ? h->ttitle : NULL);
+		fputs(",\"last_active\":", m);
+		put_at(m, x->seen);
+	}
 	fputs(",\"sentence\":", m);
 	xr_put_str(m, sent);
 	if (ss == SIZE_MAX)
@@ -4891,11 +4905,12 @@ sc_hit(void *ctx, const struct xr_hit *h)
 			x->lastrow = h->row;
 		}
 		/* one line per source line (a Claude entry, a shell row); never
-		** in light mode for a shell <n> (S18) or another session (K4.2) */
+		** in light mode for a shell <n> (S18) or another project's
+		** session (K4.2; #479: <n>'s project's other sessions' go) */
 		x->lastoff = h->off;
 		x->lasth = lh;
-		if (newline && (x->full || (!x->shell && !x->other)) &&
-		    (b = mention_line(x, h)))
+		if (newline && (x->full || (!x->shell && (!x->other || x->same)))
+		    && (b = mention_line(x, h)))
 		{
 			/* --full's first, at once when the head's: no older one
 			** can come (a shell's rows come in order) */
@@ -5095,6 +5110,8 @@ xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 	FILE *m = ln_open(&b, &bl);
 	int rc;
 
+	x->sid = session_id;
+
 	if (!m)
 		return -1;
 	fputs("{\"schema\":1,\"first\":{\"session\":", m);
@@ -5207,8 +5224,8 @@ xr_scan_scope(struct xr_scan *x, int scope)
 }
 
 int
-xr_scan_next(struct xr_scan *x, const char *session, const char *project,
-             int live, int same)
+xr_scan_next(struct xr_scan *x, const char *session, const char *sid,
+             const char *project, int live, int same, long long seen)
 {
 	if (!x->stop && (x->files >= xr_lim.files || x->bytes >= xr_lim.bytes))
 	{
@@ -5221,6 +5238,8 @@ xr_scan_next(struct xr_scan *x, const char *session, const char *project,
 	x->project = project;
 	x->live = live;
 	x->same = same;
+	x->sid = sid;
+	x->seen = seen;
 	x->other = 1;
 	x->shell = 0;	/* a Claude file: <n>'s shell rules end with its ring */
 	return 0;
@@ -5986,7 +6005,7 @@ xr_claude_calls(struct xr_claude *d, xr_call_fn fn, void *ctx, uint64_t ino)
 ** --json's "i" and the view's pN; 0 in a blind window (its ordinals start
 ** at the window) or once the chapter is no longer held. */
 static uint64_t
-ch_turn(struct xr_claude *d, const char *a)
+ch_turn(struct xr_claude *d, const char *a, const char **title)
 {
 	const struct xr_chapter *c;
 	unsigned long long ino, off;
@@ -5996,7 +6015,10 @@ ch_turn(struct xr_claude *d, const char *a)
 		return 0;
 	for (k = d->ch.n; k-- > 0;)
 		if ((c = xr_chapter_at(&d->ch, k)) && c->offset == off)
+		{
+			*title = c->title;
 			return d->ch.total - d->ch.n + k + 1;
+		}
 	return 0;
 }
 
@@ -6009,7 +6031,7 @@ rm_claude(struct xr_claude *d, struct remit *r, const char *chapter)
 	r->off = d->off;
 	r->at = d->at;
 	r->chapter = chapter && chapter[0] ? chapter : NULL;
-	r->turn = r->chapter ? ch_turn(d, r->chapter) : 0;
+	r->turn = r->chapter ? ch_turn(d, r->chapter, &r->ttitle) : 0;
 	r->who = d->who;
 	r->tool = d->tool;
 	r->ctr = &d->unit;

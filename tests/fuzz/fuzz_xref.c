@@ -226,7 +226,7 @@ scan(const uint8_t *d, size_t n, const char *key)
 			struct xr_claude *x;
 			struct xr_chapters c = {0};
 
-			if ((pass && xr_scan_next(s, "other", "q", 0, 0)) ||
+			if ((pass && xr_scan_next(s, "other", "id", "q", 0, 0, -1)) ||
 			    !(x = decoder()))
 				break;
 			xr_scan_sink(s, &k);
