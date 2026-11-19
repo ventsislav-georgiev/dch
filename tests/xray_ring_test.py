@@ -672,7 +672,7 @@ def test_shell_init(tmp):
             # --search (#297) over the ring: the typed commands as user,
             # their rows as tool, each under its command's chapter, newest
             # first; the prompt is not searched
-            r = dch("--xray", n, "--search", "SEQ 1 6", "--json")
+            r = dch("--xray", n, "--search", "SEQ 1 60", "--json")
             o = json.loads(r.stdout) if r.returncode == 0 else {}
             hs = o.get("hits", [])
             cs = [h["chapter"] for h in hs]
