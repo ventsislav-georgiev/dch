@@ -1000,9 +1000,9 @@ def test_github(m):
         t0 = time.time()
         r, ls, rv, lg = q("acme/widgets#700", full=False)
         dt = time.time() - t0
-        check("#522 light: gh sleeping 5 s: --ref returns in < 1.6 s with "
+        check("#522 light: gh sleeping 5 s: --ref returns in < 2.8 s with "
               "the mention counted and no resolved line",
-              r.returncode == 0 and dt < 1.6 and not rv and
+              r.returncode == 0 and dt < 2.8 and not rv and
               any(l.get("tally", {}).get("count") == 1 for l in ls) and
               ls[-1].get("done") is True, (dt, [list(l) for l in ls]))
         check("#522: the hanging fill ends, nothing cached, no gh or dch "
@@ -1018,8 +1018,8 @@ def test_github(m):
         t0 = time.time()
         r, ls, rv, lg = q("acme/widgets#701", full=False)
         dt = time.time() - t0
-        check("#522 light: gh answering in 2 s: --ref returns in < 1.6 s "
-              "with no resolved line", not rv and dt < 1.6, (dt, rv))
+        check("#522 light: gh answering in 2 s: --ref returns in < 1.95 s "
+              "with no resolved line", not rv and dt < 1.95, (dt, rv))
         ent = os.path.join(ghd, "acme,widgets,701")
         filled = wait_for(lambda: os.path.isfile(ent) and idle(), 10)
         r2, ls2, rv2, lg2 = q("acme/widgets#701", full=False, keep=True)

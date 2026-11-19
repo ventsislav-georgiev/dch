@@ -437,7 +437,8 @@ def main():
     run_steps(fixture, test_cli, test_written, test_card,
               test_failed_after_rows, test_card_width, test_card_zwj,
               test_refs_row_full, test_cap_url_bom, test_fetched,
-              test_prefilter_fold, test_read, test_read_shell)
+              test_prefilter_fold, test_read, test_read_shell,
+              test_lead_in)
 
 
 # ---- #515: a URL the agent fetched resolves from the transcript ------------
@@ -834,6 +835,118 @@ def test_read():
         v.key(b"q")
     finally:
         v.close()
+
+
+# ---- #534: a lead-in line that names the ref and ends in ':' --------------
+
+LSID = "11111111-2222-4333-8444-5555555555c9"
+LEADS = ["Decision for you (OQ-184):  \nShip the lead-in rule?\n- a) yes\n"
+         "- b) no\n\nnot the passage",
+         "Notes on OQ-186:\n\nOn OQ-189:\nits body",
+         "# OQ-187 Heading Title\nthe heading's body\n\n**Lead (OQ-187):**"
+         "\nthe lead's body\n\n__Also OQ-190:__ \nits own body",
+         "```\nDecision (OQ-188):\nin a fence\n```\nOutside (OQ-191):\n"
+         "after it",
+         "Next on OQ-187:\nanother result's body"]
+# the operator's shape (Prosper #1641): in the agent's own reply
+REPLIES = [("assistant", "Decision for you (OQ-185):\n- a) ship it\n- b) wait"
+            "\n- c) drop it\n\nTell me which."),
+           ("user", "Re OQ-193:\nplease look"),
+           ("assistant", "Status of OQ-187:\nthe reply's body\n\n"
+            "**OQ-194 next:**\nits reply body")]
+
+
+def test_lead_in():
+    """xv-ld, an ended Claude whose cat calls each print LEADS's text, then
+    REPLIES"""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    lines = [{"type": "user", "cwd": P, "timestamp": "2026-11-01T10:00:00Z",
+              "message": {"content": "go"}}]
+    for k, out in enumerate(LEADS, 1):
+        ts = "2026-11-01T10:0%d:00Z" % k
+        lines.append({"type": "assistant", "timestamp": ts,
+                      "message": {"content": [{"type": "tool_use",
+                                               "id": "l%d" % k,
+                                               "name": "Bash", "input": {
+                                                   "command": "cat oq.md"}}]}})
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"stdout": out}, "message": {
+                          "content": [{"type": "tool_result",
+                                       "tool_use_id": "l%d" % k,
+                                       "content": out}]}})
+    for k, (who, text) in enumerate(REPLIES, 6):
+        lines.append({"type": who, "timestamp": "2026-11-01T10:0%d:00Z" % k,
+                      "message": {"content": [{"type": "text",
+                                               "text": text}]}})
+    with open(os.path.join(pdir, LSID + ".jsonl"), "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    with open(os.path.join(hdir, "xv-ld.json"), "w") as f:
+        f.write(json.dumps({"name": "xv-ld", "cwd": P, "end": "exited",
+                            "argv": ["claude"], "started": 1794299400,
+                            "updated": 1794300000, "ended": 1794300000,
+                            "sock_dir": sockdir,
+                            "agent": {"session_id": LSID, "cwd": P,
+                                      "config_dir": cfg}}) + "\n")
+    config(None)
+
+    def defs(r):
+        p = dch("--xray", "xv-ld", "--ref", r, "--json")
+        return [json.loads(l)["definition"] for l in p.stdout.splitlines()
+                if '"definition"' in l], p.stdout[-600:]
+
+    d, out = defs("OQ-184")
+    check("#534 \"Decision for you (OQ-184):\" defines OQ-184: rule D5, the "
+          "line its title, the lines after it to the blank its passage",
+          [(x["rule"], x["title"], x["passage"]) for x in d] ==
+          [("D5", "Decision for you (OQ-184)",
+            "Ship the lead-in rule?\n- a) yes\n- b) no")], (d, out))
+    d, out = defs("OQ-185")
+    e, _ = defs("OQ-193")
+    check("#534 an assistant reply's \"Decision for you (OQ-185):\" and 3 "
+          "option lines define OQ-185 (a user's lead-in does not)",
+          [(x["rule"], x["title"], x["passage"]) for x in d] ==
+          [("D5", "Decision for you (OQ-185)",
+            "- a) ship it\n- b) wait\n- c) drop it")] and not e,
+          (d, e, out))
+    d, out = defs("OQ-186")
+    e, _ = defs("OQ-189")
+    check("#534 a ':' line with no body after it does not define (the "
+          "lead-in after the blank does)", not d and
+          [(x["rule"], x["passage"]) for x in e] == [("D5", "its body")],
+          (d, e, out))
+    d, out = defs("OQ-187")
+    e, _ = defs("OQ-190")
+    check("#534 a D1 heading for the same ref wins over a lead-in (another "
+          "ref's lead-in, '__' and a blank after its ':', still defines)",
+          [(x["rule"], x["title"]) for x in d] ==
+          [("D1", "Heading Title")] and
+          [(x["rule"], x["title"]) for x in e] == [("D5", "Also OQ-190")],
+          (d, e, out))
+    p = dch("--xray", "xv-ld", "--json")
+    try:
+        rs = {r["key"].split(":", 1)[-1]: r for r in
+              json.loads(p.stdout.splitlines()[0])["refs"]}
+    except (ValueError, KeyError, IndexError):
+        rs = {}
+    t = {k: (rs.get(k) or {}).get("title") for k in ("OQ-187", "OQ-194")}
+    check("#534 a D1 heading in one tool result: --ref lists only D1's "
+          "definition over lead-ins in another result and in a newer reply, "
+          "and the refs title is D1's (a reply's own lead-in titles its ref)",
+          [x["rule"] for x in defs("OQ-187")[0]] == ["D1"] and
+          t == {"OQ-187": "Heading Title", "OQ-194": "OQ-194 next"},
+          (t, p.stdout[:600]))
+    d, out = defs("OQ-188")
+    e, _ = defs("OQ-191")
+    check("#534 a lead-in inside a fence does not define (one after the "
+          "fence does)", not d and
+          [(x["rule"], x["passage"]) for x in e] == [("D5", "after it")],
+          (d, e, out))
 
 
 # #531: only a reader's own output is read: not a write, a filter, a list
