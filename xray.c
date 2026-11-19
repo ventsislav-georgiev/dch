@@ -6881,6 +6881,8 @@ read_cmd(const struct sw *w, size_t k, size_t e)
 		else
 			files++;
 	}
+	/* rg with no path searches the cwd: still a read; grep reads stdin */
+	files += !files && !strcmp(readers[i], "rg");
 	return files && (!sed || (quiet && !inpl)) ? readers[i] : NULL;
 }
 

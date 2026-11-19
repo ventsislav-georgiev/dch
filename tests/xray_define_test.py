@@ -846,7 +846,8 @@ READS = [("cat > out.md <<'EOF'\nsrc/engine.c:1\nEOF", None),
          ("cat NOTES", "cat"), ("cat NOTES | head", "cat"),
          ("sed -n 1,5p NOTES", "sed"), ("sed --quiet 1,5p NOTES", "sed"),
          ("sed --silent 1,5p NOTES", "sed"),
-         ("bash -lc 'cat NOTES'", "cat")]
+         ("bash -lc 'cat NOTES'", "cat"), ("rg -n engine", "rg"),
+         ("grep -n engine", None)]
 
 
 def test_read_shell():
