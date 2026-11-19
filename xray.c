@@ -11590,7 +11590,10 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 	static struct res_run run;	/* 68 KB: off the stack */
 	static const char *const keep[] = {"PATH=", "HOME=", "XDG_CONFIG_HOME=",
 		"GH_CONFIG_DIR=", "GH_TOKEN=", "GITHUB_TOKEN=",
-		"DBUS_SESSION_BUS_ADDRESS="};	/* the Linux keyring's */
+		"DBUS_SESSION_BUS_ADDRESS=",	/* the Linux keyring's */
+		/* behind a proxy or a private CA (QA 1.111.0 NIT-UP5) */
+		"HTTPS_PROXY=", "HTTP_PROXY=", "NO_PROXY=", "https_proxy=",
+		"http_proxy=", "no_proxy=", "SSL_CERT_FILE=", "SSL_CERT_DIR="};
 	static char f0[] = "GH_PROMPT_DISABLED=1", f1[] = "GH_NO_UPDATE_NOTIFIER=1",
 	            f2[] = "GH_NO_EXTENSION_UPDATE_NOTIFIER=1", f3[] = "NO_COLOR=1",
 	            f4[] = "GH_PAGER=cat", f5[] = "GH_BROWSER=false",
@@ -11602,7 +11605,7 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 	                   "then \"pull\" else \"issue\" end)}";
 	extern char **environ;
 	const char *t = xr_span_text(sp), *h = strchr(t, '#'), *sl;
-	char gh[PATH_MAX], repo[208], num[16], path[256], *env[24], cb[4096];
+	char gh[PATH_MAX], repo[208], num[16], path[256], *env[32], cb[4096];
 	char *av[] = {gh, a1, a2, a3, a4, a5, a6, a7, path, NULL};
 	char *fix[] = {f0, f1, f2, f3, f4, f5, f6, f7};
 	size_t k, j, e = 0, nl;

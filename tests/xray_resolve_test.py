@@ -634,6 +634,8 @@ case "$*" in
   echo '{"number":12,"title":"Old thing","state":"closed","kind":"issue"}' ;;
 *repos/acme/widgets/issues/44)
   echo '{"number":45,"title":"Wrong one","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/88)
+  echo '{"number":88,"title":"Odd state","state":"draft","kind":"pull"}' ;;
 *repos/acme/widgets/issues/500)
   echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
 *repos/acme/widgets/issues/600)
@@ -694,6 +696,19 @@ def test_github(m):
                                     "PATH=" + fb)) and
               not any(e.startswith(("XRES_CANARY", "DCH_", "TMPDIR"))
                       for e in ev), ev)
+        # NIT-UP5: a proxy and a CA bundle reach gh; GH_HOST and co do not
+        pv = {"HTTPS_PROXY": "p1", "HTTP_PROXY": "p2", "NO_PROXY": "p3",
+              "https_proxy": "p4", "http_proxy": "p5", "no_proxy": "p6",
+              "SSL_CERT_FILE": "/c/f", "SSL_CERT_DIR": "/c/d"}
+        os.unlink(envlog)
+        q("#1234", env=dict(genv, **pv, GH_HOST="evil.example",
+                            GH_ENTERPRISE_TOKEN="x", LD_PRELOAD="/x.so"))
+        ev = open(envlog).read().split("\n")
+        check("#521: proxy and CA env reach gh unchanged; GH_HOST, "
+              "GH_ENTERPRISE_TOKEN, LD_PRELOAD do not",
+              all(k + "=" + v in ev for k, v in pv.items()) and
+              not any(e.startswith(("GH_HOST", "GH_ENTERPRISE_TOKEN",
+                                    "LD_PRELOAD")) for e in ev), ev)
         r, ls, rv, lg = q("https://github.com/acme/widgets/pull/77")
         check("#507: a pull URL: a merged pull",
               len(rv) == 1 and rv[0]["kind"] == "pull" and rv[0]["title"] ==
@@ -760,6 +775,11 @@ def test_github(m):
                 ("an invalid owner", "-rf/r#1", genv, n, False),
                 ("an invalid owner in a URL",
                  "https://github.com/-acme/widgets/issues/9", genv, n, False),
+                ("a leading zero, bare", "#0123", genv, n, False),
+                ("a leading zero, o/r", "o/r#012", genv, n, False),
+                ("a leading zero, URL",
+                 "https://github.com/o/r/issues/0012", genv, n, False),
+                ("an unknown state (draft)", "#88", genv, n, True),
                 ("repo#N not the origin's", "gadgets#3", genv, n, False),
                 ("not a repo (no origin)", "#1234", genv, m, False)):
             r, ls, rv, lg = q(text, env=env, who=who)
