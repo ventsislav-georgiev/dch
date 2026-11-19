@@ -2483,8 +2483,8 @@ which a client can use as its version probe.
   is the command's last answer, or the built-in block (`source: "none"`
   or the transcript's, as when the command gives no answer) before its
   first answer, as at the start; the answer replaces it when it lands,
-  whole when its header differs, else as row deltas. One still running when the follow ends, or is
-  signalled, is stopped with it.
+  whole when its header differs, else as row deltas. One still running
+  when the follow ends, or is signalled, is stopped with it.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
