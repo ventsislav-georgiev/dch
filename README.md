@@ -2144,6 +2144,8 @@ turns begun and the refs mentioned at or after `<time>`, as one JSON object:
 - `refs`: the refs mentioned at or after `since` (first or again), by
   `last_at` newest first, the newest 30; `key`, `shape` and `text` as in the
   refs list. `count` counts the mentions since `since`, not the session's.
+- A turn with no timestamp has no time to compare, so it and the refs under it
+  never show, `--since 0` too.
 - `more` is true when either cap cut. `partial` is true when `--search`'s
   byte or time cap stopped the read before it reached `since`: the answer
   holds only the newest turns.

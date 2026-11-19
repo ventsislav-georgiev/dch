@@ -1275,8 +1275,7 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
             (75, ["--since", "1w", "--json"], "dch: bad since: epoch "
              "seconds, 2026-11-19T10:00:00Z (UTC) or <N>m, <N>h, <N>d"),
             (76, ["--since", "1h", "--search", "x1", "--json"],
-             "dch: bad usage: --ref, --search, --tasks, --memory, "
-             "--follow, --chapter and --clear exclude each other")):
+             "dch: bad usage: --since takes --json only")):
         rq.send({"req": req, "argv": argv})
         got = [json.loads(g) for g in rq.until(req)]
         check("requests refuse %r: %s, exit 2, refused" % (argv, line),
@@ -1505,6 +1504,8 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
              "takes host:name and --json, nothing else"),
             (["srv:xq1", "--follow"], "dch: bad usage: --requests takes "
              "host:name and --json, nothing else"),
+            (["srv:xq1", "--since", "1h"], "dch: bad usage: --requests "
+             "takes host:name and --json, nothing else"),
             (["srv:xq1", "--requests"], "dch: bad usage: --requests "
              "twice")):
         r = dch(xenv, "--xray", "--requests", "--json", *args)

@@ -726,6 +726,10 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	if (!(seen & X_JSON))
 		return ctl_no(why, cap, "--xray needs --json (the view is "
 		              "client-side only)");
+	/* the local wording (#529): --since names itself */
+	if (seen & X_SINCE && (one & (one - 1) ||
+	                       seen & (X_SCOPE | X_FULL | X_BUDGET)))
+		return ctl_no(why, cap, "--since takes --json only");
 	if (one & (one - 1))
 		return ctl_no(why, cap, "--ref, --search, --tasks, --memory, "
 		              "--follow, --chapter and --clear exclude each other");

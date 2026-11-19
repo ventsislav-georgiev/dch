@@ -3572,6 +3572,30 @@ def test_since():
     check("since: with another query is bad usage, exit 2",
           r.returncode == 2 and r.stderr ==
           "dch: bad usage: --since takes --json only\n", r.stderr)
+    # #529 (QA 1.113.0 NIT-UR11): rows for the mutants the probes kill
+    rc, o, raw = got("xs-a", str(t0 + 61))    # #101's mention is at t0 + 61
+    check("since: a mention exactly at since is included (msinceeq)",
+          rc == 0 and "issue:#101" in (keys(o) or []), raw[:300])
+    rc, o, raw = got("xs-e", str(t0 + 60 * 59))
+    r = dch("--xray", "xs-e", "--since", str(t0 + 60 * 59), "--json",
+            env=dict(ENV, DCH_XRAY_CAPS="0:5500000"))
+    o2 = json.loads(r.stdout) if r.returncode == 0 else None
+    check("since: a window that reaches a turn begun before since stops "
+          "there, partial false under a 5.5 MB cap (mreach)",
+          rc == 0 and o["partial"] is False and o2 and
+          o2["partial"] is False and titles(o2) == ["big 59"],
+          (r.returncode, r.stdout[:300], r.stderr))
+    rc, o, raw = got("xs-a", "2100-02-29T00:00:00Z")
+    check("since: 2100-02-29 is refused, 2100 is no leap year (mleap)",
+          rc == 2 and o is None, raw)
+    rc, o, raw = got("xs-a", "999999d")
+    check("since: 999999d is accepted, clamped to 0 as documented (mrel)",
+          rc == 0 and o["since"] == 0, raw[:200])
+    rc, o, raw = got("xs-a", "999999999999")
+    rc13, _, raw13 = got("xs-a", "1000000000000")
+    check("since: epoch seconds take 12 digits, a 13-digit one is refused "
+          "(m13)", rc == 0 and o["since"] == 999999999999 and rc13 == 2,
+          (raw[:100], raw13))
 
 
 def test_light_anchors():
