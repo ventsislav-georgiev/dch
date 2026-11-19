@@ -10568,6 +10568,42 @@ res_under(const char *p, const char *root)
 	return p[rl] ? p + rl + 1 : p + rl;
 }
 
+/* lnk is a dangling symlink: its target, read textually, lies in the real
+** root rr (#525, QA 1.112.0 UQ3). A ".." part, or a target whose own nearest
+** parent is not a plain in-root dir (another link), says no: outside. */
+static int
+res_dangle_in(const char *lnk, const char *rr)
+{
+	char t[PATH_MAX], d[PATH_MAX], rd[PATH_MAX], *sl;
+	struct stat st;
+	ssize_t n = readlink(lnk, t, sizeof t - 1);
+
+	if (n <= 0)
+		return 0;
+	t[n] = '\0';
+	if (t[0] != '/')
+	{
+		/* relative to the link's real dir */
+		if (snprintf(d, sizeof d, "%s", lnk) >= (int)sizeof d ||
+		    !(sl = strrchr(d, '/')))
+			return 0;
+		sl[sl == d] = '\0';
+		if (!realpath(d, rd) || snprintf(d, sizeof d, "%s/%s", rd, t)
+		    >= (int)sizeof d)
+			return 0;
+		strcpy(t, d);
+	}
+	n = strlen(t);
+	/* a target that exists (a loop, a chain of links) is no plain miss */
+	if (strstr(t, "/../") || (n >= 3 && !strcmp(t + n - 3, "/..")) ||
+	    lstat(t, &st) == 0)
+		return 0;
+	while ((sl = strrchr(t, '/')) && sl > t &&
+	       (*sl = '\0', lstat(t, &st) != 0 && errno == ENOENT))
+		;
+	return realpath(t, d) && res_under(d, rr);
+}
+
 /* The passwd entry's home, as a copy: a later getpwuid frees what the one
 ** before returned (macOS), and the callers nest (res_wide and res_home_deny
 ** call res_home_ino): a use after free since #205, found by CI's ASan. */
@@ -12113,7 +12149,8 @@ res_file(const char *key, const char *text, const char *cwd, int light,
 		while ((sl = strrchr(rp, '/')) && sl > rp &&
 		       (*sl = '\0', lstat(rp, &st) != 0 && errno == ENOENT))
 			;
-		if (!rr[0] || !realpath(rp, shown) || !res_under(shown, rr))
+		if (!rr[0] || !(realpath(rp, shown) ? !!res_under(shown, rr)
+		                                    : res_dangle_in(rp, rr)))
 		{
 			res_set(r, "outside_project",
 			        "Outside this session's project");
