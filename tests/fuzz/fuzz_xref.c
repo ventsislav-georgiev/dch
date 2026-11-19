@@ -38,6 +38,9 @@
 ** no first result ends the read. An input whose length is a multiple of 3
 ** lowers the range to a quarter of the file each end, which --ref reads past
 ** (#301), and goes through --full's read as well.
+** Path 3's resolvers also take the bytes as a fetch's output (#515): its
+** page title clean and within 120 bytes; a fetch's definition (Codex's
+** too) is a URL's with such a title.
 ** Every hit handed to a sink lies inside its line; a definition's title is
 ** valid UTF-8, its passage within XR_PASSAGE scalars' bytes; the printed object is one line within the cap. */
 #include <stdint.h>
@@ -149,8 +152,14 @@ tee_hit(void *ctx, const struct xr_hit *h)
 	if (!h->sp || h->sp->s >= h->sp->e || h->sp->e > h->ll || !h->line)
 		abort();
 	check_key(h->sp);
-	if (cx && (h->title || h->passage || h->rule))
-		abort();	/* a Codex corpus defines nothing (7.4) */
+	if (cx && (h->passage || (h->rule && strcmp(h->rule, "fetch")) ||
+	           (h->title && !h->rule)))
+		abort();	/* a Codex corpus defines nothing (7.4) but a
+				** fetched page's URL (#515) */
+	if (h->rule && !strcmp(h->rule, "fetch") &&
+	    (h->sp->shape != XR_URL || !h->title[0] ||
+	     strlen(h->title) > XR_FETCH_TITLE))
+		abort();
 	if (t->screen && h->chapter)
 		abort();	/* a screen row has no marks, so no block */
 	if (h->title)
@@ -673,6 +682,21 @@ resolvers(const char *s, size_t n)
 	}
 	if (xr_ref_line(s) < 0 || xr_ref_line(s) > 9999999)
 		abort();
+	{
+		/* #515: a fetched page's title: valid UTF-8 within 120 bytes,
+		** no control, C1 or bidi control, no blank at either end */
+		char ft[XR_FETCH_TITLE + 1];
+		size_t i, fl;
+
+		xr_fetch_title(s, n, ft, sizeof ft);
+		fl = strlen(ft);
+		check_utf8(ft, fl);
+		if (fl > XR_FETCH_TITLE || (fl && (ft[0] == ' ' || ft[fl - 1] == ' ')))
+			abort();
+		for (i = 0; i < fl; i++)
+			if ((ft[i] & 0xc0) != 0x80 && xr_ctl_at(ft + i, fl - i))
+				abort();	/* each scalar's lead byte */
+	}
 	(void)xr_secret_name(s);
 	if (xr_gitfile(s, n) != (n > 8 && !memcmp(s, "gitdir: ", 8) &&
 	    !strchr("\r\n", s[8])))

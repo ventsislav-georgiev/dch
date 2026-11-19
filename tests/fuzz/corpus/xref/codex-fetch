@@ -1,0 +1,4 @@
+!{"timestamp": "2026-11-01T10:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "c1", "arguments": "{\"command\": [\"bash\", \"-lc\", \"curl -sL https://ex.com/a\"]}"}}
+{"timestamp": "2026-11-01T10:00:01Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "<title>Codex Page</title>"}}
+{"timestamp": "2026-11-01T10:00:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "c2", "arguments": "{\"cmd\": \"xh https://ex.com/b\"}"}}
+{"timestamp": "2026-11-01T10:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "c2", "output": "# B page"}}

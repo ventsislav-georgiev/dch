@@ -1,0 +1,5 @@
+{"type": "assistant", "timestamp": "2026-11-01T10:00:00Z", "message": {"content": [{"type": "tool_use", "id": "w1", "name": "WebFetch", "input": {"url": "https://Ex.com/a/#f"}}]}}
+{"type": "user", "timestamp": "2026-11-01T10:00:01Z", "message": {"content": [{"type": "tool_result", "tool_use_id": "w1", "content": "<TITLE>A &amp; B\u202e\u001b[2J</title>"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "curl -s https://ex.com/a | wget x"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "x\n# Heading &#39;q&#39;\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": "x"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "see https://ex.com/a"}]}}
