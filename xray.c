@@ -11310,7 +11310,8 @@ res_commit(const char *sha, const char *cwd, int live, int light,
 	}
 	if (rc == 1)
 	{
-		res_set(r, "timeout", "git timed out after 3 s");
+		res_set(r, "timeout", light ? "git timed out after 300 ms"
+		                               : "git timed out after 3 s");
 		return 1;
 	}
 	if (!foreign)
