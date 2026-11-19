@@ -4605,18 +4605,23 @@ ix_hit(void *ctx, const struct xr_hit *h)
 		uint64_t th = title_hash(h->title);
 		char *t;
 
+		/* #534: a D5 title only for a ref nothing else defines, the
+		** first one; another rule's puts it out */
+		weak = h->rule && !strcmp(h->rule, "D5");
+		if (weak && e->title)
+			return;
+		if (!weak && e->weak)
+			e->ndefs = 0;
 		for (k = 0; k < e->ndefs && e->defh[k] != th; k++)
 			;
 		if (k == e->ndefs && e->ndefs < XR_DEFS)
 			e->defh[e->ndefs++] = th;
 		if (!e->ndefs)
 			e->ndefs = 1;	/* defined: never 0 past the cap */
-		/* the newest definition's; a D5 one never over another rule's */
-		weak = h->rule && !strcmp(h->rule, "D5");
-		if ((!weak || !e->title || e->weak) && (t = strdup(h->title)))
+		if ((t = strdup(h->title)))
 		{
 			free(e->title);
-			e->title = t;
+			e->title = t;	/* the newest definition's */
 			e->weak = weak;
 		}
 		return;
@@ -4705,6 +4710,11 @@ struct xr_scan
 	long long fat;
 	uint64_t foff2;
 	int fetched;
+	/* #534: the first D5 definition line, written by xr_scan_done only
+	** when no other rule defined the ref; its time and offset */
+	char *lead;
+	long long lat;
+	uint64_t loff;
 };
 
 long long
@@ -4786,6 +4796,7 @@ xr_scan_free(struct xr_scan *x)
 	for (k = 0; k < x->hn; k++)
 		free(x->held[(x->h0 + k) % XR_RING]);
 	free(x->tsent);
+	free(x->lead);
 	free(x);
 }
 
@@ -5244,7 +5255,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	if (h->title)
 	{
 		uint64_t th = title_hash(h->title);
-		int k;
+		int k, lead = h->rule && !strcmp(h->rule, "D5");
 
 		if (h->rule && !strcmp(h->rule, "fetch") && (!x->fetched || h->at > x->fat ||
 		    (h->at == x->fat && h->off > x->foff2)))
@@ -5255,19 +5266,28 @@ sc_hit(void *ctx, const struct xr_hit *h)
 			x->foff2 = h->off;
 			x->fetched = 1;
 		}
-		if (x->olddefs)	/* a newer definition puts out the older ones */
+		if (lead)
 		{
-			for (k = 0; k < (int)x->hn; k++)
-				free(x->held[k]);
-			x->hn = x->h0 = 0;
-			x->ndefs = x->olddefs = 0;
+			if (x->lead && (h->at > x->lat ||
+			                (h->at == x->lat && h->off >= x->loff)))
+				goto anchor;	/* not the first D5 */
 		}
-		for (k = 0; k < x->ndefs && x->defh[k] != th; k++)
-			;
-		/* a line per distinct title, at most XR_DEFS (3.8) */
-		if (k < x->ndefs || x->ndefs == XR_DEFS)
-			goto anchor;
-		x->defh[x->ndefs++] = th;
+		else
+		{
+			if (x->olddefs)	/* a newer definition puts out the older */
+			{
+				for (k = 0; k < (int)x->hn; k++)
+					free(x->held[k]);
+				x->hn = x->h0 = 0;
+				x->ndefs = x->olddefs = 0;
+			}
+			for (k = 0; k < x->ndefs && x->defh[k] != th; k++)
+				;
+			/* a line per distinct title, at most XR_DEFS (3.8) */
+			if (k < x->ndefs || x->ndefs == XR_DEFS)
+				goto anchor;
+			x->defh[x->ndefs++] = th;
+		}
 		if (!(m = ln_open(&b, &bl)))
 			return;
 		fputs("{\"schema\":1,\"definition\":{\"session\":", m);
@@ -5289,7 +5309,19 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		        (unsigned long long)h->off);
 		put_or_null(m, x->other ? NULL : h->chapter);
 		fputs("}}\n", m);
-		if (x->full || !x->shell)
+		if (lead)
+		{
+			if (fclose(m) == 0)
+			{
+				free(x->lead);
+				x->lead = b;
+				x->lat = h->at;
+				x->loff = h->off;
+			}
+			else
+				free(b);
+		}
+		else if (x->full || !x->shell)
 			ln_send(x, m, &b, &bl);
 		else if (fclose(m) == 0)	/* a newer definition frees it */
 		{
@@ -5572,6 +5604,9 @@ xr_scan_done(struct xr_scan *x)
 {
 	int partial = x->stop || x->why != NULL;
 
+	if (!x->cancel && x->lead && !x->defs &&
+	    sc_line(x, x->lead, strlen(x->lead)) == 0)
+		x->defs = 1;	/* #534: D5 only when nothing else defined it */
 	if (x->cancel)
 		return -1;	/* a cancel has no done line */
 	fprintf(x->f, "{\"schema\":1,\"done\":true,\"partial\":%s,",
@@ -5594,7 +5629,7 @@ xr_scan_done(struct xr_scan *x)
 int
 xr_scan_defs(const struct xr_scan *x)
 {
-	return x->defs;
+	return x->defs ? x->defs : x->lead != NULL;	/* a held D5: no define_command */
 }
 
 int
@@ -6501,6 +6536,35 @@ refs_text(struct xr_claude *d, const char *s, size_t n, size_t cap, int mode)
 	ch_anchor(d, a);
 	rm_claude(d, &r, a);
 	rm_clip(&r, s, n, cap, mode);
+	free(r.cov);
+}
+
+/* #534: an assistant reply's lead-ins (D5), the one define rule a reply
+** has, over the text its mentions are found in. */
+static void
+lead_text(struct xr_claude *d, const char *s, size_t n)
+{
+	struct remit r;
+	struct olines o;
+	struct dres t;
+	size_t k;
+	char a[48];
+
+	if (!d->rk.hit)
+		return;
+	ch_anchor(d, a);
+	rm_claude(d, &r, a);
+	r.text = s;
+	memset(&o, 0, sizeof o);
+	if (olines(s, clip(s, n, XR_REFS_CAP), &o) == 0)
+		for (k = 0; k < o.n; k++)
+		{
+			memset(&t, 0, sizeof t);
+			if (!o.fence[k] && d5(s, &o, k, r.cwd, &t))
+				rm_hit(&r, &t.sp, t.title, t.passage, t.rule);
+			free(t.passage);
+		}
+	olines_free(&o);
 	free(r.cov);
 }
 
@@ -7788,6 +7852,7 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			if (!ag)
 				resp_set(d, s, n);
 			refs_text(d, s, n, XR_REFS_CAP, XR_MD | XR_TERMS);
+			lead_text(d, s, n);
 			if (ent_here(d, ag))
 				ent_prose(d->want, "assistant", s, n);
 		}
@@ -7816,6 +7881,7 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 					resp_set(d, s, n);
 				refs_text(d, s, n, XR_REFS_CAP,
 				          XR_MD | XR_TERMS);
+				lead_text(d, s, n);
 				if (ent_here(d, ag))
 					ent_prose(d->want, "assistant", s, n);
 			}
