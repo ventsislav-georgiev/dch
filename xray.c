@@ -13383,6 +13383,7 @@ sr_trim(struct xr_search *s)
 				      sr_nth(s, k)->exact > x->exact ? -1 : 1;
 		cut = cut > 0;
 		l = *x;	/* its turn: chapter and pend are all sr_same reads */
+		l.tool = l.snip = l.title = NULL;	/* freed just below */
 		sr_hit_free(x);
 		if (s->shell)
 			s->h0 = (s->h0 + 1) % SR_SLOTS;
