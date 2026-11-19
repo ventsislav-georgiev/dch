@@ -4107,6 +4107,7 @@ struct xr_ent
 	char full[41];
 	uint64_t nunit, lastunit, nrow, lastrow, first;
 	uint64_t last;		/* the newest mention's offset (#262) */
+	long long lastat;	/* its time (#516 --since), -1 unknown */
 	uint64_t h;		/* fnv of key: its slot's home */
 	uint32_t older, newer;	/* its kind's list, by latest mention: entry
 				** + 1, 0 none */
@@ -4351,8 +4352,8 @@ ix_hit(void *ctx, const struct xr_hit *h)
 
 	if (!e)
 		return;
-	if (h->off > e->last)
-		e->last = h->off;
+	if (h->off >= e->last)
+		e->last = h->off, e->lastat = h->at;
 	if (strlen(h->sp->full) > strlen(e->full))
 		snprintf(e->full, sizeof e->full, "%s", h->sp->full);
 	if (h->title)
@@ -13670,6 +13671,134 @@ xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 	xr_ends_free(&e);
 	fputs("}\n", f);
 	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
+}
+
+/* ---- --since (#516): what came up since a time ---------------------------- */
+
+#define XS_CHAPTERS 20
+#define XS_REFS 30
+
+struct xr_since
+{
+	long long since;
+	struct xr_index *x;
+	struct xr_sink to;
+};
+
+/* a mention at or after since goes to the index, the rest are older */
+static void
+xs_hit(void *ctx, const struct xr_hit *h)
+{
+	struct xr_since *s = ctx;
+
+	if (!h->title && h->at >= s->since)
+		s->to.hit(s->to.ctx, h);
+}
+
+static int
+xs_newest(const void *pa, const void *pb)
+{
+	const struct xr_ent *a = *(const struct xr_ent *const *)pa;
+	const struct xr_ent *b = *(const struct xr_ent *const *)pb;
+
+	if (a->lastat != b->lastat)
+		return a->lastat > b->lastat ? -1 : 1;
+	return a->last > b->last ? -1 : a->last < b->last;
+}
+
+/* A chapter with a time before since: every newer turn is in the window. */
+static int
+xs_reached(const struct xr_chapters *ch, long long since)
+{
+	size_t i;
+
+	for (i = 0; i < ch->n; i++)
+	{
+		const struct xr_chapter *c = xr_chapter_at(ch, i);
+
+		if (c && c->at >= 0 && c->at < since)
+			return 1;
+	}
+	return 0;
+}
+
+int
+xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
+               const char *session, long long since)
+{
+	struct xr_since s = { since, NULL, { NULL, NULL } };
+	struct xr_sink k = { xs_hit, &s };
+	struct xr_claude *d = NULL;
+	const struct xr_chapters *ch = NULL;
+	const struct xr_ent **v = NULL;
+	uint64_t win = XR_CHUNK;
+	size_t i, n = 0, out = 0;
+	int more = 0, rc = -1;
+
+	/* newest first: a window of the file's end, four times as big each
+	** round, till it holds a turn begun before since or the whole file */
+	for (;;)
+	{
+		xr_claude_free(d);
+		xr_index_free(s.x);
+		if (!(d = xr_claude_new()) || !(s.x = xr_index_new()))
+			goto out;
+		if (codex)
+			xr_claude_codex(d);
+		xr_index_sink(s.x, &s.to);
+		xr_claude_refs(d, &k, ino, NULL, NULL);
+		if (xr_claude_window(d, fd, size, win) < 0)
+			goto out;
+		ch = xr_claude_chapters(d);
+		if (win >= size || xs_reached(ch, since))
+			break;
+		win = win > size / 4 ? size : win * 4;
+	}
+	fputs("{\"schema\":1,\"session\":", f);
+	xr_put_str(f, session);
+	fprintf(f, ",\"since\":%lld,\"chapters\":[", since);
+	for (i = ch->n; i-- > 0;)
+	{
+		const struct xr_chapter *c = xr_chapter_at(ch, i);
+
+		if (!c || c->at < since)
+			continue;
+		if (out == XS_CHAPTERS)
+		{
+			more = 1;
+			break;
+		}
+		fputs(out++ ? ",{\"chapter\":" : "{\"chapter\":", f);
+		xr_put_str(f, c->anchor);
+		fputs(",\"turn_title\":", f);
+		put_or_null(f, c->title[0] ? c->title : NULL);
+		fprintf(f, ",\"at\":%lld}", c->at);
+	}
+	fputs("],\"refs\":[", f);
+	if (s.x->n && !(v = malloc(s.x->n * sizeof *v)))
+		goto out;
+	for (i = 0; i < s.x->n; i++)
+		if (s.x->v[i].key && s.x->v[i].nunit)
+			v[n++] = &s.x->v[i];
+	if (n)
+		qsort(v, n, sizeof *v, xs_newest);
+	more |= n > XS_REFS;
+	for (i = 0; i < n && i < XS_REFS; i++)
+	{
+		fputs(i ? ",{\"key\":" : "{\"key\":", f);
+		xr_put_str(f, v[i]->key);
+		fprintf(f, ",\"shape\":\"%s\",\"text\":", xr_shape_name[v[i]->shape]);
+		xr_put_str(f, strchr(v[i]->key, ':') + 1);
+		fprintf(f, ",\"count\":%llu,\"last_at\":%lld}",
+		        (unsigned long long)ix_count(s.x, v[i]), v[i]->lastat);
+	}
+	fprintf(f, "],\"more\":%s}\n", more ? "true" : "false");
+	rc = fflush(f) == 0 && !ferror(f) ? 0 : 1;
+out:
+	free(v);
+	xr_claude_free(d);
+	xr_index_free(s.x);
+	return rc;
 }
 
 size_t

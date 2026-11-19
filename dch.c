@@ -12848,6 +12848,7 @@ struct xr_refq
 	int full, budget, scope;	/* scope: xr_scan_scope's */
 	int search;			/* text is --search's (#297) */
 	int txt;			/* --search without --json (#498) */
+	long long since;		/* --since's epoch (#516), else -1 */
 };
 
 static int
@@ -13261,6 +13262,21 @@ xr_search_one(const char *path, const struct stat *st, int codex,
 	                     project, (long long)st->st_mtime, live);
 }
 
+/* --since over one transcript or rollout (#516) */
+static int
+xr_since_one(const char *path, const struct stat *st, int codex,
+             const char *session, long long since)
+{
+	int fd, rc;
+
+	if ((fd = xr_seam_open(path, st)) < 0)
+		return xr_failed();
+	rc = xr_since_print(stdout, fd, (uint64_t)st->st_size,
+	                    (uint64_t)st->st_ino, codex, session, since);
+	close(fd);
+	return rc < 0 ? xr_failed() : xr_out_exit(rc == 0);
+}
+
 /* #405: a ref no file read defined: the user's define_command (their own
 ** dch config only), run with the ref as written (the --ref text, a peer's
 ** through dch serve; #411) as its last word and DCH_REF, X-ray's key text
@@ -13337,6 +13353,8 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 		return xr_no_corpus();
 	if (!project[0])
 		xr_project_key(label, project, sizeof project);
+	if (q->since >= 0)
+		return xr_since_one(path, &st, 0, session, q->since);
 	if (q->search)
 		return xr_search_one(path, &st, 0, session, sid, q, project, live);
 	if (!xr_ref_parse(q->text, label, &sp))
@@ -13440,6 +13458,8 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
 		return xr_no_corpus();
 	xr_project_key(label, project, sizeof project);
+	if (q->since >= 0)
+		return xr_since_one(path, &st, 1, session, q->since);
 	if (q->search)
 		return xr_search_one(path, &st, 1, session, x->tid, q, project, 1);
 	if (!xr_ref_parse(q->text, label, &sp))
@@ -13646,6 +13666,8 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	struct xr_sink k;
 	int fr, rc;
 
+	if (q->since >= 0)	/* shortcut: a ring has no --since yet (#516) */
+		return xr_no_corpus();
 	if (q->search)
 		return xr_shell_search(t, q, label);
 	if ((fr = ring_fetch(t->sock, &rs, NULL, NULL)) == -3)
@@ -16440,7 +16462,7 @@ static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
-	const char *chapter = NULL, *search = NULL;
+	const char *chapter = NULL, *search = NULL, *since = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
 	int requests = 0, tasks = 0, memory = 0;
 	struct hrec *r = NULL;
@@ -16485,7 +16507,8 @@ xray_main(int argc, char **argv)
 		                 : !strcmp(argv[k], "--scope") ? &scope
 		                 : !strcmp(argv[k], "--budget-ms") ? &budget
 		                 : !strcmp(argv[k], "--chapter") ? &chapter
-		                 : !strcmp(argv[k], "--search") ? &search : NULL;
+		                 : !strcmp(argv[k], "--search") ? &search
+		                 : !strcmp(argv[k], "--since") ? &since : NULL;
 
 		if (v && !*v && k + 1 < argc)
 			*v = argv[++k];	/* the next element, even "-x" (3.1) */
@@ -16538,6 +16561,13 @@ xray_main(int argc, char **argv)
 		fputs("dch: bad usage: --ref and --clear\n", stderr);
 		return 2;
 	}
+	/* --since (#516): a recap of its own, --json only */
+	if (since && (ref || search || chapter || clear || follow || tasks ||
+	              memory || scope || full || budget))
+	{
+		fputs("dch: bad usage: --since takes --json only\n", stderr);
+		return 2;
+	}
 	if (search && (ref || chapter || clear || follow))
 	{
 		fprintf(stderr, "dch: bad usage: --search and %s\n",
@@ -16582,7 +16612,7 @@ xray_main(int argc, char **argv)
 		/* #158, spec 4.3: each request's flags come on stdin; a local
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
-		    budget || search || tasks || memory)
+		    budget || search || tasks || memory || since)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -16654,6 +16684,12 @@ xray_main(int argc, char **argv)
 		      stderr);
 		return 2;
 	}
+	q.since = -1;
+	if (since && (q.since = xray_since(since, (long long)time(NULL))) < 0)
+	{
+		fputs("dch: " XRAY_SINCE_BAD "\n", stderr);
+		return 2;
+	}
 	q.text = search ? search : ref;
 	q.search = search != NULL;
 	q.full = full;
@@ -16688,7 +16724,7 @@ xray_main(int argc, char **argv)
 	q.txt = search && !json && !name_routes_remote(n);
 	/* the view (#175): `--xray <n>` alone */
 	if (!json && (ref || chapter || clear || follow || (search && !q.txt) ||
-	              tasks || memory))
+	              tasks || memory || since))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
@@ -16724,7 +16760,7 @@ xray_main(int argc, char **argv)
 		     : chapter ? xr_chapter(&t, chapter)
 		     : tasks ? xr_tasks_q(&t)
 		     : memory ? xr_memory(&t)
-		     : xr_json(&t, ref || search ? &q : NULL, 0);
+		     : xr_json(&t, ref || search || since ? &q : NULL, 0);
 	hrec_free(r, nr);
 	return rc;
 }

@@ -1224,6 +1224,66 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     check("requests: stdin EOF closes the connection, exit 0",
           rc == 0 and rest == b"" and err == b"", (rc, rest, err))
 
+    # #516: --since on the warm connection, a History Claude of the host's
+    # with timed turns: each answer byte for byte the host's own run's
+    sid = "51600000-2222-4333-8444-555555555516"
+    cfg = os.path.join(senv["HOME"], ".claude")
+    sockdir = os.path.join(senv["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(senv["XDG_STATE_HOME"], "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    pdir = os.path.join(cfg, "projects", "-home-demo-since")
+    os.makedirs(pdir, exist_ok=True)
+    os.makedirs(hdir, exist_ok=True)
+    now = int(time.time())
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for k in range(24):
+            at = now - 7200 + 300 * k
+            for who, t, c in (("user", at, "step %d" % k),
+                              ("assistant", at + 1, [{"type": "text",
+                               "text": "see #%d and o/r#%d" % (k, k)}])):
+                f.write(json.dumps({"type": who, "cwd": "/home/demo/since",
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                               time.gmtime(t)),
+                    "message": {"content": c}}) + "\n")
+    with open(os.path.join(hdir, "xs16.json"), "w") as f:
+        f.write(json.dumps({
+            "name": "xs16", "cwd": "/home/demo/since", "end": "exited",
+            "argv": ["claude"], "started": now - 7200, "updated": now,
+            "ended": now, "sock_dir": sockdir,
+            "agent": {"session_id": sid, "cwd": "/home/demo/since",
+                      "config_dir": cfg}}) + "\n")
+    rq = Requests(xenv, "srv:xs16")
+    check("requests --since: the ready line", rq.line() is not None)
+    iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))
+    for req, argv in ((70, ["--since", str(now - 3600), "--json"]),
+                      (71, ["--json", "--since", iso]),
+                      (72, ["--since", "0", "--json"]),
+                      (73, ["--since", str(now + 60), "--json"])):
+        loc = subprocess.run([DCH, "--xray", "xs16"] + argv, env=senv,
+                             capture_output=True, stdin=subprocess.DEVNULL)
+        rq.send({"req": req, "argv": argv})
+        got = rq.until(req)
+        check("requests %s: the host's answer byte for byte (%d bytes)"
+              % (" ".join(argv), len(loc.stdout)),
+              loc.returncode == 0 and b'"chapters":[' in loc.stdout and
+              got == [b'{"req":%d,"line":%s}' % (req, x) for x in
+                      loc.stdout.splitlines()] +
+              [b'{"req":%d,"exit":0,"why":null}' % req], (loc, got))
+    for req, argv, line in (
+            (74, ["--since", "1h"], "dch: bad usage: --xray needs --json "
+             "(the view is client-side only)"),
+            (75, ["--since", "1w", "--json"], "dch: bad since: epoch "
+             "seconds, 2026-11-19T10:00:00Z (UTC) or <N>m, <N>h, <N>d"),
+            (76, ["--since", "1h", "--search", "x1", "--json"],
+             "dch: bad usage: --ref, --search, --tasks, --memory, "
+             "--follow, --chapter and --clear exclude each other")):
+        rq.send({"req": req, "argv": argv})
+        got = [json.loads(g) for g in rq.until(req)]
+        check("requests refuse %r: %s, exit 2, refused" % (argv, line),
+              got == [{"req": req, "stderr": line},
+                      {"req": req, "exit": 2, "why": "refused"}], got)
+    rq.end()
+
     # without "ctl-cancel": the close and a quiet re-dial
     px = Proxy(port, "nocancel")
     fakes.append(px)

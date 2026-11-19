@@ -665,6 +665,14 @@ int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 ** "tool","turn_title","snippet"}…],"more","partial","why","bytes"};
 ** session_id and project null for "", last_active null for < 0. */
 size_t xr_search_hits(const struct xr_search *s);
+/* --since (#516): fd's turns begun and refs mentioned at or after since
+** (epoch s), read from the end back only as far as since:
+** {"schema":1,"session","since","chapters":[{"chapter","turn_title","at"}…]
+** newest first, the newest 20,"refs":[{"key","shape","text","count",
+** "last_at"}…] by last_at newest first, the newest 30,"more"} and a newline.
+** 0, 1 the write failed, -1 a read or memory failure (nothing written). */
+int xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
+                   const char *session, long long since);
 void xr_search_group(FILE *f, const struct xr_search *s, const char *session,
                      const char *session_id, const char *corpus, int live,
                      const char *project, long long last_active,
