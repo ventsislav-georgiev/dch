@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.117.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.118.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -2473,14 +2473,18 @@ which a client can use as its version probe.
   not see).
 - A `tasks_command` or `memory_command` runs as for the one-shot form, after
   each snapshot and again 5 s (tasks) or 30 s (memory) after its last run
-  ended; its answer is sent as a whole block when it changes. Every run
+  ended; while its answer stays the same, the tasks run's 5 s doubles
+  after each run up to 30 s, back to 5 s on a changed answer or a
+  transcript batch. A changed answer is sent as the row deltas above
+  (a changed or new row's line, a gone line for a row it no longer
+  lists), or as a whole block when its header changes. Every run
   goes on beside the stream (one of each at a time): a slow or hung command
   never holds back the transcript's lines. So the block after a snapshot
   is the command's last answer, or the built-in block (`source: "none"`
   or the transcript's, as when the command gives no answer) before its
-  first answer, as at the start; the answer replaces it as a whole block
-  when it lands. One still running when the follow ends, or is
-  signalled, is stopped with it.
+  first answer, as at the start; the answer replaces it when it lands,
+  whole when its header differs, else as row deltas. One still running
+  when the follow ends, or is signalled, is stopped with it.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
