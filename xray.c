@@ -11630,7 +11630,7 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 	}
 	if (setsid() < 0 || (pid = fork()) != 0)
 	{
-		if (pid < 0)
+		if (pid <= 0)	/* setsid or fork failed: no fill holds it */
 			(void)unlink(lock);
 		_exit(0);
 	}
@@ -11651,7 +11651,8 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 ** for an issue and a pull alike (a pull is an issue with pull_request), so
 ** one call serves a bare #N; --jq keeps the answer to four fields. No gh,
 ** no auth, no network, the deadline, not github.com, any odd answer: 0.
-** light (#522) answers from the cache only; a miss starts res_fill. */
+** light (#522) answers from the cache only; a miss starts res_fill and
+** waits up to XR_GH_LIGHT_MS for its entry. */
 static int
 res_issue(const struct xr_span *sp, const char *cwd, int light,
           struct xr_resolved *r)
@@ -11722,7 +11723,15 @@ res_issue(const struct xr_span *sp, const char *cwd, int light,
 	env[e] = NULL;
 	if (light)
 	{
+		/* most gh answers land well inside XR_GH_LIGHT_MS: shown at once */
 		res_fill(av, env, &run, repo, num, r);
+		for (until = xr_now_ms() + XR_GH_LIGHT_MS; xr_now_ms() < until;)
+		{
+			(void)poll(NULL, 0, 50);
+			if (res_cache_get(repo, num, cb, sizeof cb) &&
+			    (!strcmp(cb, "none") || xr_gh_parse(cb, repo, num, r)))
+				return strcmp(cb, "none") != 0;
+		}
 		return 0;
 	}
 	return res_gh_ask(av, env, until, &run, repo, num, r);

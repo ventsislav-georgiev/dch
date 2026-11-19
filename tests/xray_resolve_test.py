@@ -644,8 +644,11 @@ case "$*" in
 *repos/acme/widgets/issues/700)
   exec /bin/sleep 5 ;;
 *repos/acme/widgets/issues/701)
-  /bin/sleep 1
+  /bin/sleep 2
   echo '{"number":701,"title":"Slow but sure","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/702)
+  /bin/sleep 0.3
+  echo '{"number":702,"title":"Quick enough","state":"open","kind":"issue"}' ;;
 *) echo 'gh: unexpected' >&2; exit 1 ;;
 esac
 """
@@ -966,20 +969,30 @@ def test_github(m):
         t0 = time.time()
         r, ls, rv, lg = q("acme/widgets#700", full=False)
         dt = time.time() - t0
-        check("#522 light: gh sleeping 5 s: --ref returns in < 0.5 s with "
+        check("#522 light: gh sleeping 5 s: --ref returns in < 1.6 s with "
               "the mention counted and no resolved line",
-              r.returncode == 0 and dt < 0.5 and not rv and
+              r.returncode == 0 and dt < 1.6 and not rv and
               any(l.get("tally", {}).get("count") == 1 for l in ls) and
               ls[-1].get("done") is True, (dt, [list(l) for l in ls]))
         check("#522: the hanging fill ends, nothing cached, no gh or dch "
               "left", wait_for(idle, 10) and
               not os.path.exists(os.path.join(ghd, "acme,widgets,700")),
               os.listdir(ghd) if os.path.isdir(ghd) else None)
+        t0 = time.time()
+        r, ls, rv, lg = q("acme/widgets#702", full=False)
+        dt = time.time() - t0
+        check("#522 light: gh answering in 0.3 s: the first --ref shows the "
+              "title, in < 1 s", len(rv) == 1 and
+              rv[0]["title"] == "Quick enough" and dt < 1, (dt, rv))
+        t0 = time.time()
         r, ls, rv, lg = q("acme/widgets#701", full=False)
+        dt = time.time() - t0
+        check("#522 light: gh answering in 2 s: --ref returns in < 1.6 s "
+              "with no resolved line", not rv and dt < 1.6, (dt, rv))
         ent = os.path.join(ghd, "acme,widgets,701")
         filled = wait_for(lambda: os.path.isfile(ent) and idle(), 10)
         r2, ls2, rv2, lg2 = q("acme/widgets#701", full=False, keep=True)
-        check("#522 light: gh answering in 1 s: after the fill the next "
+        check("#522 light: gh answering in 2 s: after the fill the next "
               "--ref shows the title from the cache, gh not run again",
               filled and len(rv2) == 1 and
               rv2[0]["title"] == "Slow but sure" and not lg2,
