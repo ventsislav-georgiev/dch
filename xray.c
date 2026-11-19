@@ -461,7 +461,7 @@ url_norm(const char *u, char *o, size_t *host)
 		a = n;
 	for (k = 0; k < n; k++)
 		o[k] = k < a && A_UP((unsigned char)u[k]) ? (char)(u[k] + 32) : u[k];
-	if (n && o[n - 1] == '/')
+	if (n && o[n - 1] == '/' && !memchr(o, '?', n))	/* the path's, not the query's */
 		n--;
 	o[n] = '\0';
 	for (*host = h, k = h; k < a; k++)
@@ -6723,9 +6723,47 @@ one_url(void *ctx, const struct xr_span *sp)
 	return m->n > 1;
 }
 
+/* #515: shell words w[k..e) a fetcher's command whose output is stdout: no
+** -o, -O or --output (a file, unless the value is -); wget saves to a file
+** unless it has -O-. shortcut: a short cluster with an o or O anywhere
+** (-uBob) counts as -o, so no title; upgrade with an option parser. */
+static int
+fetch_stdout(const struct sw *w, size_t k, size_t e)
+{
+	int out = strcmp(base(SWD(w, k)), "wget");
+	const char *a, *v;
+	size_t j;
+
+	for (j = k + 1; j < e; j++)
+	{
+		a = SWD(w, j);
+		if (w->op[j] || a[0] != '-' || !a[1])
+			continue;
+		if (a[1] == '-')
+		{
+			if (strncmp(a, "--output", 8))
+				continue;
+			v = strchr(a, '=');
+			v = v ? v + 1 : j + 1 < e ? SWD(w, j + 1) : "";
+		}
+		else
+		{
+			for (v = a + 1; *v && *v != 'o' && *v != 'O'; v++)
+				;
+			if (!*v)
+				continue;
+			v = v[1] ? v + 1 : j + 1 < e ? SWD(w, j + 1) : "";
+		}
+		out = !strcmp(v, "-");
+	}
+	return out;
+}
+
 /* #515: a fetch's page as its URL's definition (rule "fetch"), its title
 ** the output's (xr_fetch_title): c a WebFetch's (cmd its input.url) or a
-** Bash command running curl, wget or xh, with exactly one URL in it */
+** Bash command whose command word is curl, wget or xh, with exactly one URL
+** in it, its argument, its output stdout (fetch_stdout), the rest of the
+** line only a pipeline */
 static void
 fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
           size_t ol)
@@ -6735,22 +6773,32 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 	struct one_url m;
 	struct remit r;
 	struct sw w;
-	size_t k;
-	int ok = c->kind == RC_CARD;
+	const char *cd;
+	size_t k, e, j, uend = c->cl;
+	int line, ok = c->kind == RC_CARD;
 
 	if (!c->cmd || (c->kind != RC_CARD && c->kind != RC_BASH))
 		return;
 	if (!ok)
 	{
 		shell_words(c->cmd, c->cl, &w, 0);
-		for (k = 0; w.b && k < w.n && k < SW_MAX && !ok; k++)
-			ok = !w.op[k] && in_list(base(SWD(&w, k)), fetchers);
+		for (e = 0; w.b && e < w.n && e < SW_MAX &&
+		     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
+			;
+		k = w.b && e <= SW_MAX ? cmd_head(&w, 0, e, &line, &cd) : e;
+		ok = k < e && in_list(base(SWD(&w, k)), fetchers) &&
+		     fetch_stdout(&w, k, e);
+		for (j = e; ok && j < w.n; j++)	/* a list's other commands mix in */
+			ok = !w.op[j] || !strcmp(SWD(&w, j), "|") ||
+			     strpbrk(SWD(&w, j), "<>");
+		if (ok && e < w.n)
+			uend = w.rs[e];	/* the URL: before the first operator */
 		free(w.b);
 	}
 	memset(&m, 0, sizeof m);
 	if (ok)
 		(void)grammar(c->cmd, c->cl, XR_CODE, RU, NULL, one_url, &m);
-	if (m.n != 1 || m.sp.shape != XR_URL)
+	if (m.n != 1 || m.sp.shape != XR_URL || m.sp.e > uend)
 		return;
 	xr_fetch_title(out, ol, c->kind == RC_CARD, title, sizeof title);
 	if (!title[0])

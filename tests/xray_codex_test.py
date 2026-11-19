@@ -764,6 +764,7 @@ def test_follow_agent():
 # ---- --tasks (#319): update_plan's list ------------------------------------
 
 TIDT = "019a2222-3333-7444-8555-666677778807"
+TIDF = "019a2222-3333-7444-8555-666677778808"
 
 
 def plan(sec, cid, steps, explanation=None):
@@ -833,6 +834,41 @@ def test_tasks():
         dch("-k", n)
 
 
+def test_fetch():
+    """#515, #528: a shell curl of a URL gives its title; curl as another
+    command's argument, or two URLs in it, do not."""
+    n = "xx-ft"
+    proj = os.path.join(T, "ftproj")
+    pid, marker = spawn(n, proj)
+    body = user(1, "fetch it")
+    for k, (cmd, out) in enumerate((
+            ("curl -sL https://cx1.example.com/a", "<title>Codex Curl</title>"),
+            ("rg curl notes.md; echo https://cx2.example.com/a",
+             "# Not Fetched"),
+            ("curl -s https://cx3.example.com/a https://cx3.example.com/b",
+             "<title>Two</title>")), 1):
+        body += line(2 * k, "response_item", {
+            "type": "function_call", "name": "exec_command",
+            "call_id": "c%d" % k, "arguments": json.dumps({"cmd": cmd})})
+        body += line(2 * k + 1, "response_item", {
+            "type": "function_call_output", "call_id": "c%d" % k,
+            "output": out})
+    try:
+        rollout(TIDF, proj, body)
+        snapshot(TIDF, n, marker)
+        for u, t in (("https://cx1.example.com/a", "Codex Curl"),
+                     ("https://cx2.example.com/a", None),
+                     ("https://cx3.example.com/a", None)):
+            r = dch("--xray", n, "--ref", u, "--scope", "session", "--json")
+            rv = [json.loads(l)["resolved"]["title"]
+                  for l in r.stdout.splitlines() if '"resolved"' in l]
+            check("Codex shell curl of %s: %s" % (u[8:], t or "no title"),
+                  r.returncode == 0 and rv == ([t] if t else []),
+                  (r.stdout[-400:], r.stderr))
+    finally:
+        dch("-k", n)
+
+
 def main():
     os.makedirs(os.path.dirname(FAKE))
     b = subprocess.run(["cc", "-o", FAKE, os.path.join(HERE, "fake_codex.c")],
@@ -852,6 +888,7 @@ def main():
         test_scope()
         test_follow()
         test_follow_agent()
+        test_fetch()
         check("nothing in the Codex dir was ever run", not os.path.exists(RAN))
     finally:
         shutil.rmtree(T, ignore_errors=True)
