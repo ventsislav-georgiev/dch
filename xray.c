@@ -4110,6 +4110,7 @@ struct xr_ent
 	uint64_t nunit, lastunit, nrow, lastrow, first;
 	uint64_t last;		/* the newest mention's offset (#262) */
 	long long lastat;	/* its time (#516 --since), -1 unknown */
+	uint64_t lastord;	/* its place in the read: a line's mentions in order */
 	uint64_t h;		/* fnv of key: its slot's home */
 	uint32_t older, newer;	/* its kind's list, by latest mention: entry
 				** + 1, 0 none */
@@ -4355,7 +4356,7 @@ ix_hit(void *ctx, const struct xr_hit *h)
 	if (!e)
 		return;
 	if (h->off >= e->last)
-		e->last = h->off, e->lastat = h->at;
+		e->last = h->off, e->lastat = h->at, e->lastord = x->ord++;
 	if (strlen(h->sp->full) > strlen(e->full))
 		snprintf(e->full, sizeof e->full, "%s", h->sp->full);
 	if (h->title)
@@ -13910,6 +13911,7 @@ struct xr_since
 	long long since;
 	struct xr_index *x;
 	struct xr_sink to;
+	long long t0;
 };
 
 /* a mention at or after since goes to the index, the rest are older */
@@ -13930,7 +13932,19 @@ xs_newest(const void *pa, const void *pb)
 
 	if (a->lastat != b->lastat)
 		return a->lastat > b->lastat ? -1 : 1;
-	return a->last > b->last ? -1 : a->last < b->last;
+	if (a->last != b->last)
+		return a->last > b->last ? -1 : 1;
+	/* one line's refs: the later mention first (QA 1.113.0 NIT-UR9b) */
+	return a->lastord > b->lastord ? -1 : a->lastord < b->lastord;
+}
+
+/* The time cap after each line: it stops a window mid-read (QA 1.113.0
+** LOW-UR1). */
+static int
+xs_tick(void *ctx, uint64_t bytes)
+{
+	(void)bytes;
+	return xr_now_ms() - ((const struct xr_since *)ctx)->t0 >= xr_lim.ms;
 }
 
 /* A chapter with a time before since: every newer turn is in the window. */
@@ -13953,42 +13967,61 @@ int
 xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
                const char *session, long long since, long long t0)
 {
-	struct xr_since s = { since, NULL, { NULL, NULL } };
+	struct xr_since s = { since, NULL, { NULL, NULL }, t0 };
 	struct xr_sink k = { xs_hit, &s };
-	struct xr_claude *d = NULL;
+	struct xr_claude *d = NULL, *pd = NULL;
+	struct xr_index *px = NULL;
 	const struct xr_chapters *ch = NULL;
 	const struct xr_ent **v = NULL;
-	uint64_t win = XR_CHUNK < xr_lim.bytes ? XR_CHUNK : xr_lim.bytes;
+	uint64_t win = XR_CHUNK < xr_lim.bytes ? XR_CHUNK : xr_lim.bytes, done = 0;
 	size_t i, n = 0, out = 0;
 	int more = 0, rc = -1, partial = 0;
 
 	/* newest first: a window of the file's end, four times as big each
 	** round, till it holds a turn begun before since or the whole file;
-	** --search's caps (3.8) stop it short, partial */
+	** --search's caps (3.8) stop it short, partial: the bytes of every
+	** round count, and the time cap stops a round mid-read, the round
+	** before it standing (the first, 1 MB at most, always runs whole).
+	** shortcut: each round decodes its whole window again, as a turn or a
+	** tool call can span rounds; a per-round head needs merged decoders */
 	for (;;)
 	{
-		xr_claude_free(d);
-		xr_index_free(s.x);
+		uint64_t next;
+
 		if (!(d = xr_claude_new()) || !(s.x = xr_index_new()))
 			goto out;
 		if (codex)
 			xr_claude_codex(d);
 		xr_index_sink(s.x, &s.to);
-		xr_claude_refs(d, &k, ino, NULL, NULL);
+		xr_claude_refs(d, &k, ino, pd ? xs_tick : NULL, &s);
 		if (xr_claude_window(d, fd, size, win) < 0)
 			goto out;
-		ch = xr_claude_chapters(d);
-		if (win >= size || xs_reached(ch, since))
+		if (pd && d->halt)	/* the time cap: the last whole round stands */
+		{
+			xr_claude_free(d);
+			xr_index_free(s.x);
+			d = pd, s.x = px, pd = NULL, px = NULL;
+			partial = 1;
 			break;
-		if (win >= xr_lim.bytes || xr_now_ms() - t0 >= xr_lim.ms)
+		}
+		xr_claude_free(pd);
+		xr_index_free(px);
+		pd = NULL, px = NULL;
+		done += win;
+		if (win >= size || xs_reached(xr_claude_chapters(d), since))
+			break;
+		next = win > size / 4 ? size : win * 4;
+		if (next > xr_lim.bytes - done)
+			next = xr_lim.bytes - done;
+		if (next <= win || xr_now_ms() - t0 >= xr_lim.ms)
 		{
 			partial = 1;
 			break;
 		}
-		win = win > size / 4 ? size : win * 4;
-		if (win > xr_lim.bytes)
-			win = xr_lim.bytes;
+		pd = d, px = s.x, d = NULL, s.x = NULL;
+		win = next;
 	}
+	ch = xr_claude_chapters(d);
 	fputs("{\"schema\":1,\"session\":", f);
 	xr_put_str(f, session);
 	fprintf(f, ",\"since\":%lld,\"chapters\":[", since);
@@ -14035,6 +14068,8 @@ out:
 	free(v);
 	xr_claude_free(d);
 	xr_index_free(s.x);
+	xr_claude_free(pd);
+	xr_index_free(px);
 	return rc;
 }
 

@@ -3542,6 +3542,32 @@ def test_since():
               o["chapters"]), -1)] and 1 <= len(o["chapters"]) < 10 and
           keys(o) == ["issue:#%d" % k for k in range(1039, 1039 - len(
               o["refs"]), -1)], (r.returncode, r.stdout[:300], r.stderr))
+    # QA 1.113.0 LOW-UR1: 60 turns, 6 MB; turn 14 begins ~4.6 MB back, past
+    # the 1 + 4 MiB rounds; a 5.5 MB cap leaves no room for a third
+    since_put("xs-e", "51600000-2222-4333-8444-555555555505",
+              [r for k in range(60) for r in
+               (("user", t0 + 60 * k, "big %d" % k),
+                ("assistant", t0 + 60 * k + 1, "see #%d %s" % (1000 + k, pad)))])
+    rc, o0, raw = got("xs-e", str(t0 + 60 * 15))
+    r = dch("--xray", "xs-e", "--since", str(t0 + 60 * 15), "--json",
+            env=dict(ENV, DCH_XRAY_CAPS="0:5500000"))
+    o = json.loads(r.stdout) if r.returncode == 0 else None
+    check("since: the byte cap counts every round's bytes: 1 + 4 MiB read, "
+          "a 5.5 MB cap stops short of a third round, partial",
+          rc == 0 and o0["partial"] is False and o and o["partial"] is True and o["more"] is True and
+          titles(o) == ["big %d" % k for k in range(59, 39, -1)],
+          (r.returncode, r.stdout[:300], r.stderr))
+    # QA 1.113.0 NIT-UR9b: 31 refs in one line, one second
+    since_put("xs-f", "51600000-2222-4333-8444-555555555506",
+              [("user", t0, "list them"),
+               ("assistant", t0 + 1,
+                " ".join("#%d" % (3000 + j) for j in range(31)))])
+    rc, o, raw = got("xs-f", "0")
+    check("since: refs of one line and second: the later mention first, the "
+          "cap drops the first mentioned",
+          rc == 0 and keys(o) == ["issue:#%d" % k
+                                  for k in range(3030, 3000, -1)] and
+          o["more"] is True, raw)
     r = dch("--xray", "xs-a", "--since", "1h", "--search", "x1", "--json")
     check("since: with another query is bad usage, exit 2",
           r.returncode == 2 and r.stderr ==
