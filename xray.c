@@ -13609,13 +13609,16 @@ xr_ends_free(struct xr_ends *e)
 	sr_end_free(&e->latest);
 }
 
-/* a older than b: by at when both have one and differ, else the session
-** searched later is older (xr_mapped goes newest first), then the smaller
-** offset */
+/* a older than b, a total order: a timed hit beats an untimed one for both
+** first and latest (so latest asks for the reverse); by at when both have one
+** and differ, else the session searched later is older (xr_mapped goes newest
+** first), then the smaller offset */
 static int
-sr_end_older(const struct xr_end *a, const struct xr_end *b)
+sr_end_older(const struct xr_end *a, const struct xr_end *b, int latest)
 {
-	if (a->at >= 0 && b->at >= 0 && a->at != b->at)
+	if ((a->at >= 0) != (b->at >= 0))
+		return latest ? a->at < 0 : a->at >= 0;
+	if (a->at >= 0 && a->at != b->at)
 		return a->at < b->at;
 	if (a->ord != b->ord)
 		return a->ord > b->ord;
@@ -13651,9 +13654,9 @@ xr_ends_add(struct xr_ends *e, const struct xr_search *s, const char *session,
 		const struct sr_hit *h = sr_shown(s, k);
 		struct xr_end x = { .at = h->at, .off = h->off, .ord = ord };
 
-		if (!e->first.set || sr_end_older(&x, &e->first))
+		if (!e->first.set || sr_end_older(&x, &e->first, 0))
 			sr_end_set(&e->first, h, session, sid, ord);
-		if (!e->latest.set || sr_end_older(&e->latest, &x))
+		if (!e->latest.set || sr_end_older(&e->latest, &x, 1))
 			sr_end_set(&e->latest, h, session, sid, ord);
 	}
 }
