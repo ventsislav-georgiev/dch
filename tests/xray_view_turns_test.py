@@ -851,7 +851,7 @@ def test_tail():
     v = Pty([DCH, "--xray", "xv-tl8"], rows=70, cols=100,
             env={"NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 2")
+        wait_screen(v, "Prompts 2")
         v.pump(0.5)
         v.key(b"\t", 1.0)
         raw = bytes(v.out)
@@ -941,7 +941,7 @@ def test_look():
     v = Pty([DCH, "--xray", "xv-lk"], rows=30, cols=100,
             env={"NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 8")
+        wait_screen(v, "Prompts 8")
         v.pump(0.3)
         v.key(b"\t", 1.0)
         v.key(b"/5", 0.5)
@@ -1091,7 +1091,7 @@ def test_wrap():
     v = Pty([DCH, "--xray", "xv-wr"], rows=40, cols=100,
             env={"NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 4")
+        wait_screen(v, "Prompts 4")
         v.pump(0.3)
         v.key(b"\t", 1.0)
         v.key(b"j", 0.3)

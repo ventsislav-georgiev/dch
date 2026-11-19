@@ -615,7 +615,7 @@ def fixture_reply():
 
 def refs_plain(name):
     v = Pty([DCH, "--xray", name], env={"TMPDIR": TPD + "/"})
-    v.wait(b"Prompts 1")
+    wait_screen(v, "Prompts 1")
     v.pump(0.5)
     mark = len(v.out)
     v.key(b"\t\t", 1.0)
@@ -723,7 +723,7 @@ def test_said():
     v = Pty([DCH, "--xray", "xv-sd"], env={"TMPDIR": TPD + "/",
                                            "NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 5")
+        wait_screen(v, "Prompts 5")
         v.pump(0.5)
         for _ in range(6):
             if "[Refs" in rows(v.out).get(2, ""):
@@ -970,7 +970,7 @@ def test_recall():
     v = Pty([DCH, "--xray", "xv-ra"], env={"TMPDIR": TPD + "/",
                                            "NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 1")
+        wait_screen(v, "Prompts 1")
         v.pump(0.5)
         for _ in range(6):
             if "[Refs" in rows(v.out).get(2, ""):

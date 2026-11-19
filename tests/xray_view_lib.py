@@ -705,6 +705,12 @@ def screen(v, mark):
     return re.sub(" +", " ", "\n".join(scr[k] for k in sorted(scr)))
 
 
+def wait_screen(v, text, secs=10.0):
+    """Until text is on the screen: the tab count has its own SGR, so the
+    raw bytes of "Prompts 1" may never match (#509)."""
+    return bool(until(lambda: (v.pump(0.1), text in screen(v, 0))[1], secs))
+
+
 GSID = "11111111-2222-4333-8444-5555555555a8"
 
 
