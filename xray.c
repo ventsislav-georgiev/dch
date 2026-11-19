@@ -2250,6 +2250,7 @@ struct remit
 	uint64_t turn;		/* the chapter's prompt number, 0 unknown */
 	const char *ttitle;	/* #479: that chapter's title, NULL unknown */
 	const char *who, *tool;	/* user, assistant or tool (its name) */
+	const char *read;	/* #517: a read-type call's (read_call) */
 	uint64_t *ctr;		/* Claude: each mention its own unit */
 	uint64_t unit, row;	/* shell: the block and the row */
 	int left;		/* spans left in the block, -1 no cap */
@@ -2303,6 +2304,7 @@ rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
 	h.ttitle = r->ttitle;
 	h.who = r->who;
 	h.tool = r->tool;
+	h.read = r->read;
 	if (title)
 	{
 		h.title = title;
@@ -4853,6 +4855,8 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	fprintf(m, ",\"offset\":%llu,\"live\":%s,\"project\":",
 	        (unsigned long long)h->off, x->live ? "true" : "false");
 	xr_put_str(m, x->project);
+	fputs(",\"read\":", m);	/* #517: last, the keys before unchanged */
+	put_or_null(m, h->read);
 	fputs("}}\n", m);
 	free(line);
 	if (fclose(m) != 0)
@@ -5485,6 +5489,7 @@ struct xr_claude
 				** ("" for none), else NULL */
 	const char *peersum;	/* a hand-back's summary, else NULL */
 	const char *who, *tool;	/* the record's speaker for a mention */
+	const char *read;	/* #517: its read-type call, else NULL */
 	struct pend pend[XR_PENDING + 1];
 	int npend;
 	char *order[XR_PENDING + 2];	/* pendingOrder, ids may repeat */
@@ -6211,6 +6216,7 @@ rm_claude(struct xr_claude *d, struct remit *r, const char *chapter)
 	r->turn = r->chapter ? ch_turn(d, r->chapter, &r->ttitle) : 0;
 	r->who = d->who;
 	r->tool = d->tool;
+	r->read = d->read;
 	r->ctr = &d->unit;
 	r->left = XR_SPANS;	/* shortcut: 3.6's cap, counted per field group */
 }
@@ -6452,7 +6458,11 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 
 		memset(&sp, 0, sizeof sp);
 		ch_anchor(d, a);
+		/* #517: a Read's output is not scanned (RC_OTHER): its path is
+		** the file it read */
+		d->read = strcmp(name, "Read") ? NULL : "Read";
 		rm_claude(d, &r, a);
+		d->read = NULL;
 		r.text = s;
 		sp.rule = 'F';
 		sp.e = l;
@@ -6644,6 +6654,51 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 	free(r.cov);
 }
 
+/* #517: c's read tool, its output what the agent read: Read, Grep, Glob or
+** NotebookRead (c->name), else a shell command (cmd) one of whose simple
+** commands is a reader (that word); NULL for none */
+static const char *
+read_call(const struct rcall *c)
+{
+	static const char *const tools[] = { "Read", "Grep", "Glob",
+	                                     "NotebookRead", 0 };
+	static const char *const readers[] = { "cat", "head", "tail", "sed",
+	                                       "bat", "rg", "grep", "less", 0 };
+	static const char *const shells[] = { "sh", "bash", "zsh", 0 };
+	const char *cd, *r = NULL;
+	struct sw w;
+	size_t s, e, k;
+	int line, j;
+
+	if (in_list(c->name, tools))
+		return c->name;
+	if (c->kind != RC_BASH || !c->cmd)
+		return NULL;
+	shell_words(c->cmd, c->cl, &w, 0);
+	for (s = 0; w.b && s < w.n && s < SW_MAX && !r; s = e + 1)
+	{
+		for (e = s; e < w.n && e < SW_MAX &&
+		     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
+			;
+		/* Codex's bash -lc <script>: its words joined, the script's run */
+		for (k = cmd_head(&w, s, e, &line, &cd);
+		     k + 2 < e && in_list(base(SWD(&w, k)), shells) &&
+		     SWD(&w, k + 1)[0] == '-' && strchr(SWD(&w, k + 1), 'c');
+		     k = cmd_head(&w, k + 2, e, &line, &cd))
+			;
+		if (k >= e)
+			continue;
+		for (j = 0; readers[j] && strcmp(base(SWD(&w, k)), readers[j]); j++)
+			;
+		/* sed reads only with -n (else it may be editing) */
+		if (readers[j] && (strcmp(readers[j], "sed") ||
+		                   (k + 1 < e && !strncmp(SWD(&w, k + 1), "-n", 2))))
+			r = readers[j];
+	}
+	free(w.b);
+	return r;
+}
+
 static void
 refs_pair(struct xr_claude *d, const char *id, struct rres *rr)
 {
@@ -6676,6 +6731,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 		goto out;
 	d->who = "tool";
 	d->tool = rr->paired && *rr->c.name ? rr->c.name : NULL;
+	d->read = rr->paired ? read_call(&rr->c) : NULL;
 	if (!rr->paired)
 		ch_anchor(d, a);
 	rm_claude(d, &r, rr->paired ? rr->c.chapter : a);
@@ -6724,6 +6780,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 		cr.off = rr->c.off;
 		cr.at = rr->c.at;
 		cr.left = 0;
+		cr.read = NULL;	/* the command's words, not its output */
 		cr.text = ds.cmd;
 		(void)grammar(ds.cmd, ds.cl, XR_CODE, R_CODE, cr.cwd, cov_span, &cr);
 	}
@@ -6733,7 +6790,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 		fetch_def(d, &rr->c, body, bl);
 out:
 	d->who = who;
-	d->tool = NULL;
+	d->tool = d->read = NULL;
 	free(r.cov);
 	if (body != t)
 		free(body);
@@ -7532,7 +7589,7 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 	char *id = k_str(p, pl, A_CALLID, NULL), *w, *b = NULL;
 	int v = j_field(q, 0, "cmd"), k;
 	size_t l, bl = 0;
-	struct rcall *c;
+	struct rcall *c, t;
 
 	if (v < 0)
 		v = j_field(q, 0, "command");
@@ -7555,7 +7612,13 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 			}
 			free(w);
 		}
-	if (id && b && bl <= XR_BASH_MAX && memchr(b, '/', bl) &&
+	memset(&t, 0, sizeof t);
+	t.kind = RC_BASH;
+	t.cmd = b;
+	t.cl = bl;
+	/* a URL to fetch, or a read (#517) */
+	if (id && b && bl <= XR_BASH_MAX &&
+	    (memchr(b, '/', bl) || read_call(&t)) &&
 	    (c = rc_push(d, id, RC_BASH)))
 	{
 		c->cmd = b;
@@ -7566,15 +7629,19 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 	free(id);
 }
 
-/* A Codex output: its call's fetch (#515), then the call forgotten */
+/* A Codex output: its mentions, read if its call read (#517), its call's
+** fetch (#515), then the call forgotten */
 static void
 cx_fetch_out(struct xr_claude *d, const struct json_parser *p, int pl,
              const char *s, size_t n)
 {
 	char *id = k_str(p, pl, A_CALLID, NULL), kb[XR_ID_MAX + 1];
-	struct rcall *c;
+	struct rcall *c = id ? rc_find(d, id_key(id, kb)) : NULL;
 
-	if (id && (c = rc_find(d, id_key(id, kb))))
+	d->read = c ? read_call(c) : NULL;
+	refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
+	d->read = NULL;
+	if (c)
 	{
 		if (s)
 			fetch_def(d, c, s, clip(s, n, XR_OUTPUT_CAP));
@@ -7806,7 +7873,6 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
 		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
 		    : NULL;
-		refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
 		cx_fetch_out(d, p, pl, s, n);
 		free(s);
 	}
@@ -7864,7 +7930,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 
 	d->off = off;
 	d->end = off + len;
-	d->who = d->tool = NULL;
+	d->who = d->tool = d->read = NULL;
 	if (d->want)
 		d->want->off = (long long)off;
 	d->at = -1;

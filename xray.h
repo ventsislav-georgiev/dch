@@ -229,6 +229,7 @@ struct xr_hit
 	uint64_t turn;		/* the chapter's prompt number (#478), 0 unknown */
 	const char *ttitle;	/* #479: that chapter's title, NULL unknown */
 	const char *who, *tool;	/* a Claude mention's speaker, else NULL */
+	const char *read;	/* #517: the read-type call whose output it is in */
 	const char *title, *passage, *rule;	/* a definition */
 };
 struct xr_sink

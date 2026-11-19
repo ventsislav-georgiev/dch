@@ -331,6 +331,27 @@ def test_live():
               [("tool", "shell", "zebra.txt"), ("tool", "shell", "Zebra")] and
               sr["hits"][0]["at"] == sr["hits"][1]["at"] + 1,
               (r.stdout, r.stderr))
+        # #517: a shell call's output is read when its command reads
+        with open(p, "a") as f:
+            for k, cmd in ((3, ["bash", "-lc", "cat NOTES"]),
+                           (4, ["echo", "issue o/r#41"])):
+                f.write(line(5 + k, "response_item", {
+                    "type": "function_call", "name": "shell",
+                    "call_id": "c%d" % k,
+                    "arguments": json.dumps({"command": cmd})}))
+                f.write(line(5 + k, "response_item", {
+                    "type": "function_call_output", "call_id": "c%d" % k,
+                    "output": "out %d: o/r#41" % k}))
+        r = dch("--xray", n, "--ref", "o/r#41", "--scope", "session",
+                "--json")
+        rd = {l["mention"]["line"]: l["mention"].get("read", "absent")
+              for l in map(json.loads, r.stdout.splitlines())
+              if "mention" in l}
+        check("#517 --ref on a Codex: a cat call's output read \"cat\", an "
+              "echo's null",
+              rd.get("out 3: o/r#41") == "cat" and
+              rd.get("out 4: o/r#41", 0) is None,
+              (rd, r.stderr))
         rollout(TID, proj, BODY)
 
         # a malformed line, then a truncated last line (no newline)

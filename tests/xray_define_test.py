@@ -436,7 +436,7 @@ sys.stdout.buffer.write(b'\x1b[32m{"title":"green"}\x1b[0m\n'
 def main():
     run_steps(fixture, test_cli, test_written, test_card,
               test_failed_after_rows, test_card_width, test_card_zwj,
-              test_refs_row_full, test_cap_url_bom, test_fetched)
+              test_refs_row_full, test_cap_url_bom, test_fetched, test_read)
 
 
 # ---- #515: a URL the agent fetched resolves from the transcript ------------
@@ -576,6 +576,109 @@ def test_fetched():
           "rule, no resolved line",
           not any("resolved" in l for l in qs) and len(d) == 1 and
           d[0]["rule"] == "D1" and sorted(d[0]) == DEF_KEYS, q.stdout[-400:])
+
+
+# ---- #517: a mention says when the agent READ the ref ---------------------
+
+RSID = "11111111-2222-4333-8444-5555555555c7"
+
+
+def fixture_read():
+    """xv-rd, an ended Claude naming src/engine.c: said by the user and the
+    reply, read by Read, rg, Grep, a cat after cd, and echoed by a command
+    that only writes (cat is its argument, not a command); output paths
+    carry a line (a bare relative path in code is no ref)."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    lines = [{"type": "user", "cwd": P, "timestamp": "2026-11-01T10:00:00Z",
+              "message": {"content": "where is src/engine.c used?"}},
+             {"type": "assistant", "timestamp": "2026-11-01T10:00:01Z",
+              "message": {"content": [{"type": "text", "text":
+                                       "src/engine.c holds the loop"}]}}]
+
+    def call(k, name, inp, out):
+        ts = "2026-11-01T10:0%d:00Z" % k
+        lines.append({"type": "assistant", "timestamp": ts,
+                      "message": {"content": [{"type": "tool_use",
+                                               "id": "r%d" % k, "name": name,
+                                               "input": inp}]}})
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"stdout": out} if name == "Bash"
+                      else {}, "message": {"content": [
+                          {"type": "tool_result", "tool_use_id": "r%d" % k,
+                           "content": out}]}})
+
+    call(1, "Read", {"file_path": P + "/src/engine.c"}, "1\tint loop;")
+    call(2, "Bash", {"command": "rg -n loop src"}, "src/engine.c:1:int loop;")
+    call(3, "Grep", {"pattern": "loop"}, "src/engine.c:1:int loop;\n")
+    call(4, "Bash", {"command": "cd src && cat ../NOTES"},
+         "see src/engine.c:1\n")
+    call(5, "Bash", {"command": "echo cat src/engine.c | tee list.txt"},
+         "cat src/engine.c:1\n")
+    with open(os.path.join(pdir, RSID + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": "xv-rd", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": RSID, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-rd.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def test_read():
+    fixture_read()
+    config(None)
+    p = dch("--xray", "xv-rd", "--ref", "src/engine.c", "--json")
+    try:
+        ms = [json.loads(l)["mention"] for l in p.stdout.splitlines()
+              if '"mention"' in l]
+    except ValueError:
+        ms = []
+    got = [(m.get("who"), m.get("tool"), m.get("read")) for m in ms]
+    check("#517 a Read call's file: read \"Read\"",
+          ("tool", "Read", "Read") in got, (got, p.stdout[-600:]))
+    check("#517 an rg result: read \"rg\"; a Grep result: read \"Grep\"",
+          ("tool", "Bash", "rg") in got and ("tool", "Grep", "Grep") in got,
+          got)
+    check("#517 a reader after cd (cd src && cat): read \"cat\"",
+          ms and ms[-2]["line"] == "see src/engine.c:1" and
+          ms[-2].get("read") == "cat", ms[-2:])
+    check("#517 the user's and a plain reply's mentions: read null",
+          [m.get("read", "absent") for m in ms
+           if m["who"] in ("user", "assistant")] == [None, None], got)
+    check("#517 a command that only writes (cat its argument): read null",
+          ms and ms[-1]["line"] == "cat src/engine.c:1" and
+          ms[-1]["tool"] == "Bash" and ms[-1].get("read", "absent") is None,
+          ms[-1:])
+    check("#517 \"read\" is the last key, the keys before unchanged",
+          ms and all(list(m)[-1] == "read" and list(m)[-2] == "project"
+                     for m in ms), ms[:1])
+    v = Pty([DCH, "--xray", "xv-rd"], 30, 100)
+    try:
+        v.wait(b"Refs ")
+        v.pump(0.3)
+        v.key(b"\033[Z\033[Z", 1.0)
+        v.key(b"a", 1.0)  # Refs shows files: src/engine.c, its one row
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        v.wait(b"Mentions: this session", start=mark)
+        until(lambda: (v.pump(0.1), "searching" not in screen(v, mark))[1], 10)
+        v.pump(0.3)
+        s = screen(v, mark)
+        check("#517 card: a read mention's row says read, a said one You "
+              "or Reply",
+              re.search(r"read +see src/engine\.c:1", s) and
+              re.search(r"Reply +src/engine\.c holds", s) and
+              re.search(r"You +where is src/engine\.c", s), s)
+        v.key(b"q")
+    finally:
+        v.close()
 
 
 

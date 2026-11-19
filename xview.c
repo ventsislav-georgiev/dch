@@ -118,6 +118,7 @@ struct xv_men
 	int same, live;
 	long long seen, turn;
 	char *ttitle, *sid;
+	int read;		/* #517: in a read-type call's output */
 };
 
 struct xv_ent
@@ -1064,6 +1065,8 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		m.chapter = xv_str(p, o, "chapter");
 		m.who = xv_str(p, o, "who");
 		m.tool = xv_str(p, o, "tool");
+		m.read = (i = dch_json_field(p, o, "read")) >= 0 &&
+		         p->tok[i].kind == JSON_STRING;
 		m.sent = xv_str(p, o, "sentence");
 		m.ss = m.se = -1;
 		if ((i = xv_obj(p, o, "span", JSON_ARRAY)) >= 0 && i + 2 < p->ntok &&
@@ -3662,7 +3665,9 @@ xv_draw_card(struct xv *v, int win)
 					xv_when(m->at, w, sizeof w);
 					pk_fit(w, 13);
 				}
-				pk_fit(!strcmp(m->who, "user") ? "You"
+				/* #517: what the agent read, apart from what was said */
+				pk_fit(m->read ? "read"
+				       : !strcmp(m->who, "user") ? "You"
 				       : !strcmp(m->who, "assistant") ? "Reply"
 				       : m->tool[0] ? m->tool
 				       : !strcmp(m->who, "tool") ? "Tool" : "", 6);
