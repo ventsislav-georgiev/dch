@@ -1,6 +1,6 @@
 {"schema":1,"first":{"session":"box","session_id":"m1a2b3c4d5e6f7a90","key":"issue:#831","shape":"issue","text":"#831","project":"-T-work-box","mode":"light","scope":"project","budget_ms":300,"elapsed_ms":0}}
 {"schema":1,"definition":{"session":"box","live":true,"project":"-T-work-box","at":1794300000,"title":"Shell title","rule":"D1","offset":281474976730005,"chapter":"s281474976730001"}}
 {"schema":1,"tally":{"session":"box","live":true,"project":"-T-work-box","count":1,"definitions":1,"partial":false,"mentions_dropped":0}}
-{"schema":1,"mention":{"session":"w1","session_id":"11111111-2222-4333-8444-555555555566","chapter":"f*:0","at":1794304801,"who":"user","tool":null,"line":"next to the shell #831","turn":1,"turn_title":"next to the shell #831","last_active":1794300020,"sentence":"next to the shell #831","span":[18,22],"offset":0,"live":false,"project":"-T-work-box"}}
+{"schema":1,"mention":{"session":"w1","session_id":"11111111-2222-4333-8444-555555555566","chapter":"f*:0","at":1794304801,"who":"user","tool":null,"line":"next to the shell #831","turn":1,"turn_title":"next to the shell #831","last_active":1794300020,"sentence":"next to the shell #831","span":[18,22],"offset":0,"live":false,"project":"-T-work-box","read":null}}
 {"schema":1,"tally":{"session":"w1","live":false,"project":"-T-work-box","count":1,"definitions":0,"partial":false,"mentions_dropped":0}}
 {"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":1,"project_sessions":1,"all":null,"all_sessions":null},"why":null,"files":2,"bytes":205,"lines_too_long":0}

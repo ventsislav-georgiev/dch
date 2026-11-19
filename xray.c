@@ -11543,11 +11543,11 @@ res_cache_get(const char *repo, const char *num, char *buf, size_t cap)
 	ssize_t n;
 	time_t age;
 	int fd;
+	const char *tu = getenv("DCH_TEST_XRAY_UID");
 
 	if (!res_cache_path(path, sizeof path, repo, num, 0) ||
 	    lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-	    st.st_uid != (getenv("DCH_TEST_XRAY_UID") ?
-	                  (uid_t)atoi(getenv("DCH_TEST_XRAY_UID")) : getuid()) ||
+	    st.st_uid != (tu ? (uid_t)atoi(tu) : getuid()) ||
 	    st.st_size >= (off_t)cap)
 		return 0;
 	if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0)
