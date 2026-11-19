@@ -11579,13 +11579,82 @@ res_cache_put(const char *repo, const char *num, const char *s)
 		(void)unlink(tmp);
 }
 
+/* gh's answer for repo#num into r and the cache by 0 or 1 */
+static int
+res_gh_ask(char *const av[], char *const env[], long long until,
+           struct res_run *run, const char *repo, const char *num,
+           struct xr_resolved *r)
+{
+	int k;
+
+	if (res_run(av, env, until, run) != 0 || run->status < 0)
+		return 0;	/* a timeout or a kill is not cached */
+	k = run->status == 0 && xr_gh_parse(run->out, repo, num, r);
+	res_cache_put(repo, num, k ? run->out : "none");
+	return k;
+}
+
+/* #522: a real gh takes about 0.9 s, so light never waits for it: a
+** detached grandchild (its own session, no tty, stdio on /dev/null, no fd
+** of ours) asks under the full deadline and fills the cache for the next
+** draw. One fill per entry at a time: an O_EXCL "<entry>.lock", stale past
+** 60 s (a fill lasts XR_GIT_MS plus the reap's grace). */
+static void
+res_fill(char *const av[], char *const env[], struct res_run *run,
+         const char *repo, const char *num, struct xr_resolved *r)
+{
+	char path[PATH_MAX], lock[PATH_MAX + 8];
+	struct stat st;
+	long k, max;
+	pid_t pid;
+	int fd;
+
+	if (!res_cache_path(path, sizeof path, repo, num, 1) ||
+	    snprintf(lock, sizeof lock, "%s.lock", path) >= (int)sizeof lock)
+		return;
+	if (lstat(lock, &st) == 0 && time(NULL) - st.st_mtime > 60)
+		(void)unlink(lock);
+	if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
+		return;
+	close(fd);
+	if ((pid = fork()) < 0)
+	{
+		(void)unlink(lock);
+		return;
+	}
+	if (pid > 0)
+	{
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			;
+		return;
+	}
+	if (setsid() < 0 || (pid = fork()) != 0)
+	{
+		if (pid < 0)
+			(void)unlink(lock);
+		_exit(0);
+	}
+	if ((fd = open("/dev/null", O_RDWR)) >= 0)
+		for (k = 0; k < 3; k++)
+			(void)dup2(fd, (int)k);
+	/* shortcut: closes fds below 4096 only, a one-shot --ref holds few */
+	max = sysconf(_SC_OPEN_MAX);
+	for (k = 3; k < (max > 0 && max < 4096 ? max : 4096); k++)
+		(void)close((int)k);
+	(void)res_gh_ask(av, env, xr_now_ms() + XR_GIT_MS, run, repo, num, r);
+	(void)unlink(lock);
+	_exit(0);
+}
+
 /* #N, repo#N, o/r#N or an issue/pull URL (o/r#N): `gh api` for its title
 ** and state, read-only, under XR_GIT_MS. The REST issues endpoint answers
 ** for an issue and a pull alike (a pull is an issue with pull_request), so
 ** one call serves a bare #N; --jq keeps the answer to four fields. No gh,
-** no auth, no network, the deadline, not github.com, any odd answer: 0. */
+** no auth, no network, the deadline, not github.com, any odd answer: 0.
+** light (#522) answers from the cache only; a miss starts res_fill. */
 static int
-res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
+res_issue(const struct xr_span *sp, const char *cwd, int light,
+          struct xr_resolved *r)
 {
 	static struct res_run run;	/* 68 KB: off the stack */
 	static const char *const keep[] = {"PATH=", "HOME=", "XDG_CONFIG_HOME=",
@@ -11651,11 +11720,12 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 				break;
 			}
 	env[e] = NULL;
-	if (res_run(av, env, until, &run) != 0 || run.status < 0)
-		return 0;	/* a timeout or a kill is not cached */
-	k = run.status == 0 && xr_gh_parse(run.out, repo, num, r);
-	res_cache_put(repo, num, k ? run.out : "none");
-	return (int)k;
+	if (light)
+	{
+		res_fill(av, env, &run, repo, num, r);
+		return 0;
+	}
+	return res_gh_ask(av, env, until, &run, repo, num, r);
 }
 
 /* ---- files (v2.1 7.1, v1 7.3) ---- */
@@ -12148,7 +12218,7 @@ res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 	if (sp->shape == XR_FILE)
 		return res_file(xr_span_text(sp), text, cwd ? cwd : "", light, r);
 	if (sp->shape == XR_ISSUE || sp->shape == XR_PULL)
-		return res_issue(sp, cwd, r);
+		return res_issue(sp, cwd, light, r);
 	return 0;
 }
 
