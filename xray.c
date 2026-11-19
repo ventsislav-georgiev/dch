@@ -13724,19 +13724,20 @@ xs_reached(const struct xr_chapters *ch, long long since)
 
 int
 xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
-               const char *session, long long since)
+               const char *session, long long since, long long t0)
 {
 	struct xr_since s = { since, NULL, { NULL, NULL } };
 	struct xr_sink k = { xs_hit, &s };
 	struct xr_claude *d = NULL;
 	const struct xr_chapters *ch = NULL;
 	const struct xr_ent **v = NULL;
-	uint64_t win = XR_CHUNK;
+	uint64_t win = XR_CHUNK < xr_lim.bytes ? XR_CHUNK : xr_lim.bytes;
 	size_t i, n = 0, out = 0;
-	int more = 0, rc = -1;
+	int more = 0, rc = -1, partial = 0;
 
 	/* newest first: a window of the file's end, four times as big each
-	** round, till it holds a turn begun before since or the whole file */
+	** round, till it holds a turn begun before since or the whole file;
+	** --search's caps (3.8) stop it short, partial */
 	for (;;)
 	{
 		xr_claude_free(d);
@@ -13752,7 +13753,14 @@ xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
 		ch = xr_claude_chapters(d);
 		if (win >= size || xs_reached(ch, since))
 			break;
+		if (win >= xr_lim.bytes || xr_now_ms() - t0 >= xr_lim.ms)
+		{
+			partial = 1;
+			break;
+		}
 		win = win > size / 4 ? size : win * 4;
+		if (win > xr_lim.bytes)
+			win = xr_lim.bytes;
 	}
 	fputs("{\"schema\":1,\"session\":", f);
 	xr_put_str(f, session);
@@ -13761,7 +13769,8 @@ xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
 	{
 		const struct xr_chapter *c = xr_chapter_at(ch, i);
 
-		if (!c || c->at < since)
+		/* a cut window's first turn began before it: not a turn begun */
+		if (!c || c->at < since || (partial && !i && c->partial))
 			continue;
 		if (out == XS_CHAPTERS)
 		{
@@ -13792,7 +13801,8 @@ xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
 		fprintf(f, ",\"count\":%llu,\"last_at\":%lld}",
 		        (unsigned long long)ix_count(s.x, v[i]), v[i]->lastat);
 	}
-	fprintf(f, "],\"more\":%s}\n", more ? "true" : "false");
+	fprintf(f, "],\"more\":%s,\"partial\":%s}\n", more ? "true" : "false",
+	        partial ? "true" : "false");
 	rc = fflush(f) == 0 && !ferror(f) ? 0 : 1;
 out:
 	free(v);

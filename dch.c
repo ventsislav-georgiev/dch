@@ -2922,6 +2922,10 @@ usage(void)
 	    "                                             its end, 5 s at most);\n"
 	    "                                             project|all: grouped by\n"
 	    "                                             session\n"
+	    "  dch --xray <n> --since <time> --json       the turns and refs since\n"
+	    "                                             <time> (epoch s, ISO\n"
+	    "                                             8601 UTC, <N>m|h|d),\n"
+	    "                                             newest first\n"
 	    "  dch --xray <n> --memory --json             its memories and\n"
 	    "                                             instruction files as\n"
 	    "                                             JSON lines\n"
@@ -13272,7 +13276,7 @@ xr_since_one(const char *path, const struct stat *st, int codex,
 	if ((fd = xr_seam_open(path, st)) < 0)
 		return xr_failed();
 	rc = xr_since_print(stdout, fd, (uint64_t)st->st_size,
-	                    (uint64_t)st->st_ino, codex, session, since);
+	                    (uint64_t)st->st_ino, codex, session, since, xr_t0);
 	close(fd);
 	return rc < 0 ? xr_failed() : xr_out_exit(rc == 0);
 }

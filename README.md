@@ -394,6 +394,7 @@ dch --xray <n> --follow --tasks --memory --json # that stream with the task and 
 dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
 dch --xray <n> --search <text> --scope all --json  # the same over every session with a corpus, hits grouped by session (project: <n>'s project only; no --json: text)
+dch --xray <n> --since 1h --json                # the turns and refs since a time (epoch, ISO 8601 UTC or <N>m/h/d), newest first
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
@@ -1300,7 +1301,8 @@ standard input is a request, as NDJSON:
   taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`),
   `--search` (with `--scope`; `["--search","push retry","--scope","project",
   "--json"]`, one answer per request, the bytes `dch --xray <n> --search
-  ... --json` writes on the host), `--chapter` and `--clear`. A request
+  ... --json` writes on the host), `--since` (#516), `--chapter` and
+  `--clear`. A request
   without `--json` is refused, so there is no text answer here. dch checks them by its own rules first; any
   other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
   value is answered `{"req":N,"stderr":"dch: ..."}` and
@@ -2112,6 +2114,33 @@ message `--scope` alone also gives with neither `--ref` nor `--search`). Nothing
 traced. On `host:name` it runs on that host's `dch serve`; a host whose dch
 predates `--search` says `dch: <host>: the host's dch does not know --search`
 (exit 1).
+
+`dch --xray <n> --since <time> --json` is a recap for a returning reader: the
+turns begun and the refs mentioned at or after `<time>`, as one JSON object:
+```json
+{"schema":1,"session":"api","since":1795046400,"chapters":[{"chapter":"f1a2:9120","turn_title":"Fix the login test","at":1795047000}],"refs":[{"key":"pull:o/r#41","shape":"pull","text":"o/r#41","count":2,"last_at":1795047300}],"more":false,"partial":false}
+```
+- `<time>` is epoch seconds (`1795046400`), ISO 8601 UTC
+  (`2026-11-19T10:00:00Z`, that shape only), or relative: `<N>m`, `<N>h` or
+  `<N>d` before now. Anything else exits 2 with `dch: bad since: epoch
+  seconds, 2026-11-19T10:00:00Z (UTC) or <N>m, <N>h, <N>d`. `since` is the
+  time as epoch seconds.
+- `chapters`: the turns begun at or after `since`, newest first, the newest
+  20; `chapter` and `turn_title` as in `--search` (`turn_title` null for none).
+- `refs`: the refs mentioned at or after `since` (first or again), by
+  `last_at` newest first, the newest 30; `key`, `shape` and `text` as in the
+  refs list. `count` counts the mentions since `since`, not the session's.
+- `more` is true when either cap cut. `partial` is true when `--search`'s
+  byte or time cap stopped the read before it reached `since`: the answer
+  holds only the newest turns.
+- It reads from the transcript's end back only as far as `since`, so a recent
+  `since` stays fast on a large transcript. Live and ended Claude sessions and
+  live Codex sessions; a shell session answers `dch: no x-ray corpus` (exit 1).
+- `--json` is required (`dch: bad usage: --json is required ...`, exit 2), and
+  it goes with no other query flag (`dch: bad usage: --since takes --json
+  only`). It is a `--requests` request too, its bytes those of the host's own
+  run. On `host:name` it runs on that host, so a relative time uses the
+  host's clock.
 
 `dch --xray <n> --tasks --json` prints the session's task list as JSON lines,
 the way `--ref` prints its lines, and exits 0:

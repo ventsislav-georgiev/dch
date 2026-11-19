@@ -3372,14 +3372,15 @@ def test_since():
     check("since: past every turn: empty arrays, more false",
           rc == 0 and o == {"schema": 1, "session": "xs-a",
                             "since": t0 + 3600, "chapters": [], "refs": [],
-                            "more": False}, raw)
+                            "more": False, "partial": False}, raw)
     rc, o, raw = got("xs-a", "2026-11-10T10:20:00Z")
     check("since: mid-session (ISO): only the later turns, newest first",
           rc == 0 and o["since"] == t0 + 1200 and
           titles(o) == ["step %d" % k for k in (24, 23, 22, 21, 20)] and
           [x["at"] for x in o["chapters"]] ==
           [t0 + 60 * k for k in (24, 23, 22, 21, 20)] and
-          all(x["chapter"] for x in o["chapters"]) and not o["more"], raw)
+          all(x["chapter"] for x in o["chapters"]) and o["more"] is False
+          and o["partial"] is False, raw)
     check("since: ...only the refs mentioned since, by last_at newest "
           "first, an old ref mentioned again among them",
           o and keys(o) == ["issue:#%d" % k for k in
@@ -3393,12 +3394,13 @@ def test_since():
     rc, o, raw = got("xs-a", "0")
     check("since: the chapter cap: the newest 20 turns, more true",
           rc == 0 and titles(o) == ["step %d" % k for k in range(24, 4, -1)]
-          and len(o["refs"]) == 25 and o["more"] is True, raw)
+          and len(o["refs"]) == 25 and o["more"] is True and
+          o["partial"] is False, raw)
     rc, o, raw = got("xs-b", "0")
     check("since: the ref cap: the newest 30 refs, more true",
           rc == 0 and titles(o) == ["list them"] and
           keys(o) == ["issue:#%d" % k for k in range(534, 504, -1)] and
-          o["more"] is True, raw)
+          o["more"] is True and o["partial"] is False, raw)
     for since, want in (("1h", ["new ask"]), ("150m", ["new ask", "mid ask"]),
                         ("1d", ["new ask", "mid ask", "old ask"])):
         rc, o, raw = got("xs-c", since)
@@ -3431,7 +3433,18 @@ def test_since():
           "newest 20 turns",
           rc == 0 and titles(o) == ["big %d" % k for k in range(39, 19, -1)]
           and keys(o) == ["issue:#%d" % k for k in range(1039, 1009, -1)]
-          and o["more"] is True, raw[:300])
+          and o["more"] is True and o["partial"] is False, raw[:300])
+    # a lowered byte cap (DCH_XRAY_CAPS' second field) stops the read short
+    r = dch("--xray", "xs-d", "--since", "0", "--json",
+            env=dict(ENV, DCH_XRAY_CAPS="0:500000"))
+    o = json.loads(r.stdout) if r.returncode == 0 else None
+    check("since: the byte cap stops a since older than everything: "
+          "partial, only the newest turns",
+          o and o["partial"] is True and o["more"] is False and
+          titles(o) == ["big %d" % k for k in range(39, 39 - len(
+              o["chapters"]), -1)] and 1 <= len(o["chapters"]) < 10 and
+          keys(o) == ["issue:#%d" % k for k in range(1039, 1039 - len(
+              o["refs"]), -1)], (r.returncode, r.stdout[:300], r.stderr))
     r = dch("--xray", "xs-a", "--since", "1h", "--search", "x1", "--json")
     check("since: with another query is bad usage, exit 2",
           r.returncode == 2 and r.stderr ==
