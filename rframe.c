@@ -666,7 +666,7 @@ xray_since(const char *s, long long now)
 ** (#322), --since <time> (#516) and --clear, but --follow takes --tasks and
 ** --memory (#446);
 ** --scope with --ref or --search (#501), --full
-** and --budget-ms only with --ref. A value is the next element even when it
+** and --budget-ms only with --ref, as --no-github (#518). A value is the next element even when it
 ** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
 ** (an anchor may hold ':'), --since's time too (#516). The --ref
 ** text's byte and grammar rules are xray.c's, which the Windows client does
@@ -679,10 +679,12 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	static const char *const opt[] = { "--json", "--follow", "--clear",
 	                                   "--full", "--ref", "--chapter",
 	                                   "--scope", "--budget-ms", "--search",
-	                                   "--tasks", "--memory", "--since" };
+	                                   "--tasks", "--memory", "--since",
+	                                   "--no-github" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
 	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256,
-	       X_TASKS = 512, X_MEMORY = 1024, X_SINCE = 2048 };
+	       X_TASKS = 512, X_MEMORY = 1024, X_SINCE = 2048,
+	       X_NOGH = 4096 };
 	const char *val[12] = { NULL };
 	unsigned seen = 0, k, one;
 	int i;
@@ -695,9 +697,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 12 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 13 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 12)
+		if (k == 13)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -731,6 +733,8 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	if (seen & (X_FULL | X_BUDGET) && !(seen & X_REF))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");
+	if (seen & X_NOGH && !(seen & X_REF))
+		return ctl_no(why, cap, "--no-github comes with --ref");
 	if (seen & X_SCOPE && !(seen & (X_REF | X_SEARCH)))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");

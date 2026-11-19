@@ -787,6 +787,29 @@ def test_github(m):
         r, ls, rv, lg = q("#1234", env=dict(genv, DCH_NO_GITHUB="1"))
         check("#507: DCH_NO_GITHUB=1 (the suite's guard): gh never runs",
               not rv and not lg, (rv, lg))
+        # ---- #518: --no-github, per call, the config never written
+        ref = ["--ref", "#1234", "--scope", "session", "--json"]
+        for label, argv, env in (
+                ("--no-github", ref + ["--no-github"], genv),
+                ("DCH_NO_GITHUB=1", ref, dict(genv, DCH_NO_GITHUB="1"))):
+            open(log, "w").close()
+            r = dch("--xray", n, *argv, env=env)
+            rv = [l["resolved"] for l in lines(r.stdout) or []
+                  if "resolved" in l]
+            check("#518: %s: no resolved line, gh never ran" % label,
+                  r.returncode == 0 and not rv and
+                  not open(log).read(), (r.stderr, rv, open(log).read()))
+        r, ls, rv, lg = q("#1234")
+        check("#518: without --no-github gh runs and the line comes",
+              len(rv) == 1 and lg, (rv, lg))
+        check("#518: --no-github never writes the config",
+              not os.path.exists(ENV["DCH_CONFIG"]), "")
+        r = dch("--xray", n, "--search", "x", "--no-github", "--json",
+                env=genv)
+        check("#518: --no-github without --ref: bad usage, exit 2",
+              r.returncode == 2 and "--no-github comes with --ref"
+              in r.stderr, (r.returncode, r.stderr))
+        rq_no_github(n, genv, fb, log, cache)
         # ---- #508: the disk cache of gh's answers
         ent = os.path.join(ghd, "acme,widgets,1234")
         r, ls, rv, lg = q("#1234")
@@ -862,6 +885,96 @@ def test_github(m):
                     os.unlink(ENV["DCH_CONFIG"])
     finally:
         dch("-k", n)
+
+
+def rq_no_github(n, genv, fb, log, cache):
+    """#518: --no-github in a --requests request, to a loopback host (the
+    harness of tests/remote_client_test.py) whose PATH holds the fake gh"""
+    sys.path.insert(0, HERE)
+    from remote_client_test import OWNER, WHOIS
+    from serve_lib import fake_ts
+    ts = os.path.join(T, "fakets")
+    os.makedirs(ts)
+    fake_ts(ts)
+    for nm, o in (("status.json", OWNER), ("whois.json", WHOIS)):
+        with open(os.path.join(ts, nm), "w") as f:
+            f.write(json.dumps(o))
+    genv = dict(genv, PATH=fb + ":" + ts + ":/usr/bin:/bin")
+    slog = os.path.join(T, "serve.log")
+    with open(slog, "w") as lf:
+        sp = subprocess.Popen([DCH, "serve", "--bind", "127.0.0.1",
+                               "--port", "0"],
+                              env=dict(genv, DCH_SERVE_TEST_LOOPBACK="1"),
+                              stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=lf)
+    try:
+        port = None
+        end = time.time() + 10
+        while time.time() < end and port is None and sp.poll() is None:
+            m = re.search(r"listening on 127\.0\.0\.1:(\d+)",
+                          open(slog).read())
+            port = int(m.group(1)) if m else None
+            time.sleep(0.05)
+        check("#518: a loopback host for the requests rows", port,
+              open(slog).read())
+        if not port:
+            return
+        cfg = os.path.join(T, "rconfig")
+        with open(cfg, "w") as f:
+            f.write("remote_hosts = srv=127.0.0.1:%d\n" % port)
+        cenv = {k: v for k, v in ENV.items() if k != "DCH_NO_REMOTE"}
+        cenv.update(DCH_CONFIG=cfg, XDG_CACHE_HOME=os.path.join(T, "ccache"),
+                    PATH=ts + ":/usr/bin:/bin")
+        rp = subprocess.Popen([DCH, "--xray", "srv:" + n, "--requests",
+                               "--json"], env=cenv, text=True,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+
+        def req(i, argv):
+            shutil.rmtree(cache, ignore_errors=True)
+            open(log, "w").close()
+            rp.stdin.write(json.dumps({"req": i, "argv": argv}) + "\n")
+            rp.stdin.flush()
+            got = []
+            while True:
+                l = rp.stdout.readline()
+                if not l:
+                    break
+                o = json.loads(l)
+                got.append(o)
+                if o.get("req") == i and "exit" in o:
+                    break
+            return got, open(log).read()
+
+        rd = rp.stdout.readline()	# ready
+        check("#518: the requests client is ready", "ready" in rd,
+              (rd, rp.poll() is not None and rp.stderr.read()))
+        rf = ["--ref", "#1234", "--scope", "session", "--json"]
+        for label, argv, gh in (("--no-github", rf + ["--no-github"], False),
+                                ("no flag", rf, True)):
+            got, lg = req(1, argv)
+            rv = [g for g in got if "resolved" in json.dumps(g.get("line"))]
+            check("#518: --requests to a host, %s: %s" % (label,
+                  "gh runs, the line comes" if gh else
+                  "no resolved line, gh never ran"),
+                  got and got[-1].get("exit") == 0 and
+                  bool(lg) == gh and bool(rv) == gh, (got[-3:], lg))
+        got, lg = req(2, ["--json", "--no-github"])
+        check("#518: --requests: --no-github without --ref is refused here",
+              got and got[-1].get("exit") == 2 and any(
+                  "--no-github comes with --ref" in g.get("stderr", "")
+                  for g in got), got)
+        rp.stdin.close()
+        rp.wait(timeout=10)
+        open(log, "w").close()
+        shutil.rmtree(cache, ignore_errors=True)
+        r = dch("--xray", "srv:" + n, *rf, "--no-github", env=cenv)
+        check("#518: --xray host:name --no-github: forwarded, gh never ran",
+              r.returncode == 0 and "resolved" not in r.stdout and
+              not open(log).read(), (r.stderr, r.stdout[-300:]))
+    finally:
+        sp.terminate()
+        sp.wait()
 
 
 # ---- the sentinel test: a hostile repo runs nothing, fetches nothing -------

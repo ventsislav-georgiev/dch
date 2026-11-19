@@ -391,7 +391,7 @@ dch --xray <n> --json                           # a session's chapters (prompts 
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
 dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
-dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] [--no-github] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
 dch --xray <n> --search <text> --scope all --json  # the same over every session with a corpus, hits grouped by session (project: <n>'s project only; no --json: text)
 dch --xray <n> --since 1h --json                # the turns and refs since a time (epoch, ISO 8601 UTC or <N>m/h/d), newest first
@@ -1298,7 +1298,7 @@ time. It takes `host:name` and `--json` only; a local name exits 2 (run one
 standard input is a request, as NDJSON:
 - `{"req":N,"argv":["--ref","#831","--full","--json"]}`: the flags after
   `--xray <name>`, `N` from 1 to 2147483647. Only the request forms are
-  taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`),
+  taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`, `--no-github`),
   `--search` (with `--scope`; `["--search","push retry","--scope","project",
   "--json"]`, one answer per request, the bytes `dch --xray <n> --search
   ... --json` writes on the host), `--since` (#516), `--chapter` and
@@ -1836,8 +1836,20 @@ under the same 3 s deadline and output cap as git, with only `PATH`,
 `GH_PAGER=cat` and no browser. No `gh`, not logged in, no network, the
 deadline, a remote that is not github.com or an answer it cannot read:
 no line and no warning; the mentions stream as always.
-`xray_github = false` (or `DCH_NO_GITHUB=1`, the test suite's guard)
-turns it off (nothing is read or written then).
+Three switches turn it off (nothing is read or written then), and any one
+of them off is off: `xray_github = false` in your config, `DCH_NO_GITHUB=1`
+in the environment of the `dch --xray` process that runs the lookup (a
+supported switch, also the test suite's guard), and `--no-github` on one
+`dch --xray <n> --ref <text> --json` call. `--no-github` is per call: it
+never writes your config. It comes with `--ref` only (`dch: bad usage:
+--no-github comes with --ref` otherwise), and `--requests` takes it in a
+request. For a `host:name`, or a `--requests` request to a host, the flag
+is forwarded and the host skips `gh` for that call; the host's own config
+and environment still apply, so a host with `xray_github = false` or
+`DCH_NO_GITHUB=1` skips it either way. A host of 1.111.0 or older refuses
+the flag, and nothing runs there: `dch: srv: the host's dch does not know
+--no-github` (exit 1; for a request, that line on stderr and an end line
+with `"exit":1,"why":"refused"`).
 Each answer is cached on disk so that every card open or hover does not
 spend your GitHub rate limit: in `$XDG_CACHE_HOME/dch/gh/` (else
 `~/.cache/dch/gh/`; directory 0700, files 0600, one per lowercased
@@ -3439,7 +3451,7 @@ for a local session named that way.
 | `--say` | `--say <n> --json -- <text>` | 660 s |
 | `--xray` | `--xray <n> --json [--clear \| --chapter <anchor>]` | 60 s |
 | `--xray` | `--xray <n> --json --follow [--tasks] [--memory]` (no cap either) | none |
-| `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] --json` | 60 s |
+| `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] [--no-github] --json` | 60 s |
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |
 | `--xray` | `--xray <n> --memory --json` | 60 s |

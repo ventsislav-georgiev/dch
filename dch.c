@@ -2911,7 +2911,8 @@ usage(void)
 	    "                                             the task and memory\n"
 	    "                                             blocks and their deltas\n"
 	    "  dch --xray <n> --ref <ref>|- [--scope session|project|all] [--full]\n"
-	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
+	    "       [--budget-ms <ms>] [--no-github] --json\n"
+	    "                                             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
 	    "                                             (-: read from stdin to\n"
 	    "                                             its end, 5 s at most)\n"
@@ -16468,7 +16469,7 @@ xray_main(int argc, char **argv)
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL, *search = NULL, *since = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
-	int requests = 0, tasks = 0, memory = 0;
+	int requests = 0, tasks = 0, memory = 0, nogh = 0;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -16526,6 +16527,8 @@ xray_main(int argc, char **argv)
 			follow = 1;
 		else if (!strcmp(argv[k], "--requests") && !requests)
 			requests = 1;
+		else if (!strcmp(argv[k], "--no-github") && !nogh)
+			nogh = 1;
 		else if (!strcmp(argv[k], "--tasks") && !tasks)
 			tasks = 1;
 		else if (!strcmp(argv[k], "--memory") && !memory)
@@ -16539,6 +16542,7 @@ xray_main(int argc, char **argv)
 			           !strcmp(argv[k], "--full") ||
 			           !strcmp(argv[k], "--follow") ||
 			           !strcmp(argv[k], "--requests") ||
+			           !strcmp(argv[k], "--no-github") ||
 			           !strcmp(argv[k], "--tasks") ||
 			           !strcmp(argv[k], "--memory")) ? " twice"
 			        : " is not an --xray flag of this dch");
@@ -16558,6 +16562,11 @@ xray_main(int argc, char **argv)
 	{
 		fputs("dch: bad usage: --scope, --full and --budget-ms come with "
 		      "--ref\n", stderr);
+		return 2;
+	}
+	if (nogh && !ref)
+	{
+		fputs("dch: bad usage: --no-github comes with --ref\n", stderr);
 		return 2;
 	}
 	if (ref && clear)
@@ -16616,7 +16625,8 @@ xray_main(int argc, char **argv)
 		/* #158, spec 4.3: each request's flags come on stdin; a local
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
-		    budget || search || tasks || memory || since)
+		    budget || search || tasks || memory || since ||
+		    nogh)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -16694,6 +16704,8 @@ xray_main(int argc, char **argv)
 		fputs("dch: " XRAY_SINCE_BAD "\n", stderr);
 		return 2;
 	}
+	if (nogh)	/* this call only: the config is never written (#518) */
+		xr_res_github = 0;
 	q.text = search ? search : ref;
 	q.search = search != NULL;
 	q.full = full;
