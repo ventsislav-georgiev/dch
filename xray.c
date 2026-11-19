@@ -11790,41 +11790,55 @@ res_gh_ask(char *const av[], char *const env[], long long until,
 ** detached grandchild (its own session, no tty, stdio on /dev/null, no fd
 ** of ours) asks under the full deadline and fills the cache for the next
 ** draw. One fill per entry at a time: an O_EXCL "<entry>.lock", stale past
-** 60 s (a fill lasts XR_GIT_MS plus the reap's grace). */
-static void
+** 60 s (a fill lasts XR_GIT_MS plus the reap's grace) or more than 60 s
+** ahead. 1: a fill started or one runs; 0: none can (QA 1.114.0 LOW-US1). */
+static int
 res_fill(char *const av[], char *const env[], struct res_run *run,
          const char *repo, const char *num, struct xr_resolved *r)
 {
-	char path[PATH_MAX], lock[PATH_MAX + 8];
-	struct stat st;
+	char path[PATH_MAX], lock[PATH_MAX + 8], old[PATH_MAX + 40];
+	struct stat st, so;
 	long k, max;
+	time_t age;
 	pid_t pid;
-	int fd;
+	int fd, ws = 0;
 
 	if (!res_cache_path(path, sizeof path, repo, num, 1) ||
 	    snprintf(lock, sizeof lock, "%s.lock", path) >= (int)sizeof lock)
-		return;
-	if (lstat(lock, &st) == 0 && time(NULL) - st.st_mtime > 60)
-		(void)unlink(lock);
+		return 0;
+	if (lstat(lock, &st) == 0 &&
+	    ((age = time(NULL) - st.st_mtime) > 60 || age < -60))
+	{
+		/* taken over by rename (QA 1.114.0 NIT-US3): one caller wins it */
+		snprintf(old, sizeof old, "%s.%ld.stale", lock, (long)getpid());
+		if (rename(lock, old) != 0)
+			return errno == ENOENT;	/* ENOENT: another caller took it */
+		if (lstat(old, &so) == 0 && so.st_ino != st.st_ino)
+		{
+			(void)rename(old, lock);	/* a fresh one: put it back */
+			return 1;
+		}
+		(void)unlink(old);
+	}
 	if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
-		return;
+		return errno == EEXIST;
 	close(fd);
 	if ((pid = fork()) < 0)
 	{
 		(void)unlink(lock);
-		return;
+		return 0;
 	}
 	if (pid > 0)
 	{
-		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+		while (waitpid(pid, &ws, 0) < 0 && errno == EINTR)
 			;
-		return;
+		return WIFEXITED(ws) && WEXITSTATUS(ws) == 0;
 	}
 	if (setsid() < 0 || (pid = fork()) != 0)
 	{
 		if (pid <= 0)	/* setsid or fork failed: no fill holds it */
 			(void)unlink(lock);
-		_exit(0);
+		_exit(pid <= 0);
 	}
 	if ((fd = open("/dev/null", O_RDWR)) >= 0)
 		for (k = 0; k < 3; k++)
@@ -11844,7 +11858,8 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 ** one call serves a bare #N; --jq keeps the answer to four fields. No gh,
 ** no auth, no network, the deadline, not github.com, any odd answer: 0.
 ** light (#522) answers from the cache only; a miss starts res_fill and
-** waits up to XR_GH_LIGHT_MS for its entry. */
+** waits up to XR_GH_LIGHT_MS for its entry, or asks gh under it when no
+** fill can run (an unusable cache: 1.113's path). */
 static int
 res_issue(const struct xr_span *sp, const char *cwd, int light,
           struct xr_resolved *r)
@@ -11916,7 +11931,9 @@ res_issue(const struct xr_span *sp, const char *cwd, int light,
 	if (light)
 	{
 		/* most gh answers land well inside XR_GH_LIGHT_MS: shown at once */
-		res_fill(av, env, &run, repo, num, r);
+		if (!res_fill(av, env, &run, repo, num, r))
+			return res_gh_ask(av, env, xr_now_ms() + XR_GH_LIGHT_MS, &run,
+			                  repo, num, r);
 		for (until = xr_now_ms() + XR_GH_LIGHT_MS; xr_now_ms() < until;)
 		{
 			(void)poll(NULL, 0, 50);
