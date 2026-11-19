@@ -870,6 +870,38 @@ def test_github(m):
             os.chown(ent, 12345, 12345)
             r, ls, rv, lg = q("#1234", keep=True)
             check("#508: a foreign-owned entry is ignored", bool(lg), lg)
+        q("#1234")
+        os.utime(ent, (time.time() + 365 * 86400,) * 2)
+        r, ls, rv, lg = q("#1234", keep=True)
+        check("#508: an entry stamped a year ahead is not fresh: gh runs",
+              bool(lg), lg)
+        q("#1234")
+        r, ls, rv, lg = q("#1234", keep=True,
+                          env=dict(genv, DCH_TEST_XRAY_UID="12345"))
+        check("#508: an entry of another uid is ignored (non-root)",
+              bool(lg), lg)
+        q("#1234")
+        os.chmod(ghd, 0o777)
+        r, ls, rv, lg = q("#1234", keep=True)
+        check("#508: a 0777 gh/ is tightened to 0700 and used",
+              not lg and os.stat(ghd).st_mode & 0o777 == 0o700, lg)
+        for label in ("gh", "dch"):
+            shutil.rmtree(cache, ignore_errors=True)
+            tgt = os.path.join(T, "ghcache-dir")
+            shutil.rmtree(tgt, ignore_errors=True)
+            os.makedirs(os.path.join(tgt, "gh"))
+            os.makedirs(os.path.join(cache, "dch"))
+            if label == "gh":
+                os.rmdir(os.path.join(tgt, "gh"))
+                os.symlink(tgt, ghd)
+            else:
+                os.rmdir(os.path.join(cache, "dch"))
+                os.symlink(tgt, os.path.join(cache, "dch"))
+            r, ls, rv, lg1 = q("#1234", keep=True)
+            r, ls, rv, lg2 = q("#1234", keep=True)
+            check("#508: a symlinked %s/: cache skipped, target empty, gh "
+                  "runs each time" % label, lg1 and lg2 and
+                  not [f for _, _, fs in os.walk(tgt) for f in fs], (lg1, lg2))
         for label, env, cfgtxt in (
                 ("xray_github = false", genv, "xray_github = false\n"),
                 ("DCH_NO_GITHUB=1", dict(genv, DCH_NO_GITHUB="1"), None)):

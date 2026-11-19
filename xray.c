@@ -11483,6 +11483,17 @@ res_origin(const char *cwd, long long until, struct res_run *run, char *out,
 	return xr_gh_repo(run->out, n, out, cap);
 }
 
+/* a cache dir we may trust: a real dir of ours; too open: chmod 0700 */
+static int
+res_cache_dir_ok(const char *d)
+{
+	struct stat st;
+
+	if (lstat(d, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid())
+		return 0;
+	return !(st.st_mode & 077) || chmod(d, 0700) == 0;
+}
+
 /* The disk cache of gh's answers (#508): $XDG_CACHE_HOME/dch/gh/<o>,<r>,<N>
 ** (names hold no ','), 0700 dir, 0600 files, the --jq answer or "none". A
 ** hit must be a regular file of ours, younger than 10 min (a "none": 2). */
@@ -11508,6 +11519,14 @@ res_cache_path(char *out, size_t cap, const char *repo, const char *num,
 	if (mk)
 		(void)mkdir(dir, 0700);
 	n = strlen(dir);
+	/* dch/ and gh/ are checked (a symlink or a foreign dir: no cache) */
+	p = dir + n - 3;
+	if (!res_cache_dir_ok(dir))
+		return 0;
+	*p = '\0';
+	if (!res_cache_dir_ok(dir))
+		return 0;
+	*p = '/';
 	if ((size_t)snprintf(out, cap, "%s/%s,%s", dir, repo, num) >= cap)
 		return 0;
 	for (p = out + n + 1; *p; p++)
@@ -11522,11 +11541,14 @@ res_cache_get(const char *repo, const char *num, char *buf, size_t cap)
 	char path[PATH_MAX];
 	struct stat st;
 	ssize_t n;
+	time_t age;
 	int fd;
 
 	if (!res_cache_path(path, sizeof path, repo, num, 0) ||
 	    lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-	    st.st_uid != getuid() || st.st_size >= (off_t)cap)
+	    st.st_uid != (getenv("DCH_TEST_XRAY_UID") ?
+	                  (uid_t)atoi(getenv("DCH_TEST_XRAY_UID")) : getuid()) ||
+	    st.st_size >= (off_t)cap)
 		return 0;
 	if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0)
 		return 0;
@@ -11535,7 +11557,8 @@ res_cache_get(const char *repo, const char *num, char *buf, size_t cap)
 	if (n <= 0)
 		return 0;
 	buf[n] = '\0';
-	return time(NULL) - st.st_mtime < (strcmp(buf, "none") ? 600 : 120);
+	age = time(NULL) - st.st_mtime;	/* a future stamp is not fresh */
+	return age >= 0 && age < (strcmp(buf, "none") ? 600 : 120);
 }
 
 /* tmp + rename; any failure is silent */
