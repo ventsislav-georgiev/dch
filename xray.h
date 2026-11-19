@@ -204,11 +204,11 @@ void xr_ref_written(const char *text, char *out, size_t cap);
 ** (U+061C, U+200E, U+200F, U+2028-U+202E, U+2066-U+2069): its byte length,
 ** else 0. */
 size_t xr_ctl_at(const char *s, size_t n);
-/* #515: a fetch's output's page title (its <title>, else its first "# "
-** heading), clean, within XR_FETCH_TITLE bytes; "" for none. outsz must
-** exceed XR_FETCH_TITLE. */
+/* #515: a fetch's output's page title (its HTML head's <title>, else, when
+** md, its first "# " heading outside fences), clean, within XR_FETCH_TITLE
+** bytes; "" for none. outsz must exceed XR_FETCH_TITLE. */
 #define XR_FETCH_TITLE 120
-void xr_fetch_title(const char *s, size_t n, char *out, size_t outsz);
+void xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz);
 /* --ref's value rule (3.1): 1..256 bytes of UTF-8, no C0, DEL, C1 or bidi
 ** control. */
 int xr_ref_ok(const char *text);

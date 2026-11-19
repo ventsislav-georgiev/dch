@@ -436,7 +436,8 @@ sys.stdout.buffer.write(b'\x1b[32m{"title":"green"}\x1b[0m\n'
 def main():
     run_steps(fixture, test_cli, test_written, test_card,
               test_failed_after_rows, test_card_width, test_card_zwj,
-              test_refs_row_full, test_cap_url_bom, test_fetched, test_read)
+              test_refs_row_full, test_cap_url_bom, test_fetched,
+              test_prefilter_fold, test_read)
 
 
 # ---- #515: a URL the agent fetched resolves from the transcript ------------
@@ -446,7 +447,9 @@ import calendar  # noqa: E402
 USID = "11111111-2222-4333-8444-5555555555c5"
 DEF_KEYS = ["at", "chapter", "live", "offset", "passage", "project", "rule",
             "session", "title"]
-HOSTILE = "\033[31mA\u202eB\u0085C" + "x" * 10240
+# 2 KB: closed within the 3000-scalar output clip (#527: unclosed is none)
+HOSTILE = "\033[31mA\u202eB\u0085C" + "x" * 2048
+LONGHOST = ".".join(["h" * 49] * 4) + ".example.com"  # 211
 
 
 def fixture_fetched():
@@ -490,6 +493,51 @@ def fixture_fetched():
     call("2026-11-06T10:00:00Z", 6, "WebFetch",
          {"url": "https://evil.example.com/", "prompt": "sum"},
          "<title>" + HOSTILE + "</title>")
+    # #527: the title rule's QA 1.113.0 cases
+    for k, url, out in [
+            (7, "https://mdtag.example.com/g", "# HTML Guide\n\nUse the "
+             "`<title>` element to name a page; close it with `</title>`.\n"),
+            (8, "https://cmt.example.com/c",
+             "<!-- <title>Fake</title> --><title>Real</title>"),
+            (9, "https://svg.example.com/s", "<html><head></head><body><svg>"
+             "<title>Icon close</title></svg><h1>Page</h1></body></html>"),
+            (10, "https://fence.example.com/f", "intro\n```sh\n# install deps"
+             "\nnpm i\n```\n# Real Heading\n"),
+            (12, "https://ent.example.com/e", "<title>Don&#8217;t &#8211; "
+             "&#x27;q&#x27; a&nbsp;b &mdash; x&#x202E;y&#27;z&#xFFFFFFFF;"
+             "&hellip;</title>"),
+            (13, "https://zwj.example.com/z", "<title>" + "a" * 112 +
+             "\U0001F469\u200d\U0001F4BB</title>"),
+            (14, "https://mark.example.com/m", "<title>" + "a" * 119 +
+             "e\u0301</title>"),
+            (15, "https://inv.example.com/i",
+             "<title>a\u200bb\ufeffc\U000e0041d\u00ade</title>"),
+            (16, "https://%s/p" % LONGHOST, "<title>Long Host</title>")]:
+        call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
+                                                      "prompt": "sum"}, out)
+    call("2026-11-06T11:00:00Z", 11, "Bash",
+         {"command": "curl -sL https://raw.example.com/install.sh"},
+         "#!/bin/sh\n# Copyright 2026 Someone\necho hi\n")
+    # #528: not a fetch of the URL: another command's word, -o/-O to a file,
+    # two URLs, mixed with a list; a wget to stdout is; ?r=/ is not ?r=
+    for k, (cmd, out) in enumerate((
+            ("rg -n curl README.md; echo https://nf1.example.com/a",
+             "<title>Readme heading</title>"),
+            ("curl -s https://nf2.example.com/a -o a.html && cat README.md",
+             "<title>Project Readme</title>"),
+            ("curl -s https://nf3.example.com/a https://nf3.example.com/b",
+             "<title>Two</title>"),
+            ("wget -O a.html https://nf4.example.com/a", "<title>W</title>"),
+            ("curl -sLo a.html https://nf5.example.com/a", "<title>C</title>"),
+            ("curl -s https://nf6.example.com/a; cat README.md",
+             "<title>Readme again</title>"),
+            ("wget -qO- https://yes.example.com/a", "<title>Wget Out</title>"),
+            ("sudo curl -s https://yes2.example.com/a 2>&1 | head",
+             "<title>Sudo Curl</title>")), 21):
+        call("2026-11-07T10:%02d:00Z" % k, k, "Bash", {"command": cmd}, out)
+    call("2026-11-07T11:00:00Z", 20, "WebFetch",
+         {"url": "https://q.example.com/x?r=/", "prompt": "sum"},
+         "<title>Slash In Query</title>")
     with open(os.path.join(pdir, USID + ".jsonl"), "w") as f:
         for o in lines:
             f.write(json.dumps(o) + "\n")
@@ -563,12 +611,69 @@ def test_fetched():
           and any("mention" in l for l in ls), p.stdout[-500:])
     p, ls, rv = res("https://evil.example.com/")
     t = rv[0]["title"] if rv else None
-    check("#515 a hostile title (ESC, RLO, NEL, 10 KB): clean, capped at "
+    check("#515 a hostile title (ESC, RLO, NEL, 2 KB): clean, capped at "
           "120 bytes on a character",
           t is not None and t.startswith("[31mA B C") and
           not re.search("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f"
                         "\u202a-\u202e\u2066-\u2069]", t) and
           len(t.encode()) == 120, repr(t)[:200])
+    def title(url):
+        rv = res(url)[2]
+        return rv[0]["title"] if len(rv) == 1 else None
+    t = title("https://mdtag.example.com/g")
+    check("#527 a markdown page that mentions `<title>`: its heading", t ==
+          "HTML Guide", t)
+    t = title("https://cmt.example.com/c")
+    check("#527 a <title> in an HTML comment is skipped", t == "Real", t)
+    p, ls, rv = res("https://svg.example.com/s")
+    check("#527 an inline SVG's <title> in the body is no page title",
+          not rv, rv)
+    t = title("https://fence.example.com/f")
+    check("#527 a \"# \" line in a code fence is no heading",
+          t == "Real Heading", t)
+    p, ls, rv = res("https://raw.example.com/install.sh")
+    check("#527 a curl'd script's \"# \" comment is no title (headings "
+          "are WebFetch markdown only)", not rv, rv)
+    t = title("https://ent.example.com/e")
+    check("#527 numeric and named entities decoded, a decoded bidi or "
+          "control blanked, an out-of-range one literal",
+          t == "Don\u2019t \u2013 'q' a b \u2014 x y z&#xFFFFFFFF;\u2026",
+          repr(t))
+    t = title("https://zwj.example.com/z")
+    check("#527 the 120-byte cut leaves no dangling ZWJ",
+          t == "a" * 112 + "\U0001F469", repr(t))
+    t = title("https://mark.example.com/m")
+    check("#527 the 120-byte cut never splits a combining mark from its "
+          "base", t == "a" * 119, repr(t))
+    t = title("https://inv.example.com/i")
+    check("#527 U+200B, U+FEFF, U+00AD and tag characters dropped",
+          t == "abcde", repr(t))
+    rv = res("https://%s/p" % LONGHOST)[2]
+    sub = rv[0]["subtitle"] if rv else ""
+    check("#527 a long host is capped so \" \u00b7 fetched ... in "
+          "<session>\" still fits",
+          sub.startswith(LONGHOST[:60] + "\u2026 \u00b7 fetched ") and
+          sub.endswith(" in xv-uf"), sub)
+    for u, why in (("https://nf1.example.com/a", "rg curl README.md; echo URL"),
+                   ("https://nf2.example.com/a", "curl -o a.html && cat"),
+                   ("https://nf3.example.com/a", "two URLs"),
+                   ("https://nf4.example.com/a", "wget -O file"),
+                   ("https://nf5.example.com/a", "curl -sLo file"),
+                   ("https://nf6.example.com/a", "curl URL; cat README.md")):
+        p, ls, rv = res(u)
+        check("#528 %s: not a fetch, no title" % why,
+              p.returncode == 0 and not rv and ls and
+              ls[-1].get("done") is True, (p.stdout[-400:], rv))
+    for u, t in (("https://yes.example.com/a", "Wget Out"),
+                 ("https://yes2.example.com/a", "Sudo Curl")):
+        p, ls, rv = res(u)
+        check("#528 wget -qO- and sudo curl | head: still a fetch",
+              len(rv) == 1 and rv[0]["title"] == t, rv)
+    p, ls, rv = res("https://q.example.com/x?r=")
+    check("#528: ?r=/ is not ?r=: no title", p.returncode == 0 and not rv, rv)
+    p, ls, rv = res("https://q.example.com/x?r=/")
+    check("#528: ?r=/ matches itself",
+          len(rv) == 1 and rv[0]["title"] == "Slash In Query", rv)
     q = dch("--xray", "xv-cl", "--ref", "#831", "--json")
     qs = [json.loads(l) for l in q.stdout.splitlines()]
     d = [l["definition"] for l in qs if "definition" in l]
@@ -576,6 +681,56 @@ def test_fetched():
           "rule, no resolved line",
           not any("resolved" in l for l in qs) and len(d) == 1 and
           d[0]["rule"] == "D1" and sorted(d[0]) == DEF_KEYS, q.stdout[-400:])
+
+
+def test_prefilter_fold():
+    """#515: a fetched URL with an upper-case path or query: the light scan's
+    prefilter folds case, so it finds all 7 mentions, as --full does."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-5555555555d8"
+    u = "https://pf.example.com/Path/Doc?Key=Val"
+    ts = lambda i, s: "2026-11-01T%02d:%02d:%02dZ" % (10 + i // 60, i % 60, s)
+    lines = [{"type": "user", "cwd": P, "timestamp": ts(0, 0),
+              "message": {"content": "go"}},
+             {"type": "assistant", "timestamp": ts(0, 1), "message": {
+                 "content": [{"type": "tool_use", "id": "f1",
+                              "name": "WebFetch", "input": {"url": u}}]}},
+             {"type": "user", "timestamp": ts(0, 2), "message": {"content": [
+                 {"type": "tool_result", "tool_use_id": "f1",
+                  "content": "<title>PF Title</title>"}]}}]
+    for i in range(1, 49):
+        lines.append({"type": "user", "timestamp": ts(i, 0),
+                      "message": {"content": "ask %d" % i}})
+        lines.append({"type": "assistant", "timestamp": ts(i, 3),
+                      "message": {"content": [{"type": "text", "text":
+                                               "filler words " * 1500}]}})
+        if i % 8 == 0:
+            lines.append({"type": "assistant", "timestamp": ts(i, 5),
+                          "message": {"content": [{"type": "text",
+                                                   "text": "again " + u}]}})
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    with open(os.path.join(hdir, "xv-pf.json"), "w") as f:
+        f.write(json.dumps({"name": "xv-pf", "cwd": P, "end": "exited",
+                            "argv": ["claude"], "started": 1794299400,
+                            "updated": 1794300000, "ended": 1794300000,
+                            "sock_dir": sockdir,
+                            "agent": {"session_id": sid, "cwd": P,
+                                      "config_dir": cfg}}) + "\n")
+    config(None)
+    n = {}
+    for full in (False, True):
+        p = dch("--xray", "xv-pf", "--ref", u, *(["--full"] if full else []),
+                "--json")
+        n[full] = p.stdout.count('"mention"')
+    check("#528 light finds all 7 mentions of an upper-case URL, as --full "
+          "(prefilter fold)", n == {False: 7, True: 7}, n)
 
 
 # ---- #517: a mention says when the agent READ the ref ---------------------
