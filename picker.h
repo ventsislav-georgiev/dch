@@ -22,7 +22,7 @@ struct pkrow
 	char state[32];		/* blocked|working|done|idle; History: its end */
 	char prs[400], cwd[300];
 	long when, merged;	/* last output; History: when it ended */
-	int agents, pinned;
+	int agents, shells, pinned;
 	int remote;		/* host:name (#087): 1, 2 when stale */
 	int live;		/* History: a session of the name runs (#254) */
 };

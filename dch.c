@@ -6980,8 +6980,8 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 ** first) is the shell. The kernel shows foreground and background shells
 ** alike (each a session leader with stdin /dev/null): owner, description
 ** and "background" come from the transcript at `tp` (#482), NULL none. */
-static void
-put_shells(long pid, const char *sid, const char *tp)
+static int
+put_shells(long pid, const char *sid, const char *tp, int show)
 {
 	struct { long pid; time_t t; char id[64], cmd[201]; } sh[64], x;
 	char agent[64], adesc[201], desc[201];
@@ -7035,6 +7035,8 @@ put_shells(long pid, const char *sid, const char *tp)
 			sh[j] = sh[j - 1];
 		sh[j] = x;
 	}
+	if (!show)
+		return ns;	/* the picker's SHELLS count */
 	tmin = ns ? sh[ns - 1].t : 0;	/* newest first: the last is oldest */
 	fputs(",\"shells\":[", stdout);
 	for (i = 0; i < ns; i++)
@@ -7064,6 +7066,7 @@ put_shells(long pid, const char *sid, const char *tp)
 		putchar('}');
 	}
 	putchar(']');
+	return ns;
 }
 
 /* --json (--stop, --restart, --revive): {"name","phase"} as a session
@@ -9933,6 +9936,27 @@ pk_running(const struct pk *p, const char *name)
 	return NULL;
 }
 
+static int xr_live_claude(const struct cmd_info *ci, struct crec *c);
+
+/* The live background shells of a session's Claude, as --ls-json's "shells"
+** lists them; 0 with no Claude. */
+static int
+pk_shells(const char *name)
+{
+	struct cmd_info ci;
+	struct crec c;
+	char sp[1100];
+	int n = 0;
+
+	session_sock_path(name, sp, sizeof sp);
+	if (cmd_query_f(sp, &ci, DCH_CMD_F_STAT) != 0)
+		return 0;
+	if (xr_live_claude(&ci, &c))
+		n = put_shells(c.pid, c.sid, NULL, 0);
+	cmd_info_free(&ci);
+	return n;
+}
+
 /* Every tab's rows afresh: the live sessions as --ls-json reads them, the
 ** ended records as --history does. */
 void
@@ -9993,6 +10017,7 @@ pk_load(struct pk *p)
 		snprintf(w->state, sizeof w->state, "%s", session_state(sl.v[k]));
 		w->when = activity_epoch(sl.v[k]);
 		w->agents = detect_agents(sl.v[k]);
+		w->shells = pk_shells(sl.v[k]);
 		if ((meta = session_meta(sl.v[k], &mep)))
 			(void)dch_meta_prs(meta, w->prs, sizeof w->prs, &w->merged);
 	}
@@ -17953,7 +17978,7 @@ main_run(int argc, char **argv)
 				printf(",\"claude_foreground\":%s",
 				       fg ? "true" : "false");
 			if (c)
-				put_shells(c->pid, c->sid, tp_ok ? tp : NULL);
+				(void)put_shells(c->pid, c->sid, tp_ok ? tp : NULL, 1);
 			/* omitted, not 0, when the master can't answer */
 			if (sz && sz[k][0] >= 0)
 				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",

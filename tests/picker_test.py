@@ -496,6 +496,82 @@ def verbs():
     dch("-k", "--", "-v")
 
 
+def footshells():
+    """17. The footer counts as Prosper's does, "5/13 active · 🤖 2 · dch X"
+    (the sessions working or needing input, over all of them; the agents
+    summed, left out at 0; "- 2 agents -" without UTF-8), and a SHELLS
+    column shows once a session has a live background shell and hides
+    again when none has."""
+    ver = dch("--version").stdout.split()[-1]
+    first = lambda s: s.split("\n")[0].rstrip()
+    ls = lambda: json.loads(dch("--ls-json").stdout)
+    picker("pkf0", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pkf0", lambda s: "active" in first(s))
+    check("footer: no agents, no robot; no shells, no SHELLS column",
+          "\U0001f916" not in first(s) and "agents" not in first(s) and
+          "SHELLS" not in s, s)
+    dch("--keys", "pkf0", "q")
+    dch("--spawn", "pkagents", "--size", "80x24", "sh", "-c",
+        "printf '\\342\\217\\272 main\\n\\342\\227\\257 general-purpose  a\\n"
+        "\\342\\227\\257 general-purpose  b\\n'; sleep 600")
+    wait_live("pkagents", True)
+    picker("pkf1", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pkf1", lambda s: "\U0001f916 2" in first(s))
+    # states move under us: the same footer as a --ls-json just read
+    end = time.time() + 15
+    while True:
+        j = ls()
+        busy = sum(r["state"] in ("working", "blocked") for r in j)
+        want = "%d/%d active \u00b7 \U0001f916 2 \u00b7 dch %s" % (
+            busy, len(j), ver)
+        s = wait_screen("pkf1", lambda s: first(s).endswith(want), 1.0)
+        if first(s).endswith(want) or time.time() > end:
+            break
+    check("footer: busy/total active, the agents summed, the robot 2 cells "
+          "wide, flush right (%s)" % want, first(s).endswith(want) and
+          busy > 0 and len(first(s)) == 99, first(s))
+    dch("--keys", "pkf1", "q")
+    picker("pkf2", "100x30", "NO_COLOR=1", "TERM=dumb")
+    s = wait_screen("pkf2", lambda s: "agents" in first(s))
+    check("footer without UTF-8: '- 2 agents -'", re.search(
+          r"\d+/\d+ active - 2 agents - dch " + re.escape(ver) + "$",
+          first(s)), first(s))
+    dch("--keys", "pkf2", "q")
+    # a Claude with two background shells, as transcript_test fakes one
+    sid = "53353353-3533-4533-8533-533533533533"
+    d = os.path.join(ROOT, "claude-%d" % os.getuid(), "-p", sid, "tasks")
+    os.makedirs(d)
+    dch("--spawn", "pkshell", "--size", "80x24", sys.executable, "-c",
+        "import json,os,subprocess as sp,time\n"
+        "p=os.getpid()\n"
+        "st=sp.run(['/bin/ps','-o','lstart=','-p',str(p)],capture_output=True,"
+        "text=True,env={'LC_ALL':'C','TZ':'UTC'}).stdout.strip()\n"
+        "json.dump({'pid':p,'sessionId':%r,'cwd':'/','procStart':st,"
+        "'version':'2.1.0','kind':'interactive','status':'idle',"
+        "'statusUpdatedAt':1},open(%r%%p,'w'))\n"
+        "for k in ('b1','b2'):\n"
+        "    sp.Popen(['sleep','600'],stdout=open(%r+'/'+k+'.output','ab'),"
+        "stdin=sp.DEVNULL)\n"
+        "time.sleep(600)\n" % (sid, os.path.join(
+            ENV["CLAUDE_CONFIG_DIR"], "sessions", "%d.json"), d))
+    picker("pkf3", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pkf3", lambda s: "SHELLS" in s)
+    hdr = next((l for l in s.split("\n") if "SHELLS" in l), "")
+    cell = lambda l: l[hdr.find("SHELLS"):hdr.find("SHELLS") + 6].strip()
+    got = {m.group(2): cell(l) for l in body(s)
+           for m in [ROW_RE.match(l)] if m}
+    check("SHELLS column shows beside AGENTS: 2 on the row with two live "
+          "shells, blank on the rest (%s)" % got,
+          hdr.find("AGENTS") < hdr.find("SHELLS") and
+          got.get("pkshell") == "2" and
+          [k for k, v in got.items() if v] == ["pkshell"], hdr, s)
+    dch("-k", "pkshell")
+    s = wait_screen("pkf3", lambda s: "SHELLS" not in s, 15.0)
+    check("SHELLS column hides when no row has a shell", "SHELLS" not in s, s)
+    dch("--keys", "pkf3", "q")
+    dch("-k", "pkagents")
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL dch not executable at " + DCH)
@@ -522,7 +598,7 @@ def main():
     check("#252: the first row is the tabs, the count and dch version "
           "at its right edge",
           lines[0].startswith("[Sessions ") and re.search(
-              r"\d+ sessions? \u00b7 dch " + re.escape(ver) + "$",
+              r"\d+/\d+ active \u00b7 dch " + re.escape(ver) + "$",
               lines[0].rstrip()) and lines[0].rstrip().endswith(ver) and
           len(lines[0].rstrip()) == 100, lines[:2])
     check("#252: the frame fills all 30 rows, the hints on the last",
@@ -727,7 +803,7 @@ def main():
     check("narrow: the tabs row leads, whole; the count and version give "
           "way, never overlap (#252)", re.match(
               r"\[Sessions \d+\]( +Sidekicks \d+)?( +History \d+)?"
-              r"( {4,}\d+ sessions? - dch \S+)?$", s.split("\n")[0].rstrip()),
+              r"( {4,}\d+/\d+ active - dch \S+)?$", s.split("\n")[0].rstrip()),
           s.split("\n")[:2])
     check("narrow: no line wider than 40",
           all(len(l) <= 40 for l in s.split("\n")), s)
@@ -936,6 +1012,7 @@ def main():
     dashname()
     zerowidth()
     verbs()
+    footshells()
     return 1 if failures else 0
 
 
