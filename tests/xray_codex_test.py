@@ -844,7 +844,7 @@ def test_fetch():
     for k, (cmd, out) in enumerate((
             ("curl -sL https://cx1.example.com/a", "<title>Codex Curl</title>"),
             ("rg curl notes.md; echo https://cx2.example.com/a",
-             "# Not Fetched"),
+             "<title>Not Fetched</title>"),
             ("curl -s https://cx3.example.com/a https://cx3.example.com/b",
              "<title>Two</title>")), 1):
         body += line(2 * k, "response_item", {
