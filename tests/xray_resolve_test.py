@@ -624,6 +624,7 @@ def test_light(n, m, repo, sha):
 
 GH_FAKE = r"""#!/bin/sh
 echo "$*" >> '%(log)s'
+echo $$ >> '%(pids)s'
 /usr/bin/env >> '%(envlog)s'
 case "$*" in
 *repos/acme/widgets/issues/1234)
@@ -634,10 +635,20 @@ case "$*" in
   echo '{"number":12,"title":"Old thing","state":"closed","kind":"issue"}' ;;
 *repos/acme/widgets/issues/44)
   echo '{"number":45,"title":"Wrong one","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/88)
+  echo '{"number":88,"title":"Odd state","state":"draft","kind":"pull"}' ;;
 *repos/acme/widgets/issues/500)
   echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
 *repos/acme/widgets/issues/600)
   exec /bin/sleep 20 ;;
+*repos/acme/widgets/issues/700)
+  exec /bin/sleep 5 ;;
+*repos/acme/widgets/issues/701)
+  /bin/sleep 2
+  echo '{"number":701,"title":"Slow but sure","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/702)
+  /bin/sleep 0.3
+  echo '{"number":702,"title":"Quick enough","state":"open","kind":"issue"}' ;;
 *) echo 'gh: unexpected' >&2; exit 1 ;;
 esac
 """
@@ -651,17 +662,20 @@ def test_github(m):
     os.makedirs(fb)
     os.makedirs(nob)
     log, envlog = os.path.join(T, "gh.log"), os.path.join(T, "gh.env")
+    pids = os.path.join(T, "gh.pids")
     with open(os.path.join(fb, "gh"), "w") as f:
-        f.write(GH_FAKE % {"log": log, "envlog": envlog})
+        f.write(GH_FAKE % {"log": log, "envlog": envlog, "pids": pids})
     os.chmod(os.path.join(fb, "gh"), 0o755)
     genv = {k: v for k, v in ENV.items() if k != "DCH_NO_GITHUB"}
     cache = os.path.join(T, "ghcache")
     genv.update(PATH=fb, XRES_CANARY="leak", XDG_CACHE_HOME=cache)
     ghd = os.path.join(cache, "dch", "gh")
     n = "xres-gh"
-    spawn_shell(n, repo)
+    r = dch("--spawn", n, "--size", "80x24", "--cwd", repo, "sh", "-c",
+            "echo 'see acme/widgets#700 and acme/widgets#701'; sleep 120")
+    check("%s: spawned" % n, r.returncode == 0, r.stderr)
 
-    def q(text, full=False, env=genv, who=n, keep=False):
+    def q(text, full=True, env=genv, who=n, keep=False):
         open(log, "w").close()
         if not keep:	# every row starts cold, #508 rows keep the cache
             shutil.rmtree(cache, ignore_errors=True)
@@ -674,7 +688,7 @@ def test_github(m):
 
     try:
         r, ls, rv, lg = q("#1234")
-        check("#507 light: a bare #N via the origin remote: an open issue",
+        check("#507: a bare #N via the origin remote: an open issue",
               r.returncode == 0 and len(rv) == 1 and rv[0]["kind"] ==
               "issue" and rv[0]["state"] == "ok" and rv[0]["subtitle"] ==
               "open · acme/widgets#1234" and "resolved" in ls[-2] and
@@ -694,6 +708,19 @@ def test_github(m):
                                     "PATH=" + fb)) and
               not any(e.startswith(("XRES_CANARY", "DCH_", "TMPDIR"))
                       for e in ev), ev)
+        # NIT-UP5: a proxy and a CA bundle reach gh; GH_HOST and co do not
+        pv = {"HTTPS_PROXY": "p1", "HTTP_PROXY": "p2", "NO_PROXY": "p3",
+              "https_proxy": "p4", "http_proxy": "p5", "no_proxy": "p6",
+              "SSL_CERT_FILE": "/c/f", "SSL_CERT_DIR": "/c/d"}
+        os.unlink(envlog)
+        q("#1234", env=dict(genv, **pv, GH_HOST="evil.example",
+                            GH_ENTERPRISE_TOKEN="x", LD_PRELOAD="/x.so"))
+        ev = open(envlog).read().split("\n")
+        check("#521: proxy and CA env reach gh unchanged; GH_HOST, "
+              "GH_ENTERPRISE_TOKEN, LD_PRELOAD do not",
+              all(k + "=" + v in ev for k, v in pv.items()) and
+              not any(e.startswith(("GH_HOST", "GH_ENTERPRISE_TOKEN",
+                                    "LD_PRELOAD")) for e in ev), ev)
         r, ls, rv, lg = q("https://github.com/acme/widgets/pull/77")
         check("#507: a pull URL: a merged pull",
               len(rv) == 1 and rv[0]["kind"] == "pull" and rv[0]["title"] ==
@@ -746,7 +773,8 @@ def test_github(m):
                                "type": "tool_result", "tool_use_id": "b1",
                                "content": out}]}}):
                     f.write(json.dumps(o) + "\n")
-            r, ls, rv, lg = q("#1234", who=cl)
+            q("#1234", who=cl)	# light reads the cache (#522)
+            r, ls, rv, lg = q("#1234", who=cl, full=False, keep=True)
             check("#507 define: a definition the transcript holds: the "
                   "built-in still resolves", any("definition" in l
                   for l in ls) and len(rv) == 1 and
@@ -760,6 +788,11 @@ def test_github(m):
                 ("an invalid owner", "-rf/r#1", genv, n, False),
                 ("an invalid owner in a URL",
                  "https://github.com/-acme/widgets/issues/9", genv, n, False),
+                ("a leading zero, bare", "#0123", genv, n, False),
+                ("a leading zero, o/r", "o/r#012", genv, n, False),
+                ("a leading zero, URL",
+                 "https://github.com/o/r/issues/0012", genv, n, False),
+                ("an unknown state (draft)", "#88", genv, n, True),
                 ("repo#N not the origin's", "gadgets#3", genv, n, False),
                 ("not a repo (no origin)", "#1234", genv, m, False)):
             r, ls, rv, lg = q(text, env=env, who=who)
@@ -870,6 +903,38 @@ def test_github(m):
             os.chown(ent, 12345, 12345)
             r, ls, rv, lg = q("#1234", keep=True)
             check("#508: a foreign-owned entry is ignored", bool(lg), lg)
+        q("#1234")
+        os.utime(ent, (time.time() + 365 * 86400,) * 2)
+        r, ls, rv, lg = q("#1234", keep=True)
+        check("#508: an entry stamped a year ahead is not fresh: gh runs",
+              bool(lg), lg)
+        q("#1234")
+        r, ls, rv, lg = q("#1234", keep=True,
+                          env=dict(genv, DCH_TEST_XRAY_UID="12345"))
+        check("#508: an entry of another uid is ignored (non-root)",
+              bool(lg), lg)
+        q("#1234")
+        os.chmod(ghd, 0o777)
+        r, ls, rv, lg = q("#1234", keep=True)
+        check("#508: a 0777 gh/ is tightened to 0700 and used",
+              not lg and os.stat(ghd).st_mode & 0o777 == 0o700, lg)
+        for label in ("gh", "dch"):
+            shutil.rmtree(cache, ignore_errors=True)
+            tgt = os.path.join(T, "ghcache-dir")
+            shutil.rmtree(tgt, ignore_errors=True)
+            os.makedirs(os.path.join(tgt, "gh"))
+            os.makedirs(os.path.join(cache, "dch"))
+            if label == "gh":
+                os.rmdir(os.path.join(tgt, "gh"))
+                os.symlink(tgt, ghd)
+            else:
+                os.rmdir(os.path.join(cache, "dch"))
+                os.symlink(tgt, os.path.join(cache, "dch"))
+            r, ls, rv, lg1 = q("#1234", keep=True)
+            r, ls, rv, lg2 = q("#1234", keep=True)
+            check("#508: a symlinked %s/: cache skipped, target empty, gh "
+                  "runs each time" % label, lg1 and lg2 and
+                  not [f for _, _, fs in os.walk(tgt) for f in fs], (lg1, lg2))
         for label, env, cfgtxt in (
                 ("xray_github = false", genv, "xray_github = false\n"),
                 ("DCH_NO_GITHUB=1", dict(genv, DCH_NO_GITHUB="1"), None)):
@@ -883,6 +948,61 @@ def test_github(m):
             finally:
                 if cfgtxt:
                     os.unlink(ENV["DCH_CONFIG"])
+        # ---- #522: light never waits for gh; a detached fill warms the cache
+        def idle():
+            """no fill's lock left, no fake gh and no --ref dch running"""
+            ps = subprocess.run(["ps", "-A", "-o", "pid=,command="],
+                                capture_output=True, text=True).stdout
+            alive = []
+            for p in (open(pids).read().split() if os.path.exists(pids)
+                      else []):
+                try:
+                    os.kill(int(p), 0)
+                    alive.append(p)
+                except OSError:
+                    pass
+            return not alive and not any(
+                f.endswith(".lock") for f in (os.listdir(ghd)
+                                              if os.path.isdir(ghd) else [])) \
+                and not [l for l in ps.splitlines()
+                         if DCH in l and "--ref" in l]
+        t0 = time.time()
+        r, ls, rv, lg = q("acme/widgets#700", full=False)
+        dt = time.time() - t0
+        check("#522 light: gh sleeping 5 s: --ref returns in < 1.6 s with "
+              "the mention counted and no resolved line",
+              r.returncode == 0 and dt < 1.6 and not rv and
+              any(l.get("tally", {}).get("count") == 1 for l in ls) and
+              ls[-1].get("done") is True, (dt, [list(l) for l in ls]))
+        check("#522: the hanging fill ends, nothing cached, no gh or dch "
+              "left", wait_for(idle, 10) and
+              not os.path.exists(os.path.join(ghd, "acme,widgets,700")),
+              os.listdir(ghd) if os.path.isdir(ghd) else None)
+        t0 = time.time()
+        r, ls, rv, lg = q("acme/widgets#702", full=False)
+        dt = time.time() - t0
+        check("#522 light: gh answering in 0.3 s: the first --ref shows the "
+              "title, in < 1 s", len(rv) == 1 and
+              rv[0]["title"] == "Quick enough" and dt < 1, (dt, rv))
+        t0 = time.time()
+        r, ls, rv, lg = q("acme/widgets#701", full=False)
+        dt = time.time() - t0
+        check("#522 light: gh answering in 2 s: --ref returns in < 1.6 s "
+              "with no resolved line", not rv and dt < 1.6, (dt, rv))
+        ent = os.path.join(ghd, "acme,widgets,701")
+        filled = wait_for(lambda: os.path.isfile(ent) and idle(), 10)
+        r2, ls2, rv2, lg2 = q("acme/widgets#701", full=False, keep=True)
+        check("#522 light: gh answering in 2 s: after the fill the next "
+              "--ref shows the title from the cache, gh not run again",
+              filled and len(rv2) == 1 and
+              rv2[0]["title"] == "Slow but sure" and not lg2,
+              (filled, rv, rv2, lg2))
+        r, ls, rv, lg = q("acme/widgets#701", full=True)
+        check("#522 --full: still waits for gh and shows the title",
+              len(rv) == 1 and rv[0]["title"] == "Slow but sure" and
+              "resolved" in ls[-2], (rv, lg))
+        check("#522: no stray gh or dch children left", wait_for(idle, 10),
+              open(pids).read() if os.path.exists(pids) else None)
     finally:
         dch("-k", n)
 

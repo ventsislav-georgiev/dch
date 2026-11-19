@@ -229,6 +229,7 @@ struct xr_hit
 	uint64_t turn;		/* the chapter's prompt number (#478), 0 unknown */
 	const char *ttitle;	/* #479: that chapter's title, NULL unknown */
 	const char *who, *tool;	/* a Claude mention's speaker, else NULL */
+	const char *read;	/* #517: the read-type call whose output it is in */
 	const char *title, *passage, *rule;	/* a definition */
 };
 struct xr_sink
@@ -534,6 +535,7 @@ int xr_chapter_print(FILE *f, const char *session, const char *session_id,
 #define XR_RES_LINE    200		/* scalars per line and subtitle */
 #define XR_RES_FILE    (2u << 20)	/* the file cap (v2.1 7.1: 2 MB) */
 #define XR_GIT_MS      3000		/* 8.3: "git timed out after 3 s" */
+#define XR_GH_LIGHT_MS 1200		/* #522: light's wait for a gh fill */
 struct xr_resolved
 {
 	const char *kind, *state;	/* 3.7's enums */

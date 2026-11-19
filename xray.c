@@ -2250,6 +2250,7 @@ struct remit
 	uint64_t turn;		/* the chapter's prompt number, 0 unknown */
 	const char *ttitle;	/* #479: that chapter's title, NULL unknown */
 	const char *who, *tool;	/* user, assistant or tool (its name) */
+	const char *read;	/* #517: a read-type call's (read_call) */
 	uint64_t *ctr;		/* Claude: each mention its own unit */
 	uint64_t unit, row;	/* shell: the block and the row */
 	int left;		/* spans left in the block, -1 no cap */
@@ -2303,6 +2304,7 @@ rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
 	h.ttitle = r->ttitle;
 	h.who = r->who;
 	h.tool = r->tool;
+	h.read = r->read;
 	if (title)
 	{
 		h.title = title;
@@ -4853,6 +4855,8 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	fprintf(m, ",\"offset\":%llu,\"live\":%s,\"project\":",
 	        (unsigned long long)h->off, x->live ? "true" : "false");
 	xr_put_str(m, x->project);
+	fputs(",\"read\":", m);	/* #517: last, the keys before unchanged */
+	put_or_null(m, h->read);
 	fputs("}}\n", m);
 	free(line);
 	if (fclose(m) != 0)
@@ -5485,6 +5489,7 @@ struct xr_claude
 				** ("" for none), else NULL */
 	const char *peersum;	/* a hand-back's summary, else NULL */
 	const char *who, *tool;	/* the record's speaker for a mention */
+	const char *read;	/* #517: its read-type call, else NULL */
 	struct pend pend[XR_PENDING + 1];
 	int npend;
 	char *order[XR_PENDING + 2];	/* pendingOrder, ids may repeat */
@@ -6211,6 +6216,7 @@ rm_claude(struct xr_claude *d, struct remit *r, const char *chapter)
 	r->turn = r->chapter ? ch_turn(d, r->chapter, &r->ttitle) : 0;
 	r->who = d->who;
 	r->tool = d->tool;
+	r->read = d->read;
 	r->ctr = &d->unit;
 	r->left = XR_SPANS;	/* shortcut: 3.6's cap, counted per field group */
 }
@@ -6452,7 +6458,11 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 
 		memset(&sp, 0, sizeof sp);
 		ch_anchor(d, a);
+		/* #517: a Read's output is not scanned (RC_OTHER): its path is
+		** the file it read */
+		d->read = strcmp(name, "Read") ? NULL : "Read";
 		rm_claude(d, &r, a);
+		d->read = NULL;
 		r.text = s;
 		sp.rule = 'F';
 		sp.e = l;
@@ -6644,6 +6654,51 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 	free(r.cov);
 }
 
+/* #517: c's read tool, its output what the agent read: Read, Grep, Glob or
+** NotebookRead (c->name), else a shell command (cmd) one of whose simple
+** commands is a reader (that word); NULL for none */
+static const char *
+read_call(const struct rcall *c)
+{
+	static const char *const tools[] = { "Read", "Grep", "Glob",
+	                                     "NotebookRead", 0 };
+	static const char *const readers[] = { "cat", "head", "tail", "sed",
+	                                       "bat", "rg", "grep", "less", 0 };
+	static const char *const shells[] = { "sh", "bash", "zsh", 0 };
+	const char *cd, *r = NULL;
+	struct sw w;
+	size_t s, e, k;
+	int line, j;
+
+	if (in_list(c->name, tools))
+		return c->name;
+	if (c->kind != RC_BASH || !c->cmd)
+		return NULL;
+	shell_words(c->cmd, c->cl, &w, 0);
+	for (s = 0; w.b && s < w.n && s < SW_MAX && !r; s = e + 1)
+	{
+		for (e = s; e < w.n && e < SW_MAX &&
+		     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
+			;
+		/* Codex's bash -lc <script>: its words joined, the script's run */
+		for (k = cmd_head(&w, s, e, &line, &cd);
+		     k + 2 < e && in_list(base(SWD(&w, k)), shells) &&
+		     SWD(&w, k + 1)[0] == '-' && strchr(SWD(&w, k + 1), 'c');
+		     k = cmd_head(&w, k + 2, e, &line, &cd))
+			;
+		if (k >= e)
+			continue;
+		for (j = 0; readers[j] && strcmp(base(SWD(&w, k)), readers[j]); j++)
+			;
+		/* sed reads only with -n (else it may be editing) */
+		if (readers[j] && (strcmp(readers[j], "sed") ||
+		                   (k + 1 < e && !strncmp(SWD(&w, k + 1), "-n", 2))))
+			r = readers[j];
+	}
+	free(w.b);
+	return r;
+}
+
 static void
 refs_pair(struct xr_claude *d, const char *id, struct rres *rr)
 {
@@ -6676,6 +6731,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 		goto out;
 	d->who = "tool";
 	d->tool = rr->paired && *rr->c.name ? rr->c.name : NULL;
+	d->read = rr->paired ? read_call(&rr->c) : NULL;
 	if (!rr->paired)
 		ch_anchor(d, a);
 	rm_claude(d, &r, rr->paired ? rr->c.chapter : a);
@@ -6724,6 +6780,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 		cr.off = rr->c.off;
 		cr.at = rr->c.at;
 		cr.left = 0;
+		cr.read = NULL;	/* the command's words, not its output */
 		cr.text = ds.cmd;
 		(void)grammar(ds.cmd, ds.cl, XR_CODE, R_CODE, cr.cwd, cov_span, &cr);
 	}
@@ -6733,7 +6790,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 		fetch_def(d, &rr->c, body, bl);
 out:
 	d->who = who;
-	d->tool = NULL;
+	d->tool = d->read = NULL;
 	free(r.cov);
 	if (body != t)
 		free(body);
@@ -7532,7 +7589,7 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 	char *id = k_str(p, pl, A_CALLID, NULL), *w, *b = NULL;
 	int v = j_field(q, 0, "cmd"), k;
 	size_t l, bl = 0;
-	struct rcall *c;
+	struct rcall *c, t;
 
 	if (v < 0)
 		v = j_field(q, 0, "command");
@@ -7555,7 +7612,13 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 			}
 			free(w);
 		}
-	if (id && b && bl <= XR_BASH_MAX && memchr(b, '/', bl) &&
+	memset(&t, 0, sizeof t);
+	t.kind = RC_BASH;
+	t.cmd = b;
+	t.cl = bl;
+	/* a URL to fetch, or a read (#517) */
+	if (id && b && bl <= XR_BASH_MAX &&
+	    (memchr(b, '/', bl) || read_call(&t)) &&
 	    (c = rc_push(d, id, RC_BASH)))
 	{
 		c->cmd = b;
@@ -7566,15 +7629,19 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 	free(id);
 }
 
-/* A Codex output: its call's fetch (#515), then the call forgotten */
+/* A Codex output: its mentions, read if its call read (#517), its call's
+** fetch (#515), then the call forgotten */
 static void
 cx_fetch_out(struct xr_claude *d, const struct json_parser *p, int pl,
              const char *s, size_t n)
 {
 	char *id = k_str(p, pl, A_CALLID, NULL), kb[XR_ID_MAX + 1];
-	struct rcall *c;
+	struct rcall *c = id ? rc_find(d, id_key(id, kb)) : NULL;
 
-	if (id && (c = rc_find(d, id_key(id, kb))))
+	d->read = c ? read_call(c) : NULL;
+	refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
+	d->read = NULL;
+	if (c)
 	{
 		if (s)
 			fetch_def(d, c, s, clip(s, n, XR_OUTPUT_CAP));
@@ -7806,7 +7873,6 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
 		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
 		    : NULL;
-		refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
 		cx_fetch_out(d, p, pl, s, n);
 		free(s);
 	}
@@ -7864,7 +7930,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 
 	d->off = off;
 	d->end = off + len;
-	d->who = d->tool = NULL;
+	d->who = d->tool = d->read = NULL;
 	if (d->want)
 		d->want->off = (long long)off;
 	d->at = -1;
@@ -11417,6 +11483,17 @@ res_origin(const char *cwd, long long until, struct res_run *run, char *out,
 	return xr_gh_repo(run->out, n, out, cap);
 }
 
+/* a cache dir we may trust: a real dir of ours; too open: chmod 0700 */
+static int
+res_cache_dir_ok(const char *d)
+{
+	struct stat st;
+
+	if (lstat(d, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid())
+		return 0;
+	return !(st.st_mode & 077) || chmod(d, 0700) == 0;
+}
+
 /* The disk cache of gh's answers (#508): $XDG_CACHE_HOME/dch/gh/<o>,<r>,<N>
 ** (names hold no ','), 0700 dir, 0600 files, the --jq answer or "none". A
 ** hit must be a regular file of ours, younger than 10 min (a "none": 2). */
@@ -11442,6 +11519,14 @@ res_cache_path(char *out, size_t cap, const char *repo, const char *num,
 	if (mk)
 		(void)mkdir(dir, 0700);
 	n = strlen(dir);
+	/* dch/ and gh/ are checked (a symlink or a foreign dir: no cache) */
+	p = dir + n - 3;
+	if (!res_cache_dir_ok(dir))
+		return 0;
+	*p = '\0';
+	if (!res_cache_dir_ok(dir))
+		return 0;
+	*p = '/';
 	if ((size_t)snprintf(out, cap, "%s/%s,%s", dir, repo, num) >= cap)
 		return 0;
 	for (p = out + n + 1; *p; p++)
@@ -11456,11 +11541,14 @@ res_cache_get(const char *repo, const char *num, char *buf, size_t cap)
 	char path[PATH_MAX];
 	struct stat st;
 	ssize_t n;
+	time_t age;
 	int fd;
+	const char *tu = getenv("DCH_TEST_XRAY_UID");
 
 	if (!res_cache_path(path, sizeof path, repo, num, 0) ||
 	    lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-	    st.st_uid != getuid() || st.st_size >= (off_t)cap)
+	    st.st_uid != (tu ? (uid_t)atoi(tu) : getuid()) ||
+	    st.st_size >= (off_t)cap)
 		return 0;
 	if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0)
 		return 0;
@@ -11469,7 +11557,8 @@ res_cache_get(const char *repo, const char *num, char *buf, size_t cap)
 	if (n <= 0)
 		return 0;
 	buf[n] = '\0';
-	return time(NULL) - st.st_mtime < (strcmp(buf, "none") ? 600 : 120);
+	age = time(NULL) - st.st_mtime;	/* a future stamp is not fresh */
+	return age >= 0 && age < (strcmp(buf, "none") ? 600 : 120);
 }
 
 /* tmp + rename; any failure is silent */
@@ -11490,18 +11579,91 @@ res_cache_put(const char *repo, const char *num, const char *s)
 		(void)unlink(tmp);
 }
 
+/* gh's answer for repo#num into r and the cache by 0 or 1 */
+static int
+res_gh_ask(char *const av[], char *const env[], long long until,
+           struct res_run *run, const char *repo, const char *num,
+           struct xr_resolved *r)
+{
+	int k;
+
+	if (res_run(av, env, until, run) != 0 || run->status < 0)
+		return 0;	/* a timeout or a kill is not cached */
+	k = run->status == 0 && xr_gh_parse(run->out, repo, num, r);
+	res_cache_put(repo, num, k ? run->out : "none");
+	return k;
+}
+
+/* #522: a real gh takes about 0.9 s, so light never waits for it: a
+** detached grandchild (its own session, no tty, stdio on /dev/null, no fd
+** of ours) asks under the full deadline and fills the cache for the next
+** draw. One fill per entry at a time: an O_EXCL "<entry>.lock", stale past
+** 60 s (a fill lasts XR_GIT_MS plus the reap's grace). */
+static void
+res_fill(char *const av[], char *const env[], struct res_run *run,
+         const char *repo, const char *num, struct xr_resolved *r)
+{
+	char path[PATH_MAX], lock[PATH_MAX + 8];
+	struct stat st;
+	long k, max;
+	pid_t pid;
+	int fd;
+
+	if (!res_cache_path(path, sizeof path, repo, num, 1) ||
+	    snprintf(lock, sizeof lock, "%s.lock", path) >= (int)sizeof lock)
+		return;
+	if (lstat(lock, &st) == 0 && time(NULL) - st.st_mtime > 60)
+		(void)unlink(lock);
+	if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
+		return;
+	close(fd);
+	if ((pid = fork()) < 0)
+	{
+		(void)unlink(lock);
+		return;
+	}
+	if (pid > 0)
+	{
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			;
+		return;
+	}
+	if (setsid() < 0 || (pid = fork()) != 0)
+	{
+		if (pid <= 0)	/* setsid or fork failed: no fill holds it */
+			(void)unlink(lock);
+		_exit(0);
+	}
+	if ((fd = open("/dev/null", O_RDWR)) >= 0)
+		for (k = 0; k < 3; k++)
+			(void)dup2(fd, (int)k);
+	/* shortcut: closes fds below 4096 only, a one-shot --ref holds few */
+	max = sysconf(_SC_OPEN_MAX);
+	for (k = 3; k < (max > 0 && max < 4096 ? max : 4096); k++)
+		(void)close((int)k);
+	(void)res_gh_ask(av, env, xr_now_ms() + XR_GIT_MS, run, repo, num, r);
+	(void)unlink(lock);
+	_exit(0);
+}
+
 /* #N, repo#N, o/r#N or an issue/pull URL (o/r#N): `gh api` for its title
 ** and state, read-only, under XR_GIT_MS. The REST issues endpoint answers
 ** for an issue and a pull alike (a pull is an issue with pull_request), so
 ** one call serves a bare #N; --jq keeps the answer to four fields. No gh,
-** no auth, no network, the deadline, not github.com, any odd answer: 0. */
+** no auth, no network, the deadline, not github.com, any odd answer: 0.
+** light (#522) answers from the cache only; a miss starts res_fill and
+** waits up to XR_GH_LIGHT_MS for its entry. */
 static int
-res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
+res_issue(const struct xr_span *sp, const char *cwd, int light,
+          struct xr_resolved *r)
 {
 	static struct res_run run;	/* 68 KB: off the stack */
 	static const char *const keep[] = {"PATH=", "HOME=", "XDG_CONFIG_HOME=",
 		"GH_CONFIG_DIR=", "GH_TOKEN=", "GITHUB_TOKEN=",
-		"DBUS_SESSION_BUS_ADDRESS="};	/* the Linux keyring's */
+		"DBUS_SESSION_BUS_ADDRESS=",	/* the Linux keyring's */
+		/* behind a proxy or a private CA (QA 1.111.0 NIT-UP5) */
+		"HTTPS_PROXY=", "HTTP_PROXY=", "NO_PROXY=", "https_proxy=",
+		"http_proxy=", "no_proxy=", "SSL_CERT_FILE=", "SSL_CERT_DIR="};
 	static char f0[] = "GH_PROMPT_DISABLED=1", f1[] = "GH_NO_UPDATE_NOTIFIER=1",
 	            f2[] = "GH_NO_EXTENSION_UPDATE_NOTIFIER=1", f3[] = "NO_COLOR=1",
 	            f4[] = "GH_PAGER=cat", f5[] = "GH_BROWSER=false",
@@ -11513,7 +11675,7 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 	                   "then \"pull\" else \"issue\" end)}";
 	extern char **environ;
 	const char *t = xr_span_text(sp), *h = strchr(t, '#'), *sl;
-	char gh[PATH_MAX], repo[208], num[16], path[256], *env[24], cb[4096];
+	char gh[PATH_MAX], repo[208], num[16], path[256], *env[32], cb[4096];
 	char *av[] = {gh, a1, a2, a3, a4, a5, a6, a7, path, NULL};
 	char *fix[] = {f0, f1, f2, f3, f4, f5, f6, f7};
 	size_t k, j, e = 0, nl;
@@ -11559,11 +11721,20 @@ res_issue(const struct xr_span *sp, const char *cwd, struct xr_resolved *r)
 				break;
 			}
 	env[e] = NULL;
-	if (res_run(av, env, until, &run) != 0 || run.status < 0)
-		return 0;	/* a timeout or a kill is not cached */
-	k = run.status == 0 && xr_gh_parse(run.out, repo, num, r);
-	res_cache_put(repo, num, k ? run.out : "none");
-	return (int)k;
+	if (light)
+	{
+		/* most gh answers land well inside XR_GH_LIGHT_MS: shown at once */
+		res_fill(av, env, &run, repo, num, r);
+		for (until = xr_now_ms() + XR_GH_LIGHT_MS; xr_now_ms() < until;)
+		{
+			(void)poll(NULL, 0, 50);
+			if (res_cache_get(repo, num, cb, sizeof cb) &&
+			    (!strcmp(cb, "none") || xr_gh_parse(cb, repo, num, r)))
+				return strcmp(cb, "none") != 0;
+		}
+		return 0;
+	}
+	return res_gh_ask(av, env, until, &run, repo, num, r);
 }
 
 /* ---- files (v2.1 7.1, v1 7.3) ---- */
@@ -12056,7 +12227,7 @@ res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 	if (sp->shape == XR_FILE)
 		return res_file(xr_span_text(sp), text, cwd ? cwd : "", light, r);
 	if (sp->shape == XR_ISSUE || sp->shape == XR_PULL)
-		return res_issue(sp, cwd, r);
+		return res_issue(sp, cwd, light, r);
 	return 0;
 }
 
@@ -13543,13 +13714,16 @@ xr_ends_free(struct xr_ends *e)
 	sr_end_free(&e->latest);
 }
 
-/* a older than b: by at when both have one and differ, else the session
-** searched later is older (xr_mapped goes newest first), then the smaller
-** offset */
+/* a older than b, a total order: a timed hit beats an untimed one for both
+** first and latest (so latest asks for the reverse); by at when both have one
+** and differ, else the session searched later is older (xr_mapped goes newest
+** first), then the smaller offset */
 static int
-sr_end_older(const struct xr_end *a, const struct xr_end *b)
+sr_end_older(const struct xr_end *a, const struct xr_end *b, int latest)
 {
-	if (a->at >= 0 && b->at >= 0 && a->at != b->at)
+	if ((a->at >= 0) != (b->at >= 0))
+		return latest ? a->at < 0 : a->at >= 0;
+	if (a->at >= 0 && a->at != b->at)
 		return a->at < b->at;
 	if (a->ord != b->ord)
 		return a->ord > b->ord;
@@ -13585,9 +13759,9 @@ xr_ends_add(struct xr_ends *e, const struct xr_search *s, const char *session,
 		const struct sr_hit *h = sr_shown(s, k);
 		struct xr_end x = { .at = h->at, .off = h->off, .ord = ord };
 
-		if (!e->first.set || sr_end_older(&x, &e->first))
+		if (!e->first.set || sr_end_older(&x, &e->first, 0))
 			sr_end_set(&e->first, h, session, sid, ord);
-		if (!e->latest.set || sr_end_older(&e->latest, &x))
+		if (!e->latest.set || sr_end_older(&e->latest, &x, 1))
 			sr_end_set(&e->latest, h, session, sid, ord);
 	}
 }

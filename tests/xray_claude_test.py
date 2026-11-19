@@ -3107,23 +3107,23 @@ def test_search_scope():
           o["searched"] == 4 and g[2]["project"] == key(O) and
           g[2]["turn_title"] == "the push retry thing again", (rc, o, err))
     # #505: q1 (user, at 11-11) is older than q2 (11-12); q0's assistant
-    # hit has no at, so session order decides and <n>'s own is the newest
+    # hit has no at, and a timed hit beats it for both ends (#519)
     E_KEYS = ["session", "session_id", "turn_title", "at", "chapter", "who",
               "snippet"]
     fl, la = o["first"], o["latest"]
     check("search scope: first/latest across the groups (all: q1 oldest, "
-          "q0 newest), their keys",
+          "q2 newest), their keys",
           fl and la and list(fl) == E_KEYS and list(la) == E_KEYS and
           fl["session"] == "q1" and fl["session_id"] == sid(1) and
           fl["turn_title"] == "why does push retry loop" and
           fl["at"] == 1794391200 and fl["who"] == "user" and
-          fl["chapter"] and la["at"] is None and
-          la["session"] == "q0" and la["who"] == "assistant" and
-          la["snippet"] == "see the Push Retry note", (fl, la))
+          fl["chapter"] and la["at"] == 1794477600 and
+          la["session"] == "q2" and la["who"] == "user" and
+          la["turn_title"] == "the push retry thing again", (fl, la))
     rc, o, err = run("--scope", "project", "--json")
     check("search scope: project's first is q1",
           rc == 0 and o["first"]["session"] == "q1" and
-          o["latest"]["session"] == "q0", (rc, o, err))
+          o["latest"]["session"] == "q1", (rc, o, err))
     for a in ((), ("--scope", "session")):
         rc, o, err = run(*a, "--json")
         check("search scope: %s stays <n>'s one object"
@@ -3144,8 +3144,8 @@ def test_search_scope():
           (r.returncode, r.stdout, r.stderr))
     check("search scope: text ends with one first/latest line",
           out[-1].startswith("first: q1 ") and
-          " user: why does push retry loop / latest: q0 assistant: see the "
-          "Push Retry note" in out[-1], out)
+          " user: why does push retry loop / latest: q2 " in out[-1] and
+          out[-1].endswith(" user: the push retry thing again"), out)
     rc, o, err = run("--scope", "all", "--json",
                      e=dict(env, DCH_XRAY_CAPS="2"))
     check("search scope: the files cap stops it, newest first (q0, then "
@@ -3195,6 +3195,58 @@ def test_search_scope():
               (r.returncode, r.stdout, r.stderr))
 
 
+def test_search_ends_order():
+    """#519: first/latest are a total order: a timed hit beats an untimed one
+    for both, so qe (no hit), qA (08:00), qU (no at), qB (09:00), newest first, give
+    first A and latest B searched from qe and from qB."""
+    S = os.path.join(T, "sends")
+    home = os.path.join(S, "home")
+    cfg = os.path.join(home, ".claude")
+    sockdir = os.path.join(S, "dch-%d" % os.getuid())
+    hdir = os.path.join(S, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for d in (home, hdir):
+        os.makedirs(d)
+    env = dict(ENV, XDG_RUNTIME_DIR=S, XDG_STATE_HOME=os.path.join(S, "state"),
+               HOME=home)
+    sid = lambda k: "44444444-4444-4444-8444-%012d" % k
+    P = "/home/demo/sends"
+    pdir = os.path.join(cfg, "projects", key(P))
+    os.makedirs(pdir)
+    for k, name, at, hit in ((0, "qe", "08:30", 0), (1, "qA", "08:00", 1),
+                             (2, "qU", None, 1), (3, "qB", "09:00", 1)):
+        with open(os.path.join(pdir, sid(k) + ".jsonl"), "w") as f:
+            u = {"type": "user", "cwd": P, "message": {"content": "q"}}
+            if at:
+                u["timestamp"] = "2026-11-10T%s:00Z" % at
+            a = {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "gamma ray" if hit else "none"}]}}
+            # the untimed hit is an assistant line, the timed ones the ask
+            if hit and at:
+                u["message"]["content"] = "gamma ray"
+            for r in ((a,) if hit and not at else (u, a)):
+                f.write(json.dumps(r) + "\n")
+        with open(os.path.join(hdir, name + ".json"), "w") as f:
+            f.write(json.dumps({
+                "name": name, "cwd": P, "end": "exited", "argv": ["claude"],
+                "started": 1794299400, "updated": 1794300010 - k,
+                "ended": 1794300010 - k, "sock_dir": sockdir,
+                "agent": {"session_id": sid(k), "cwd": P,
+                          "config_dir": cfg}}) + "\n")
+    for frm in ("qe", "qB"):
+        r = dch("--xray", frm, "--search", "gamma ray", "--scope", "project",
+                "--json", env=env)
+        try:
+            o = json.loads(r.stdout)
+        except ValueError:
+            o = None
+        check("search ends: first A and latest B with an untimed hit between "
+              "(searched from %s)" % frm,
+              r.returncode == 0 and o and o["first"]["session"] == "qA" and
+              o["latest"]["session"] == "qB",
+              (r.returncode, o and (o["first"], o["latest"]), r.stderr))
+
+
 def test_search_answer():
     """#506: per group (and the one object) exactly one hit, the plain
     assistant text hit with the greatest offset, has "answer": true."""
@@ -3231,7 +3283,7 @@ def test_search_answer():
                         + "\n")
         rec = {"name": "a%d" % k, "cwd": cwd, "end": "exited",
                "argv": ["claude"], "started": 1794299400,
-               "updated": 1794300000 + k, "ended": 1794300000 + k,
+               "updated": 1794300010 - k, "ended": 1794300010 - k,
                "sock_dir": sockdir,
                "agent": {"session_id": sid(k), "cwd": cwd,
                          "config_dir": cfg}}
@@ -4525,6 +4577,7 @@ def main():
         test_responses()
         test_scope()
         test_search_scope()
+        test_search_ends_order()
         test_search_answer()
         test_since()
         test_light_anchors()
