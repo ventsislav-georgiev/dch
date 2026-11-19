@@ -8208,7 +8208,10 @@ pf_add(struct xr_pf *f, const char *t, size_t l)
 	{
 		char c = t[bs + k];
 
-		f->nd[f->n][k] = f->fold && A_UP((unsigned char)c) ? c + 32 : c;
+		/* ranked folded: pf_find's memchr on a folded letter misses the
+		** text's capital (#515 fuzz) */
+		c = f->fold && A_UP((unsigned char)c) ? (char)(c + 32) : c;
+		f->nd[f->n][k] = c;
 		if (pf_rank((unsigned char)c, f->fold) < r)
 			r = pf_rank((unsigned char)c, f->fold), f->at[f->n] = k;
 	}

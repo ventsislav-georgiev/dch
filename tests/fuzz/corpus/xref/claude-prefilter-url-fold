@@ -1,0 +1,33 @@
+{"type":"user","message":{"role":"user","content":"start"}}
+{"type":"assistant","message":{"contetn":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"gh issue view 12"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b1","content":"x"}]},"toolUseResult":{"stdout":"{\"id\":","stderr":"\"12\",\"title\":\"Fix it\"}","interrupted":false}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 0"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 1"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 2"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 3"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 4"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 5"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","tOutside"}, "message": {"content": [{"type": "tool_result", ";ool_use_id": "b3", "is_error": false, "content": "# #832 Outside"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b4", "name": "Bash", "input": {"command": "jira view PROJ-71"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "PROJ-71: A ticket"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "b4", "is_error": er", "cwd": "/home/demo/proj", "timestamp": "2026-11-10T10:00:00Z", "message": {"content": "look at #831 and o/r#7 and PROJ-5"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "gh issue view 831"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "] #831 Fix the build\nbody"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "is_error": false, "content": "# #831 Fix the build\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b2", "name": "Bash", "input": {"command": "gh pr view 7 --json number,title"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "{\"number\":7,\"title\":\"Pull title\",\"url\":\"https://github.com/o/r/Apull/7\"}"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "b2", "is_error": false, "content": "{\"number\":7,\"title\":\"Pull title\",\"url\":\"https://github.com/o/r/pull/7\"}"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b3", "name": "Bash", "input": {"command": "cat ../x.md"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "# #832 Outside"}, "message": {"content": [{"type": "tool_result", ";ool_use_id": "b3", "is_error": false, "content": "# #832 Outside"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b4", "name": "Bash", "input": {"command": "jira view PROJ-71"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "PROJ-71: A ticket"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "b4", "is_error": false, "content": "PROJ-71: A ticket"}]}}
+{"type": "assistant", "message": {"content": [{"type": "server_tool_use", "id": "s1", "name": "web_fetch", "input": {"url": "https://x.org/y"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "s1", "content": "# #872 Server"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "## #833 heading\nsee `src/a.c:3`"}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "nope", "content": "# #false, "content": "PROJ-71: A ticket"}]}}
+{"type": "assistant", "message": {"content": [{"type": "server_tool_use", "id": "s1", "name": "web_fetch", "input": {"url": "https://x.org/y"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_useid": "s1", "content": "# #872 Server"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "## #833 heading\nsee `src/a.c:3`"}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "next":"filler words here and there 6"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 7"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 8"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 9"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 10"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 11"}]}}
