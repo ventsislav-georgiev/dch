@@ -534,6 +534,20 @@ def test_light_file(n, repo, plain):
         check("light #500: %s: no resolved line" % label,
               r.returncode == 0 and not rv and ls and
               ls[-1].get("done") is True, r.stdout[-300:])
+    os.symlink(plain, os.path.join(repo, "outlink"))
+    with open(os.path.join(plain, "there.c"), "w") as f:
+        f.write("t\n")
+    for label, text in (("target missing", "outlink/none.c:1"),
+                        ("target present", "outlink/there.c:1")):
+        for full in (False, True)[:1 + (label == "target missing")]:
+            r, ls, rv = ref(n, text, full=full)
+            check("light #510: a symlinked dir out, %s%s: no line"
+                  % (label, " (--full)" if full else ""),
+                  r.returncode == 0 and not rv and ls and
+                  ls[-1].get("done") is True, r.stdout[-300:])
+    r, ls, rv = ref(n, "src/gone.c:3", full=False)
+    check("light #510: a missing file in the project: still missing",
+          len(rv) == 1 and rv[0]["state"] == "missing", rv)
     r, ls, rv = ref(n, "big.light:1", full=False)
     check("light #500: over 2 MB: ok by stat, not too_large",
           len(rv) == 1 and rv[0]["state"] == "ok", rv)
@@ -697,6 +711,48 @@ def test_github(m):
         check("#507 --full: the issue line too",
               len(rv) == 1 and rv[0]["state"] == "ok" and rv[0]["lines"] == []
               and rv[0]["subtitle"] == "open · acme/widgets#1234", rv)
+        # a definition the transcript holds does not stop the built-in
+        # (QA 1.110.0 NIT-UO7 mdefs: xr_define's `if (d0) goto builtin`)
+        bindir = os.path.join(T, "bin")
+        fdir = os.path.join(T, "fake")
+        for d in (bindir, fdir):
+            os.makedirs(d, exist_ok=True)
+        shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                    os.path.join(bindir, "claude"))
+        os.chmod(os.path.join(bindir, "claude"), 0o755)
+        cl = "xres-ghcl"
+        senv = dict(ENV, FAKE_CLAUDE_DIR=fdir)
+        senv["PATH"] = bindir + ":" + ENV.get("PATH", "/usr/bin:/bin")
+        r = subprocess.run([DCH, "--spawn", cl, "--size", "80x24", "--cwd",
+                            repo, "claude"], capture_output=True, text=True,
+                           timeout=30, env=senv)
+        check("#507 define: a live claude in the origin repo: spawned",
+              r.returncode == 0, r.stderr)
+        try:
+            sdir = os.path.join(HOME, ".claude", "sessions")
+            sid = wait_for(lambda: [j["sessionId"] for j in (
+                json.load(open(os.path.join(sdir, f)))
+                for f in os.listdir(sdir) if f.endswith(".json"))
+                if j["cwd"] == repo] if os.path.isdir(sdir) else None, 10)[0]
+            transcript(sid, repo)
+            out = "# #1234 Fix the widget"
+            with open(os.path.join(HOME, ".claude", "projects", "-x",
+                                   sid + ".jsonl"), "a") as f:
+                for o in ({"type": "assistant", "message": {"content": [
+                              {"type": "tool_use", "id": "b1", "name": "Bash",
+                               "input": {"command": "gh issue view 1234"}}]}},
+                          {"type": "user", "toolUseResult": {"stdout": out},
+                           "message": {"content": [{
+                               "type": "tool_result", "tool_use_id": "b1",
+                               "content": out}]}}):
+                    f.write(json.dumps(o) + "\n")
+            r, ls, rv, lg = q("#1234", who=cl)
+            check("#507 define: a definition the transcript holds: the "
+                  "built-in still resolves", any("definition" in l
+                  for l in ls) and len(rv) == 1 and
+                  rv[0]["state"] == "ok", r.stdout[-600:])
+        finally:
+            dch("-k", cl)
         for label, text, env, who, gh_ran in (
                 ("gh missing", "#1234", dict(genv, PATH=nob), n, False),
                 ("gh exits 1", "#500", genv, n, True),

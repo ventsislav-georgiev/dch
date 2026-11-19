@@ -166,7 +166,13 @@ match(const struct xr_search *s, const char *needle, const char *body,
 	while (b > a && (unsigned char)needle[b - 1] <= ' ')
 		b--;
 	q = b - a >= 4 && needle[a] == '"' && needle[b - 1] == '"';
-	if (a < b && !q && naive(body, n, needle + a, b - a) != SIZE_MAX &&
+	for (i = a; i < b && (unsigned char)needle[i] > ' '; i++)
+		;
+	for (j = b; j > a && (unsigned char)needle[j - 1] > ' '; j--)
+		;
+	/* a first or last word under 3 bytes ends it on a word bound (NIT-UO6) */
+	if (a < b && !q && i - a >= 3 && b - j >= 3 &&
+	    naive(body, n, needle + a, b - a) != SIZE_MAX &&
 	    (m == SIZE_MAX || !ex))
 		abort();	/* the phrase as is: an exact match */
 	if (a == b || q)
