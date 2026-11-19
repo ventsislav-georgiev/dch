@@ -334,7 +334,9 @@ def test_live():
         # #517: a shell call's output is read when its command reads
         with open(p, "a") as f:
             for k, cmd in ((3, ["bash", "-lc", "cat NOTES"]),
-                           (4, ["echo", "issue o/r#41"])):
+                           (4, ["echo", "issue o/r#41"]),
+                           (5, ["bash", "-lc", "cat > f.md <<'EOF'\nx\nEOF\n"
+                                "python3 run.py"])):
                 f.write(line(5 + k, "response_item", {
                     "type": "function_call", "name": "shell",
                     "call_id": "c%d" % k,
@@ -352,6 +354,9 @@ def test_live():
               rd.get("out 3: o/r#41") == "cat" and
               rd.get("out 4: o/r#41", 0) is None,
               (rd, r.stderr))
+        check("#531 --ref on a Codex: bash -lc \"cat > f <<EOF … EOF\\n"
+              "python3 run.py\": the python output read null",
+              rd.get("out 5: o/r#41", 0) is None, (rd, r.stderr))
         rollout(TID, proj, BODY)
 
         # a malformed line, then a truncated last line (no newline)

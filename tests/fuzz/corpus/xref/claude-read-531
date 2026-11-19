@@ -1,0 +1,10 @@
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r0", "name": "Bash", "input": {"command": "bash -lc 'cat NOTES | head' 2>&1"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:0\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "r0", "content": "see src/a.c:0"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r1", "name": "Bash", "input": {"command": "cat > f.md <<'EOF'\nsrc/a.c:1\nEOF\npython3 run.py"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:1\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "r1", "content": "see src/a.c:1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r2", "name": "Bash", "input": {"command": "sed -n -i 's/a/b/p' f; sed --quiet -e 1p -- f >> o"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:2\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "r2", "content": "see src/a.c:2"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r3", "name": "Bash", "input": {"command": "sh -c \"bash -c 'zsh -c \\\"cat f\\\"'\""}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:3\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "r3", "content": "see src/a.c:3"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r4", "name": "Bash", "input": {"command": "cd d && grep -e x -A 3 f 1>/dev/null | tail"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:4\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "r4", "content": "see src/a.c:4"}]}}
