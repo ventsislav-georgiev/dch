@@ -204,6 +204,11 @@ void xr_ref_written(const char *text, char *out, size_t cap);
 ** (U+061C, U+200E, U+200F, U+2028-U+202E, U+2066-U+2069): its byte length,
 ** else 0. */
 size_t xr_ctl_at(const char *s, size_t n);
+/* #515: a fetch's output's page title (its <title>, else its first "# "
+** heading), clean, within XR_FETCH_TITLE bytes; "" for none. outsz must
+** exceed XR_FETCH_TITLE. */
+#define XR_FETCH_TITLE 120
+void xr_fetch_title(const char *s, size_t n, char *out, size_t outsz);
 /* --ref's value rule (3.1): 1..256 bytes of UTF-8, no C0, DEL, C1 or bidi
 ** control. */
 int xr_ref_ok(const char *text);
@@ -660,6 +665,16 @@ int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 ** "tool","turn_title","snippet"}…],"more","partial","why","bytes"};
 ** session_id and project null for "", last_active null for < 0. */
 size_t xr_search_hits(const struct xr_search *s);
+/* --since (#516): fd's turns begun and refs mentioned at or after since
+** (epoch s), read from the end back only as far as since:
+** {"schema":1,"session","since","chapters":[{"chapter","turn_title","at"}…]
+** newest first, the newest 20,"refs":[{"key","shape","text","count",
+** "last_at"}…] by last_at newest first, the newest 30,"more","partial"} and
+** a newline; partial: xr_lim.bytes or xr_lim.ms since t0 stopped the read
+** before it reached since.
+** 0, 1 the write failed, -1 a read or memory failure (nothing written). */
+int xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
+                   const char *session, long long since, long long t0);
 void xr_search_group(FILE *f, const struct xr_search *s, const char *session,
                      const char *session_id, const char *corpus, int live,
                      const char *project, long long last_active,

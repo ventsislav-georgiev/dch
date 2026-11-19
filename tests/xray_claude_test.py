@@ -3315,6 +3315,142 @@ def turn_rows(got, how):
           any(t for t in got["full_t"].values()), (bad, got["full_t"]))
 
 
+def since_put(name, sid, rows):
+    """A History Claude whose transcript is rows of (who, epoch, text)."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", key("/home/demo/proj"))
+    os.makedirs(pdir, exist_ok=True)
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for who, at, text in rows:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
+            f.write(json.dumps({"type": who, "cwd": "/home/demo/proj",
+                                "timestamp": ts, "message": {
+                                    "content": text if who == "user" else
+                                    [{"type": "text", "text": text}]}})
+                    + "\n")
+    history(name, sid, cfg)
+
+
+def test_since():
+    """#516: --since <time> --json, the turns begun and refs mentioned since
+    a time, newest first, 20 chapters and 30 refs at most."""
+    t0 = 1794304800    # 2026-11-10T10:00:00Z
+    rows = []
+    for k in range(25):
+        rows += [("user", t0 + 60 * k, "step %d" % k),
+                 ("assistant", t0 + 60 * k + 1, "see #%d" % (100 + k))]
+        if k == 22:
+            rows.append(("assistant", t0 + 60 * k + 2, "and #100 again"))
+    since_put("xs-a", "51600000-2222-4333-8444-555555555501", rows)
+    since_put("xs-b", "51600000-2222-4333-8444-555555555502",
+              [("user", t0, "list them")] +
+              [("assistant", t0 + 1 + j, "see #%d" % (500 + j))
+               for j in range(35)])
+    now = int(time.time())
+    since_put("xs-c", "51600000-2222-4333-8444-555555555503",
+              [("user", now - 3 * 3600, "old ask"),
+               ("assistant", now - 3 * 3600 + 1, "see #301"),
+               ("user", now - 2 * 3600, "mid ask"),
+               ("assistant", now - 2 * 3600 + 1, "see #302"),
+               ("user", now - 1800, "new ask"),
+               ("assistant", now - 1799, "see #303")])
+
+    def got(n, since):
+        r = dch("--xray", n, "--since", since, "--json")
+        try:
+            return r.returncode, json.loads(r.stdout), r.stdout
+        except ValueError:
+            return r.returncode, None, r.stdout + r.stderr
+
+    def keys(o):
+        return [x["key"] for x in o["refs"]] if o else None
+
+    def titles(o):
+        return [x["turn_title"] for x in o["chapters"]] if o else None
+
+    rc, o, raw = got("xs-a", str(t0 + 3600))
+    check("since: past every turn: empty arrays, more false",
+          rc == 0 and o == {"schema": 1, "session": "xs-a",
+                            "since": t0 + 3600, "chapters": [], "refs": [],
+                            "more": False, "partial": False}, raw)
+    rc, o, raw = got("xs-a", "2026-11-10T10:20:00Z")
+    check("since: mid-session (ISO): only the later turns, newest first",
+          rc == 0 and o["since"] == t0 + 1200 and
+          titles(o) == ["step %d" % k for k in (24, 23, 22, 21, 20)] and
+          [x["at"] for x in o["chapters"]] ==
+          [t0 + 60 * k for k in (24, 23, 22, 21, 20)] and
+          all(x["chapter"] for x in o["chapters"]) and o["more"] is False
+          and o["partial"] is False, raw)
+    check("since: ...only the refs mentioned since, by last_at newest "
+          "first, an old ref mentioned again among them",
+          o and keys(o) == ["issue:#%d" % k for k in
+                            (124, 123, 100, 122, 121, 120)] and
+          o["refs"][2] == {"key": "issue:#100", "shape": "issue",
+                           "text": "#100", "count": 1,
+                           "last_at": t0 + 22 * 60 + 2}, raw)
+    rc2, o2, raw2 = got("xs-a", str(t0 + 1200))
+    check("since: epoch seconds answer as the same time in ISO",
+          rc2 == 0 and raw2 == raw, (raw2, raw))
+    rc, o, raw = got("xs-a", "0")
+    check("since: the chapter cap: the newest 20 turns, more true",
+          rc == 0 and titles(o) == ["step %d" % k for k in range(24, 4, -1)]
+          and len(o["refs"]) == 25 and o["more"] is True and
+          o["partial"] is False, raw)
+    rc, o, raw = got("xs-b", "0")
+    check("since: the ref cap: the newest 30 refs, more true",
+          rc == 0 and titles(o) == ["list them"] and
+          keys(o) == ["issue:#%d" % k for k in range(534, 504, -1)] and
+          o["more"] is True and o["partial"] is False, raw)
+    for since, want in (("1h", ["new ask"]), ("150m", ["new ask", "mid ask"]),
+                        ("1d", ["new ask", "mid ask", "old ask"])):
+        rc, o, raw = got("xs-c", since)
+        check("since: relative %s: the turns since then" % since,
+              rc == 0 and titles(o) == want and
+              keys(o) == ["issue:#%d" % k for k in (303, 302, 301)][
+                  :len(want)] and abs(o["since"] - (now - {
+                      "1h": 3600, "150m": 9000, "1d": 86400}[since])) < 30,
+              raw)
+    msg = ("dch: bad since: epoch seconds, 2026-11-19T10:00:00Z (UTC) or "
+           "<N>m, <N>h, <N>d\n")
+    for bad in ("1w", "-5", "", "2026-11-19T10:00:00", "2026-02-30T00:00:00Z",
+                "2026-11-19 10:00:00Z", "1234567h", "12x", "1h "):
+        r = dch("--xray", "xs-a", "--since", bad, "--json")
+        check("since: a bad time %r exits 2, one line" % bad,
+              r.returncode == 2 and r.stderr == msg and not r.stdout,
+              (r.returncode, r.stdout, r.stderr))
+    r = dch("--xray", "xs-a", "--since", "1h")
+    check("since: no --json is refused, exit 2",
+          r.returncode == 2 and not r.stdout and "--json is required" in
+          r.stderr, (r.returncode, r.stderr))
+    # 40 turns of ~100 KB: since turn 10 is 3 MB back, past the first window
+    pad = "x" * 100000
+    since_put("xs-d", "51600000-2222-4333-8444-555555555504",
+              [r for k in range(40) for r in
+               (("user", t0 + 60 * k, "big %d" % k),
+                ("assistant", t0 + 60 * k + 1, "see #%d %s" % (1000 + k, pad)))])
+    rc, o, raw = got("xs-d", str(t0 + 600))
+    check("since: a time 3 MB back reads back that far: its refs, the "
+          "newest 20 turns",
+          rc == 0 and titles(o) == ["big %d" % k for k in range(39, 19, -1)]
+          and keys(o) == ["issue:#%d" % k for k in range(1039, 1009, -1)]
+          and o["more"] is True and o["partial"] is False, raw[:300])
+    # a lowered byte cap (DCH_XRAY_CAPS' second field) stops the read short
+    r = dch("--xray", "xs-d", "--since", "0", "--json",
+            env=dict(ENV, DCH_XRAY_CAPS="0:500000"))
+    o = json.loads(r.stdout) if r.returncode == 0 else None
+    check("since: the byte cap stops a since older than everything: "
+          "partial, only the newest turns",
+          o and o["partial"] is True and o["more"] is False and
+          titles(o) == ["big %d" % k for k in range(39, 39 - len(
+              o["chapters"]), -1)] and 1 <= len(o["chapters"]) < 10 and
+          keys(o) == ["issue:#%d" % k for k in range(1039, 1039 - len(
+              o["refs"]), -1)], (r.returncode, r.stdout[:300], r.stderr))
+    r = dch("--xray", "xs-a", "--since", "1h", "--search", "x1", "--json")
+    check("since: with another query is bad usage, exit 2",
+          r.returncode == 2 and r.stderr ==
+          "dch: bad usage: --since takes --json only\n", r.stderr)
+
+
 def test_light_anchors():
     """Light --ref reads 1 MiB windows newest first, each by a fresh decoder:
     a mention before its window's first prompt, or under a prompt the full
@@ -4390,6 +4526,7 @@ def main():
         test_scope()
         test_search_scope()
         test_search_answer()
+        test_since()
         test_light_anchors()
         test_light_303()
         test_light_326()

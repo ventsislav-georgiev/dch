@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.112.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.113.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -391,9 +391,10 @@ dch --xray <n> --json                           # a session's chapters (prompts 
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
 dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
-dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] [--no-github] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
 dch --xray <n> --search <text> --scope all --json  # the same over every session with a corpus, hits grouped by session (project: <n>'s project only; no --json: text)
+dch --xray <n> --since 1h --json                # the turns and refs since a time (epoch, ISO 8601 UTC or <N>m/h/d), newest first
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
@@ -1297,10 +1298,11 @@ time. It takes `host:name` and `--json` only; a local name exits 2 (run one
 standard input is a request, as NDJSON:
 - `{"req":N,"argv":["--ref","#831","--full","--json"]}`: the flags after
   `--xray <name>`, `N` from 1 to 2147483647. Only the request forms are
-  taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`),
+  taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`, `--no-github`),
   `--search` (with `--scope`; `["--search","push retry","--scope","project",
   "--json"]`, one answer per request, the bytes `dch --xray <n> --search
-  ... --json` writes on the host), `--chapter` and `--clear`. A request
+  ... --json` writes on the host), `--since` (#516), `--chapter` and
+  `--clear`. A request
   without `--json` is refused, so there is no text answer here. dch checks them by its own rules first; any
   other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
   value is answered `{"req":N,"stderr":"dch: ..."}` and
@@ -1834,8 +1836,20 @@ under the same 3 s deadline and output cap as git, with only `PATH`,
 `GH_PAGER=cat` and no browser. No `gh`, not logged in, no network, the
 deadline, a remote that is not github.com or an answer it cannot read:
 no line and no warning; the mentions stream as always.
-`xray_github = false` (or `DCH_NO_GITHUB=1`, the test suite's guard)
-turns it off (nothing is read or written then).
+Three switches turn it off (nothing is read or written then), and any one
+of them off is off: `xray_github = false` in your config, `DCH_NO_GITHUB=1`
+in the environment of the `dch --xray` process that runs the lookup (a
+supported switch, also the test suite's guard), and `--no-github` on one
+`dch --xray <n> --ref <text> --json` call. `--no-github` is per call: it
+never writes your config. It comes with `--ref` only (`dch: bad usage:
+--no-github comes with --ref` otherwise), and `--requests` takes it in a
+request. For a `host:name`, or a `--requests` request to a host, the flag
+is forwarded and the host skips `gh` for that call; the host's own config
+and environment still apply, so a host with `xray_github = false` or
+`DCH_NO_GITHUB=1` skips it either way. A host of 1.111.0 or older refuses
+the flag, and nothing runs there: `dch: srv: the host's dch does not know
+--no-github` (exit 1; for a request, that line on stderr and an end line
+with `"exit":1,"why":"refused"`).
 Each answer is cached on disk so that every card open or hover does not
 spend your GitHub rate limit: in `$XDG_CACHE_HOME/dch/gh/` (else
 `~/.cache/dch/gh/`; directory 0700, files 0600, one per lowercased
@@ -1979,8 +1993,10 @@ character`, exit 2). ASCII letters match in either case; nothing else folds.
 - **The likely answer (#506).** Every hit ends in `"answer"`, true for one hit
   per group (and for the one object), or none. "What did we decide" wants the
   conclusion, so among the hits by the assistant with no tool (`who`
-  `"assistant"`, `tool` null) it is the one in the newest turn, and within
-  that turn the latest `offset`, nearest the turn's end. A group with no such
+  `"assistant"`, `tool` null) it is the newest one: the greatest `offset`. That
+  is the newest turn's reply nearest its end when that turn has one; when the
+  newest turn's hits are only prompts or tool output, it is an earlier turn's
+  reply (QA 1.111.0 NIT-UP4). A group with no such
   hit has every `answer` false. It is picked by turn order and offset, not by
   position (the whole text ranks first). Without `--json` the line of that
   hit starts with `→ ` in place of its first spaces.
@@ -2112,6 +2128,33 @@ message `--scope` alone also gives with neither `--ref` nor `--search`). Nothing
 traced. On `host:name` it runs on that host's `dch serve`; a host whose dch
 predates `--search` says `dch: <host>: the host's dch does not know --search`
 (exit 1).
+
+`dch --xray <n> --since <time> --json` is a recap for a returning reader: the
+turns begun and the refs mentioned at or after `<time>`, as one JSON object:
+```json
+{"schema":1,"session":"api","since":1795046400,"chapters":[{"chapter":"f1a2:9120","turn_title":"Fix the login test","at":1795047000}],"refs":[{"key":"pull:o/r#41","shape":"pull","text":"o/r#41","count":2,"last_at":1795047300}],"more":false,"partial":false}
+```
+- `<time>` is epoch seconds (`1795046400`), ISO 8601 UTC
+  (`2026-11-19T10:00:00Z`, that shape only), or relative: `<N>m`, `<N>h` or
+  `<N>d` before now. Anything else exits 2 with `dch: bad since: epoch
+  seconds, 2026-11-19T10:00:00Z (UTC) or <N>m, <N>h, <N>d`. `since` is the
+  time as epoch seconds.
+- `chapters`: the turns begun at or after `since`, newest first, the newest
+  20; `chapter` and `turn_title` as in `--search` (`turn_title` null for none).
+- `refs`: the refs mentioned at or after `since` (first or again), by
+  `last_at` newest first, the newest 30; `key`, `shape` and `text` as in the
+  refs list. `count` counts the mentions since `since`, not the session's.
+- `more` is true when either cap cut. `partial` is true when `--search`'s
+  byte or time cap stopped the read before it reached `since`: the answer
+  holds only the newest turns.
+- It reads from the transcript's end back only as far as `since`, so a recent
+  `since` stays fast on a large transcript. Live and ended Claude sessions and
+  live Codex sessions; a shell session answers `dch: no x-ray corpus` (exit 1).
+- `--json` is required (`dch: bad usage: --json is required ...`, exit 2), and
+  it goes with no other query flag (`dch: bad usage: --since takes --json
+  only`). It is a `--requests` request too, its bytes those of the host's own
+  run. On `host:name` it runs on that host, so a relative time uses the
+  host's clock.
 
 `dch --xray <n> --tasks --json` prints the session's task list as JSON lines,
 the way `--ref` prints its lines, and exits 0:
@@ -3410,7 +3453,7 @@ for a local session named that way.
 | `--say` | `--say <n> --json -- <text>` | 660 s |
 | `--xray` | `--xray <n> --json [--clear \| --chapter <anchor>]` | 60 s |
 | `--xray` | `--xray <n> --json --follow [--tasks] [--memory]` (no cap either) | none |
-| `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] --json` | 60 s |
+| `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] [--no-github] --json` | 60 s |
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |
 | `--xray` | `--xray <n> --memory --json` | 60 s |

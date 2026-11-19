@@ -444,6 +444,32 @@ url_kind(const char *s, size_t n, struct xr_span *sp)
 	(void)span_key(sp, XR_URL, s, n, 0);
 }
 
+/* #515: URL text u as a fetch matches it, into o[XR_KEY_MAX + 1]: scheme
+** and host lower-cased, no fragment, a trailing slash none. *host: the
+** host's offset in o (past any user info), its length the return. */
+static size_t
+url_norm(const char *u, char *o, size_t *host)
+{
+	size_t n = strcspn(u, "#"), k, h, a;
+	const char *p = strstr(u, "://");
+
+	if (n > XR_KEY_MAX)
+		n = XR_KEY_MAX;
+	h = p && (size_t)(p - u) < n ? (size_t)(p - u) + 3 : 0;
+	a = h + strcspn(u + h, "/?#");
+	if (a > n)
+		a = n;
+	for (k = 0; k < n; k++)
+		o[k] = k < a && A_UP((unsigned char)u[k]) ? (char)(u[k] + 32) : u[k];
+	if (n && o[n - 1] == '/')
+		n--;
+	o[n] = '\0';
+	for (*host = h, k = h; k < a; k++)
+		if (o[k] == '@')
+			*host = k + 1;
+	return a > *host ? a - *host : 0;
+}
+
 /* U: http(s)://, then anything but space, controls and <>"'`{}|\^; a
 ** trailing .,;:!? and an unbalanced ) or ] trimmed. */
 static size_t
@@ -3426,6 +3452,75 @@ title_of(const char *s, size_t n, char *out)
 	xr_title(s, n | XR_WHOLE, out, XR_TITLE_MAX * 4 + 1);
 }
 
+/* #515: a fetched page's title: s[0..n)'s first <title>…</title>, else its
+** first "# " heading; &amp; &lt; &gt; &quot; &#39; decoded, controls, C1
+** and bidi blanked, blanks collapsed, cut on a UTF-8 boundary at
+** XR_FETCH_TITLE bytes. "" for none. shortcut: "<title " with attributes
+** is no title, a page writes it bare. */
+void
+xr_fetch_title(const char *s, size_t n, char *out, size_t outsz)
+{
+	static const char *const ent[] = { "&amp;", "&lt;", "&gt;", "&quot;",
+	                                   "&#39;", 0 };
+	size_t b, e = 0, i, a, o = 0, k, l;
+	char u[4];
+	int gap = 0;
+	uint32_t c;
+
+	if (!outsz)
+		return;
+	out[0] = '\0';
+	if (outsz <= XR_FETCH_TITLE)
+		return;
+	if ((b = xr_find(s, n, "<title>", 7)) != SIZE_MAX &&
+	    (e = xr_find(s + b + 7, n - b - 7, "</title", 7)) != SIZE_MAX)
+		e += (b += 7);
+	else if (b != SIZE_MAX)	/* a title past the output's clip */
+	{
+		b += 7;
+		e = n;
+	}
+	else
+		for (b = e = 0, i = 0; i < n && b == e; i = e + 1)
+		{
+			for (e = i; e < n && s[e] != '\n'; e++)
+				;
+			b = n - i >= 2 && s[i] == '#' && s[i + 1] == ' ' ? i + 2 : e;
+		}
+	for (i = b; i < e; i += a)
+	{
+		for (k = 0; ent[k] && (e - i < (l = strlen(ent[k])) ||
+		                       memcmp(s + i, ent[k], l)); k++)
+			;
+		if (ent[k])
+		{
+			c = (uint32_t)"&<>\"'"[k];
+			a = strlen(ent[k]);
+		}
+		else if (xr_ctl_at(s + i, e - i))
+		{
+			c = ' ';
+			a = xr_ctl_at(s + i, e - i);
+		}
+		else
+			c = u8_next((const unsigned char *)s + i, e - i, &a);
+		if (u_space(c))
+		{
+			gap = 1;
+			continue;
+		}
+		l = u8_put(u, c);
+		if (o + (gap && o) + l > XR_FETCH_TITLE)
+			break;
+		if (gap && o)
+			out[o++] = ' ';
+		gap = 0;
+		memcpy(out + o, u, l);
+		o += l;
+	}
+	out[o] = '\0';
+}
+
 /* D1 at line k: `^#{1,6} ` and the ref as the first token. */
 static int
 d1(const char *s, const struct olines *o, size_t k, const char *cwd,
@@ -4012,6 +4107,7 @@ struct xr_ent
 	char full[41];
 	uint64_t nunit, lastunit, nrow, lastrow, first;
 	uint64_t last;		/* the newest mention's offset (#262) */
+	long long lastat;	/* its time (#516 --since), -1 unknown */
 	uint64_t h;		/* fnv of key: its slot's home */
 	uint32_t older, newer;	/* its kind's list, by latest mention: entry
 				** + 1, 0 none */
@@ -4256,8 +4352,8 @@ ix_hit(void *ctx, const struct xr_hit *h)
 
 	if (!e)
 		return;
-	if (h->off > e->last)
-		e->last = h->off;
+	if (h->off >= e->last)
+		e->last = h->off, e->lastat = h->at;
 	if (strlen(h->sp->full) > strlen(e->full))
 		snprintf(e->full, sizeof e->full, "%s", h->sp->full);
 	if (h->title)
@@ -4357,6 +4453,11 @@ struct xr_scan
 	uint64_t toff;
 	long long tat;
 	char tch[48];
+	/* #515: the URL's newest fetch: its page title, time, offset, session */
+	char ftitle[XR_TITLE_MAX * 4 + 1], fsess[256];
+	long long fat;
+	uint64_t foff2;
+	int fetched;
 };
 
 long long
@@ -4855,6 +4956,19 @@ term_def(struct xr_scan *x)
 	ln_send(x, m, &b, &bl);
 }
 
+/* #515: h a fetch's definition of x's URL, written another way */
+static int
+fetch_of(const struct xr_scan *x, const struct xr_hit *h)
+{
+	char a[XR_KEY_MAX + 1], b[XR_KEY_MAX + 1];
+	size_t ha, hb;
+
+	return h->title && h->rule && !strcmp(h->rule, "fetch") && h->sp->shape == XR_URL &&
+	       !strncmp(x->key, "url:", 4) &&
+	       (url_norm(xr_span_text(h->sp), a, &ha),
+	        url_norm(x->key + 4, b, &hb), !strcmp(a, b));
+}
+
 static void
 sc_hit(void *ctx, const struct xr_hit *h)
 {
@@ -4863,7 +4977,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	size_t bl;
 	FILE *m;
 
-	if (x->stop || strcmp(h->sp->key, x->key))
+	if (x->stop || (strcmp(h->sp->key, x->key) && !fetch_of(x, h)))
 		return;
 	/* light reads a shell's ring oldest first: a newer block's result puts
 	** out the older one's (recency first, #396); why marks it, the stop
@@ -4883,6 +4997,15 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		uint64_t th = title_hash(h->title);
 		int k;
 
+		if (h->rule && !strcmp(h->rule, "fetch") && (!x->fetched || h->at > x->fat ||
+		    (h->at == x->fat && h->off > x->foff2)))
+		{
+			snprintf(x->ftitle, sizeof x->ftitle, "%s", h->title);
+			snprintf(x->fsess, sizeof x->fsess, "%s", x->session);
+			x->fat = h->at;
+			x->foff2 = h->off;
+			x->fetched = 1;
+		}
 		if (x->olddefs)	/* a newer definition puts out the older ones */
 		{
 			for (k = 0; k < (int)x->hn; k++)
@@ -6350,8 +6473,12 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 	else
 	{
 		refs_card(d, p, in);
-		if (id)
-			(void)rc_push(d, id, RC_CARD);
+		/* #515: a WebFetch keeps its URL (as cmd) for its result's title */
+		if (id && (c = rc_push(d, id, RC_CARD)) && !strcmp(name, "WebFetch") &&
+		    (v = j_field(p, in, "url")) >= 0 &&
+		    p->tok[v].kind == JSON_STRING && (s = j_str(p, v, &l)) &&
+		    l <= XR_KEY_MAX && (c->cmd = strdup(s)))
+			c->cl = l;
 	}
 	d->who = who;
 	d->tool = NULL;
@@ -6461,6 +6588,62 @@ struct rres
 	int paired;
 };
 
+struct one_url
+{
+	struct xr_span sp;
+	int n;
+};
+
+static int
+one_url(void *ctx, const struct xr_span *sp)
+{
+	struct one_url *m = ctx;
+
+	if (!m->n++)
+		m->sp = *sp;
+	return m->n > 1;
+}
+
+/* #515: a fetch's page as its URL's definition (rule "fetch"), its title
+** the output's (xr_fetch_title): c a WebFetch's (cmd its input.url) or a
+** Bash command running curl, wget or xh, with exactly one URL in it */
+static void
+fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
+          size_t ol)
+{
+	static const char *const fetchers[] = { "curl", "wget", "xh", 0 };
+	char title[XR_TITLE_MAX * 4 + 1];
+	struct one_url m;
+	struct remit r;
+	struct sw w;
+	size_t k;
+	int ok = c->kind == RC_CARD;
+
+	if (!c->cmd || (c->kind != RC_CARD && c->kind != RC_BASH))
+		return;
+	if (!ok)
+	{
+		shell_words(c->cmd, c->cl, &w, 0);
+		for (k = 0; w.b && k < w.n && k < SW_MAX && !ok; k++)
+			ok = !w.op[k] && in_list(base(SWD(&w, k)), fetchers);
+		free(w.b);
+	}
+	memset(&m, 0, sizeof m);
+	if (ok)
+		(void)grammar(c->cmd, c->cl, XR_CODE, RU, NULL, one_url, &m);
+	if (m.n != 1 || m.sp.shape != XR_URL)
+		return;
+	xr_fetch_title(out, ol, title, sizeof title);
+	if (!title[0])
+		return;
+	rm_claude(d, &r, c->chapter);
+	r.off = c->off;
+	r.at = c->at;
+	r.text = c->cmd;
+	rm_hit(&r, &m.sp, title, NULL, "fetch");
+	free(r.cov);
+}
+
 static void
 refs_pair(struct xr_claude *d, const char *id, struct rres *rr)
 {
@@ -6546,6 +6729,8 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	}
 	defs_emit(&ds, &r, ds.bash ? &cr : NULL);
 	free(cr.cov);
+	if (!err)
+		fetch_def(d, &rr->c, body, bl);
 out:
 	d->who = who;
 	d->tool = NULL;
@@ -7337,6 +7522,67 @@ cx_user(struct xr_claude *d, const struct json_parser *p, int pl)
 	free(text);
 }
 
+/* #515: a shell call's command (arguments' cmd, or command as a string or
+** its words joined) kept by call_id, for its output's page title
+** (fetch_def decides) */
+static void
+cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
+              const struct json_parser *q)
+{
+	char *id = k_str(p, pl, A_CALLID, NULL), *w, *b = NULL;
+	int v = j_field(q, 0, "cmd"), k;
+	size_t l, bl = 0;
+	struct rcall *c;
+
+	if (v < 0)
+		v = j_field(q, 0, "command");
+	if (v >= 0 && q->tok[v].kind == JSON_STRING)
+		b = j_str(q, v, &bl);
+	else if (v >= 0 && q->tok[v].kind == JSON_ARRAY)
+		for (k = v + 1; k < q->tok[v].next; k = q->tok[k].next)
+		{
+			char *nb;
+
+			if (q->tok[k].kind != JSON_STRING || !(w = j_str(q, k, &l)))
+				continue;
+			if (bl + l + 2 <= XR_BASH_MAX && (nb = realloc(b, bl + l + 2)))
+			{
+				b = nb;
+				if (bl)
+					b[bl++] = ' ';
+				memcpy(b + bl, w, l);
+				b[bl += l] = '\0';
+			}
+			free(w);
+		}
+	if (id && b && bl <= XR_BASH_MAX && memchr(b, '/', bl) &&
+	    (c = rc_push(d, id, RC_BASH)))
+	{
+		c->cmd = b;
+		c->cl = bl;
+		b = NULL;
+	}
+	free(b);
+	free(id);
+}
+
+/* A Codex output: its call's fetch (#515), then the call forgotten */
+static void
+cx_fetch_out(struct xr_claude *d, const struct json_parser *p, int pl,
+             const char *s, size_t n)
+{
+	char *id = k_str(p, pl, A_CALLID, NULL), kb[XR_ID_MAX + 1];
+	struct rcall *c;
+
+	if (id && (c = rc_find(d, id_key(id, kb))))
+	{
+		if (s)
+			fetch_def(d, c, s, clip(s, n, XR_OUTPUT_CAP));
+		rc_drop(d, c);
+	}
+	free(id);
+}
+
 /* function_call's arguments: a JSON object as a generic card (3.6), else
 ** the string as one field. */
 static void
@@ -7351,7 +7597,10 @@ cx_args(struct xr_claude *d, const struct json_parser *p, int pl)
 	memset(&q, 0, sizeof q);
 	if (tokens_max(s, n) <= XR_LINE_TOKENS && dch_json_parse(&q, s) >= 0 &&
 	    q.tok[0].kind == JSON_OBJECT)
+	{
 		refs_card(d, &q, 0);
+		cx_fetch_call(d, p, pl, &q);
+	}
 	else
 		refs_text(d, s, n, XR_FIELD_CAP, XR_CODE);
 	dch_json_free(&q);
@@ -7558,6 +7807,7 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
 		    : NULL;
 		refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
+		cx_fetch_out(d, p, pl, s, n);
 		free(s);
 	}
 	/* reasoning, and any type not listed: a step, no ref (7.4) */
@@ -7958,7 +8208,10 @@ pf_add(struct xr_pf *f, const char *t, size_t l)
 	{
 		char c = t[bs + k];
 
-		f->nd[f->n][k] = f->fold && A_UP((unsigned char)c) ? c + 32 : c;
+		/* ranked folded: pf_find's memchr on a folded letter misses the
+		** text's capital (#515 fuzz) */
+		c = f->fold && A_UP((unsigned char)c) ? (char)(c + 32) : c;
+		f->nd[f->n][k] = c;
 		if (pf_rank((unsigned char)c, f->fold) < r)
 			r = pf_rank((unsigned char)c, f->fold), f->at[f->n] = k;
 	}
@@ -7977,8 +8230,19 @@ pf_build(struct xr_pf *f, const char *key)
 	memset(f, 0, sizeof *f);
 	if (!t++)
 		return 0;
+	if (!strncmp(key, "url:", 4))
+	{
+		/* #515: a fetch of it written another way (url_norm): past the
+		** scheme, no fragment or trailing slash, case folded */
+		size_t hs;
+
+		(void)url_norm(t, b, &hs);
+		h = strstr(b, "://");
+		f->fold = 1;
+		return pf_add(f, h ? h + 3 : b, strlen(h ? h + 3 : b));
+	}
 	if (!strncmp(key, "ticket:", 7) || !strncmp(key, "commit:", 7) ||
-	    !strncmp(key, "url:", 4) || !strncmp(key, "term:", 5))
+	    !strncmp(key, "term:", 5))
 		return pf_add(f, t, strlen(t));
 	if (!strncmp(key, "file:", 5))
 	{
@@ -10647,13 +10911,27 @@ res_hex(const char *s, size_t n)
 	return 1;
 }
 
+/* the picker's short age of epoch second at: now, 22m, 3h, 2d (ago) */
+static void
+res_age(char *o, size_t osz, long long now, long long at)
+{
+	long long d = now > at ? now - at : 0;
+
+	if (d < 60)
+		snprintf(o, osz, "now");
+	else
+		snprintf(o, osz, "%lld%s ago", d < 3600 ? d / 60 : d < 86400
+		         ? d / 3600 : d / 86400, d < 3600 ? "m" : d < 86400 ? "h"
+		         : "d");
+}
+
 int
 xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 {
 	const char *f[4], *ls[64];
 	size_t fl[4], ll[64], i = 0, k, nl = 0;
 	char who[1200], age[32];
-	long long at = 0, d;
+	long long at = 0;
 
 	for (k = 0; k < 3; k++)
 	{
@@ -10679,14 +10957,7 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 		at = at * 10 + (f[2][k] - '0');
 	}
 	xr_title(f[3], fl[3], r->title, sizeof r->title);
-	/* the picker's short age: now, 22m, 3h, 2d */
-	d = now > at ? now - at : 0;
-	if (d < 60)
-		snprintf(age, sizeof age, "now");
-	else
-		snprintf(age, sizeof age, "%lld%s ago", d < 3600 ? d / 60 : d < 86400
-		         ? d / 3600 : d / 86400, d < 3600 ? "m" : d < 86400 ? "h"
-		         : "d");
+	res_age(age, sizeof age, now, at);
 	k = (size_t)snprintf(who, sizeof who, "%.*s \xc2\xb7 %s \xc2\xb7 %.7s",
 	                     (int)(fl[1] < 800 ? fl[1] : 800), f[1], age, f[0]);
 	res_text(r->subtitle, who, k < sizeof who ? k : sizeof who - 1,
@@ -11796,6 +12067,35 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 	return res_ref(sp, text, cwd, live, 0, r);
 }
 
+/* #515: sp's URL as its newest fetch showed it: kind url, the page title,
+** "<host> · fetched <age> in <session>"; 0 when no fetch defined it */
+static int
+url_res(const struct xr_scan *x, const struct xr_span *sp,
+        struct xr_resolved *r)
+{
+	char u[XR_KEY_MAX + 1], age[40] = "", sub[XR_KEY_MAX + 400];
+	size_t h, hl;
+	int k;
+
+	if (!x->fetched)
+		return 0;
+	hl = url_norm(xr_span_text(sp), u, &h);
+	if (x->fat >= 0)
+	{
+		age[0] = ' ';
+		res_age(age + 1, sizeof age - 1, time(NULL), x->fat);
+	}
+	k = snprintf(sub, sizeof sub, "%.*s \xc2\xb7 fetched%s in %s", (int)hl,
+	             u + h, age, x->fsess);
+	res_text(r->subtitle, sub, k < (int)sizeof sub ? (size_t)k
+	         : sizeof sub - 1, XR_RES_LINE);
+	snprintf(r->title, sizeof r->title, "%s", x->ftitle);
+	r->kind = "url";
+	r->state = "ok";
+	r->nlines = 0;
+	return 1;
+}
+
 /* light: a commit or an issue/pull, only an ok one (#502, #507: no noise);
 ** a file by stat alone, ok or missing (#500) */
 static void
@@ -11813,7 +12113,8 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 	if (x->cancel || x->out_full || !(r = malloc(sizeof *r)))
 		return;
 	/* a resolver that answered without a state gives no line */
-	if (res_ref(sp, text, cwd, live, light, r) && r->state &&
+	if ((sp->shape == XR_URL ? url_res(x, sp, r)
+	     : res_ref(sp, text, cwd, live, light, r)) && r->state &&
 	    (!light || !strcmp(r->state, "ok") ||
 	     !strcmp(r->state, "missing")) && (m = ln_open(&b, &bl)))
 	{
@@ -11848,17 +12149,20 @@ void
 xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
                  const char *text, const char *cwd, int live)
 {
-	if (x->full)
+	if (x->full && sp->shape != XR_URL)	/* a URL's: after every file */
 		res_scan(x, sp, text, cwd, live, 0);
 }
 
+/* #515: a URL from its newest fetch's definition, light and --full, any
+** session, never the network */
 void
 xr_scan_light(struct xr_scan *x, const struct xr_span *sp, const char *text,
               const char *cwd, int live)
 {
-	if (!x->full && live && (sp->shape == XR_COMMIT || sp->shape == XR_FILE ||
-	                         sp->shape == XR_ISSUE || sp->shape == XR_PULL))
-		res_scan(x, sp, text, cwd, live, 1);
+	if (sp->shape == XR_URL || (!x->full && live &&
+	    (sp->shape == XR_COMMIT || sp->shape == XR_FILE ||
+	     sp->shape == XR_ISSUE || sp->shape == XR_PULL)))
+		res_scan(x, sp, text, cwd, live, !x->full);
 }
 
 /* ---- --search (#297): where a word or phrase was said ---------------------- */
@@ -13370,6 +13674,144 @@ xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 	xr_ends_free(&e);
 	fputs("}\n", f);
 	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
+}
+
+/* ---- --since (#516): what came up since a time ---------------------------- */
+
+#define XS_CHAPTERS 20
+#define XS_REFS 30
+
+struct xr_since
+{
+	long long since;
+	struct xr_index *x;
+	struct xr_sink to;
+};
+
+/* a mention at or after since goes to the index, the rest are older */
+static void
+xs_hit(void *ctx, const struct xr_hit *h)
+{
+	struct xr_since *s = ctx;
+
+	if (!h->title && h->at >= s->since)
+		s->to.hit(s->to.ctx, h);
+}
+
+static int
+xs_newest(const void *pa, const void *pb)
+{
+	const struct xr_ent *a = *(const struct xr_ent *const *)pa;
+	const struct xr_ent *b = *(const struct xr_ent *const *)pb;
+
+	if (a->lastat != b->lastat)
+		return a->lastat > b->lastat ? -1 : 1;
+	return a->last > b->last ? -1 : a->last < b->last;
+}
+
+/* A chapter with a time before since: every newer turn is in the window. */
+static int
+xs_reached(const struct xr_chapters *ch, long long since)
+{
+	size_t i;
+
+	for (i = 0; i < ch->n; i++)
+	{
+		const struct xr_chapter *c = xr_chapter_at(ch, i);
+
+		if (c && c->at >= 0 && c->at < since)
+			return 1;
+	}
+	return 0;
+}
+
+int
+xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
+               const char *session, long long since, long long t0)
+{
+	struct xr_since s = { since, NULL, { NULL, NULL } };
+	struct xr_sink k = { xs_hit, &s };
+	struct xr_claude *d = NULL;
+	const struct xr_chapters *ch = NULL;
+	const struct xr_ent **v = NULL;
+	uint64_t win = XR_CHUNK < xr_lim.bytes ? XR_CHUNK : xr_lim.bytes;
+	size_t i, n = 0, out = 0;
+	int more = 0, rc = -1, partial = 0;
+
+	/* newest first: a window of the file's end, four times as big each
+	** round, till it holds a turn begun before since or the whole file;
+	** --search's caps (3.8) stop it short, partial */
+	for (;;)
+	{
+		xr_claude_free(d);
+		xr_index_free(s.x);
+		if (!(d = xr_claude_new()) || !(s.x = xr_index_new()))
+			goto out;
+		if (codex)
+			xr_claude_codex(d);
+		xr_index_sink(s.x, &s.to);
+		xr_claude_refs(d, &k, ino, NULL, NULL);
+		if (xr_claude_window(d, fd, size, win) < 0)
+			goto out;
+		ch = xr_claude_chapters(d);
+		if (win >= size || xs_reached(ch, since))
+			break;
+		if (win >= xr_lim.bytes || xr_now_ms() - t0 >= xr_lim.ms)
+		{
+			partial = 1;
+			break;
+		}
+		win = win > size / 4 ? size : win * 4;
+		if (win > xr_lim.bytes)
+			win = xr_lim.bytes;
+	}
+	fputs("{\"schema\":1,\"session\":", f);
+	xr_put_str(f, session);
+	fprintf(f, ",\"since\":%lld,\"chapters\":[", since);
+	for (i = ch->n; i-- > 0;)
+	{
+		const struct xr_chapter *c = xr_chapter_at(ch, i);
+
+		/* a cut window's first turn began before it: not a turn begun */
+		if (!c || c->at < since || (partial && !i && c->partial))
+			continue;
+		if (out == XS_CHAPTERS)
+		{
+			more = 1;
+			break;
+		}
+		fputs(out++ ? ",{\"chapter\":" : "{\"chapter\":", f);
+		xr_put_str(f, c->anchor);
+		fputs(",\"turn_title\":", f);
+		put_or_null(f, c->title[0] ? c->title : NULL);
+		fprintf(f, ",\"at\":%lld}", c->at);
+	}
+	fputs("],\"refs\":[", f);
+	if (s.x->n && !(v = malloc(s.x->n * sizeof *v)))
+		goto out;
+	for (i = 0; i < s.x->n; i++)
+		if (s.x->v[i].key && s.x->v[i].nunit)
+			v[n++] = &s.x->v[i];
+	if (n)
+		qsort(v, n, sizeof *v, xs_newest);
+	more |= n > XS_REFS;
+	for (i = 0; i < n && i < XS_REFS; i++)
+	{
+		fputs(i ? ",{\"key\":" : "{\"key\":", f);
+		xr_put_str(f, v[i]->key);
+		fprintf(f, ",\"shape\":\"%s\",\"text\":", xr_shape_name[v[i]->shape]);
+		xr_put_str(f, strchr(v[i]->key, ':') + 1);
+		fprintf(f, ",\"count\":%llu,\"last_at\":%lld}",
+		        (unsigned long long)ix_count(s.x, v[i]), v[i]->lastat);
+	}
+	fprintf(f, "],\"more\":%s,\"partial\":%s}\n", more ? "true" : "false",
+	        partial ? "true" : "false");
+	rc = fflush(f) == 0 && !ferror(f) ? 0 : 1;
+out:
+	free(v);
+	xr_claude_free(d);
+	xr_index_free(s.x);
+	return rc;
 }
 
 size_t

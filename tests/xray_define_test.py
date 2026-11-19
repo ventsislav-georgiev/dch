@@ -436,7 +436,147 @@ sys.stdout.buffer.write(b'\x1b[32m{"title":"green"}\x1b[0m\n'
 def main():
     run_steps(fixture, test_cli, test_written, test_card,
               test_failed_after_rows, test_card_width, test_card_zwj,
-              test_refs_row_full, test_cap_url_bom)
+              test_refs_row_full, test_cap_url_bom, test_fetched)
+
+
+# ---- #515: a URL the agent fetched resolves from the transcript ------------
+
+import calendar  # noqa: E402
+
+USID = "11111111-2222-4333-8444-5555555555c5"
+DEF_KEYS = ["at", "chapter", "live", "offset", "passage", "project", "rule",
+            "session", "title"]
+HOSTILE = "\033[31mA\u202eB\u0085C" + "x" * 10240
+
+
+def fixture_fetched():
+    """xv-uf, an ended Claude: WebFetch with a <title>, one with a markdown
+    heading, a curl, a URL fetched twice, a hostile title, a URL only said."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    lines = []
+
+    def call(ts, k, name, inp, out):
+        lines.append({"type": "assistant", "timestamp": ts,
+                      "message": {"content": [{"type": "tool_use",
+                                               "id": "u%d" % k, "name": name,
+                                               "input": inp}]}})
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"stdout": out} if name == "Bash"
+                      else {}, "message": {"content": [
+                          {"type": "tool_result", "tool_use_id": "u%d" % k,
+                           "content": out}]}})
+
+    lines.append({"type": "user", "cwd": P, "timestamp":
+                  "2026-11-01T10:00:00Z", "message": {"content":
+                  "read the docs; never fetch https://never.example.com/n"}})
+    call("2026-11-01T10:01:00Z", 1, "WebFetch",
+         {"url": "https://docs.example.com/guide", "prompt": "sum"},
+         "<html><head><title>The  Guide &amp; &lt;more&gt; &quot;x&quot; "
+         "&#39;y&#39;</title></head><body># Not this</body></html>")
+    call("2026-11-01T10:02:00Z", 2, "WebFetch",
+         {"url": "https://md.example.org/a", "prompt": "sum"},
+         "intro line\n# Markdown Heading\nbody")
+    call("2026-11-01T10:03:00Z", 3, "Bash",
+         {"command": "curl -sL https://curl.example.net/p | head"},
+         "<!doctype html><title>Curl Page</title>")
+    call("2026-11-02T10:00:00Z", 4, "WebFetch",
+         {"url": "https://twice.example.com/x", "prompt": "sum"},
+         "<title>Old Title</title>")
+    call("2026-11-05T10:00:00Z", 5, "WebFetch",
+         {"url": "https://twice.example.com/x", "prompt": "sum"},
+         "<title>New Title</title>")
+    call("2026-11-06T10:00:00Z", 6, "WebFetch",
+         {"url": "https://evil.example.com/", "prompt": "sum"},
+         "<title>" + HOSTILE + "</title>")
+    with open(os.path.join(pdir, USID + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": "xv-uf", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": USID, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-uf.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def test_fetched():
+    fixture_fetched()
+    config(None)
+
+    def res(r, full=False):
+        p = dch("--xray", "xv-uf", "--ref", r, *(["--full"] if full else []),
+                "--json")
+        try:
+            ls = [json.loads(l) for l in p.stdout.splitlines()]
+        except ValueError:
+            ls = []
+        rv = [l["resolved"] for l in ls if "resolved" in l]
+        return p, ls, rv
+
+    def age(iso):
+        d = int(time.time()) - calendar.timegm(time.strptime(
+            iso, "%Y-%m-%dT%H:%M:%SZ"))
+        return "%dd ago" % (d // 86400)
+
+    p, ls, rv = res("https://docs.example.com/guide")
+    check("#515 WebFetch <title>: kind url, the title entity-decoded, "
+          "\"<host> \u00b7 fetched <age> in <session>\", just before done",
+          len(rv) == 1 and rv[0] == {
+              "kind": "url", "state": "ok",
+              "title": "The Guide & <more> \"x\" 'y'",
+              "subtitle": "docs.example.com \u00b7 fetched %s in xv-uf"
+              % age("2026-11-01T10:01:00Z"), "lines": []} and
+          "resolved" in ls[-2] and ls[-1].get("done") is True,
+          (p.stdout[-700:], p.stderr))
+    defs = [l["definition"] for l in ls if "definition" in l]
+    check("#515: the fetch is the URL's definition, rule fetch",
+          [(d.get("rule"), d.get("title")) for d in defs] ==
+          [("fetch", "The Guide & <more> \"x\" 'y'")], defs)
+    p, ls, rv = res("HTTPS://Docs.Example.COM/guide/#intro")
+    check("#515: scheme and host case, a fragment, a trailing slash: the "
+          "same URL", len(rv) == 1 and rv[0]["title"].startswith("The Guide")
+          and rv[0]["subtitle"].startswith("docs.example.com \u00b7"), rv)
+    p, ls, rv = res("https://md.example.org/a", full=True)
+    check("#515 a markdown heading (--full too): its first \"# \" line",
+          len(rv) == 1 and rv[0]["title"] == "Markdown Heading" and
+          rv[0]["subtitle"].startswith("md.example.org \u00b7 fetched "),
+          (p.stdout[-500:], rv))
+    p, ls, rv = res("https://curl.example.net/p")
+    check("#515 curl: the command's one URL, its output's <title>",
+          len(rv) == 1 and rv[0]["title"] == "Curl Page" and
+          rv[0]["subtitle"] == "curl.example.net \u00b7 fetched %s in xv-uf"
+          % age("2026-11-01T10:03:00Z"), rv)
+    p, ls, rv = res("https://twice.example.com/x")
+    check("#515 fetched twice: the newest wins, its age",
+          len(rv) == 1 and rv[0]["title"] == "New Title" and
+          rv[0]["subtitle"] == "twice.example.com \u00b7 fetched %s in xv-uf"
+          % age("2026-11-05T10:00:00Z"), rv)
+    p, ls, rv = res("https://never.example.com/n")
+    check("#515 a URL never fetched: no resolved line, done",
+          p.returncode == 0 and not rv and ls and ls[-1].get("done") is True
+          and any("mention" in l for l in ls), p.stdout[-500:])
+    p, ls, rv = res("https://evil.example.com/")
+    t = rv[0]["title"] if rv else None
+    check("#515 a hostile title (ESC, RLO, NEL, 10 KB): clean, capped at "
+          "120 bytes on a character",
+          t is not None and t.startswith("[31mA B C") and
+          not re.search("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f"
+                        "\u202a-\u202e\u2066-\u2069]", t) and
+          len(t.encode()) == 120, repr(t)[:200])
+    q = dch("--xray", "xv-cl", "--ref", "#831", "--json")
+    qs = [json.loads(l) for l in q.stdout.splitlines()]
+    d = [l["definition"] for l in qs if "definition" in l]
+    check("#515: other kinds' JSON unchanged: #831's definition keys and "
+          "rule, no resolved line",
+          not any("resolved" in l for l in qs) and len(d) == 1 and
+          d[0]["rule"] == "D1" and sorted(d[0]) == DEF_KEYS, q.stdout[-400:])
+
 
 
 def test_card_width():

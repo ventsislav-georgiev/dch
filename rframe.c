@@ -615,15 +615,60 @@ xray_budget(const char *s)
 	return !s[k] && k && v >= 50 && v <= 300 ? v : -1;
 }
 
+/* --since's time (#516) as epoch seconds, now for the relative forms; -1
+** for anything else: epoch seconds (1 to 12 digits), <N>m, <N>h or <N>d
+** (N 1 to 6 digits) before now (0 at the earliest), or ISO 8601 UTC YYYY-MM-DDTHH:MM:SSZ. */
+long long
+xray_since(const char *s, long long now)
+{
+	static const char iso[] = "9999-99-99T99:99:99Z";
+	static const int mdays[] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30,
+	                             31 };
+	int v[6] = { 0 }, k, i, j;
+	long long n = 0, y, m, days;
+
+	for (k = 0; s[k] >= '0' && s[k] <= '9' && k < 13; k++)
+		n = n * 10 + s[k] - '0';
+	if (k && k <= 12 && !s[k])
+		return n;
+	if (k && k <= 6 && s[k] && strchr("mhd", s[k]) && !s[k + 1])
+	{
+		n *= s[k] == 'm' ? 60 : s[k] == 'h' ? 3600 : 86400;
+		return n < now ? now - n : 0;
+	}
+	/* the ISO shape: a digit where it has '9', else its own byte */
+	if (strlen(s) != sizeof iso - 1)
+		return -1;
+	for (i = 0, j = 0; iso[i]; i++)
+		if (iso[i] == '9' && s[i] >= '0' && s[i] <= '9')
+			v[j] = v[j] * 10 + s[i] - '0';
+		else if (iso[i] == '9' || s[i] != iso[i])
+			return -1;
+		else
+			j += j < 5;
+	if (v[0] < 1970 || v[1] < 1 || v[1] > 12 || v[2] < 1 ||
+	    v[2] > mdays[v[1] - 1] || (v[1] == 2 && v[2] == 29 &&
+	    (v[0] % 4 || (v[0] % 100 == 0 && v[0] % 400))) || v[3] > 23 ||
+	    v[4] > 59 || v[5] > 59)
+		return -1;
+	/* days since 1970-01-01 (Howard Hinnant's days_from_civil) */
+	y = v[0] - (v[1] <= 2);
+	m = v[1] > 2 ? v[1] - 3 : v[1] + 9;
+	days = 365 * y + y / 4 - y / 100 + y / 400 + (153 * m + 2) / 5 + v[2] -
+	       1 - 719468;
+	return days * 86400 + v[3] * 3600 + v[4] * 60 + v[5];
+}
+
 /* --xray (spec #832 v3.2.1 4.4): the name right after the verb, then 3.1's
 ** flags in any order, each once: --json, required (the view is the
 ** client's own, as --requests is); one of --follow, --ref <text>,
 ** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
-** (#322) and --clear, but --follow takes --tasks and --memory (#446);
+** (#322), --since <time> (#516) and --clear, but --follow takes --tasks and
+** --memory (#446);
 ** --scope with --ref or --search (#501), --full
-** and --budget-ms only with --ref. A value is the next element even when it
+** and --budget-ms only with --ref, as --no-github (#518). A value is the next element even when it
 ** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
-** (an anchor may hold ':'). The --ref
+** (an anchor may hold ':'), --since's time too (#516). The --ref
 ** text's byte and grammar rules are xray.c's, which the Windows client does
 ** not build: dch serve checks them (ctl_request), the dch client before
 ** it sends. --follow has no timeout and no cap. */
@@ -634,11 +679,13 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	static const char *const opt[] = { "--json", "--follow", "--clear",
 	                                   "--full", "--ref", "--chapter",
 	                                   "--scope", "--budget-ms", "--search",
-	                                   "--tasks", "--memory" };
+	                                   "--tasks", "--memory", "--since",
+	                                   "--no-github" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
 	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256,
-	       X_TASKS = 512, X_MEMORY = 1024 };
-	const char *val[9] = { NULL };
+	       X_TASKS = 512, X_MEMORY = 1024, X_SINCE = 2048,
+	       X_NOGH = 4096 };
+	const char *val[12] = { NULL };
 	unsigned seen = 0, k, one;
 	int i;
 
@@ -650,9 +697,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 11 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 13 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 11)
+		if (k == 13)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -663,16 +710,17 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 			return ctl_no(why, cap, "%s twice", opt[k]);
 		seen |= 1u << k;
 		kind[i] = CK_FLAG;
-		if (k >= 4 && k <= 8)
+		if ((k >= 4 && k <= 8) || k == 11)
 		{
 			if (++i >= argc)
 				return ctl_no(why, cap, "%s needs a value", opt[k]);
 			val[k] = argv[i];
+			/* --since's ISO time holds ':', as an anchor may */
 			kind[i] = k == 6 || k == 7 ? CK_VALUE : CK_TEXT;
 		}
 	}
 	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
-	              X_TASKS | X_MEMORY);
+	              X_TASKS | X_MEMORY | X_SINCE);
 	if (seen & X_FOLLOW)	/* the stream carries them (#446) */
 		one &= ~(unsigned)(X_TASKS | X_MEMORY);
 	if (!(seen & X_JSON))
@@ -685,6 +733,8 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	if (seen & (X_FULL | X_BUDGET) && !(seen & X_REF))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");
+	if (seen & X_NOGH && !(seen & X_REF))
+		return ctl_no(why, cap, "--no-github comes with --ref");
 	if (seen & X_SCOPE && !(seen & (X_REF | X_SEARCH)))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");
@@ -697,6 +747,8 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	if (val[8] && !xray_search_ok(val[8]))
 		return ctl_no(why, cap, "bad search: 2 to 200 bytes, no control "
 		              "character");
+	if (val[11] && xray_since(val[11], 0) < 0)
+		return ctl_no(why, cap, XRAY_SINCE_BAD);
 	return seen & X_FOLLOW ? CTL_FOREVER | CTL_NOCAP : 0;
 }
 

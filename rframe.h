@@ -118,6 +118,9 @@ int xray_scope_ok(const char *s);
 int xray_anchor_ok(const char *s);
 int xray_budget(const char *s);
 int xray_search_ok(const char *s);
+long long xray_since(const char *s, long long now);
+#define XRAY_SINCE_BAD "bad since: epoch seconds, 2026-11-19T10:00:00Z " \
+                       "(UTC) or <N>m, <N>h, <N>d"
 int name_ok(const char *s);
 
 extern char g_ts[];	/* the tailscale CLI, after ts_find; "" none */
