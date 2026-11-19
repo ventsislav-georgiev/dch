@@ -7026,9 +7026,11 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 			continue;	/* a shell's child, or gone */
 		x.pid = tree[i];
 		x.cmd[0] = '\0';
-		if ((v = proc_argv(x.pid)))
+		if (show && (v = proc_argv(x.pid)))	/* the count needs no argv */
+		{
 			shell_command(v, x.cmd, sizeof x.cmd);
-		free(v);
+			free(v);
+		}
 		/* newest first; the same second, the higher pid */
 		for (j = ns++; j > 0 && (sh[j - 1].t < x.t ||
 		     (sh[j - 1].t == x.t && sh[j - 1].pid < x.pid)); j--)
