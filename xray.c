@@ -3789,6 +3789,97 @@ d4(const char *s, const struct olines *o, size_t k, const char *cmd,
 	return 1;
 }
 
+struct one_ref
+{
+	struct xr_span sp;
+	int n;			/* distinct keys seen */
+};
+
+static int
+one_ref(void *ctx, const struct xr_span *sp)
+{
+	struct one_ref *x = ctx;
+
+	if (!x->n++)
+		x->sp = *sp;
+	else if (!strcmp(sp->key, x->sp.key))
+		x->n--;
+	return x->n > 1;
+}
+
+/* #534: line [ls, le) a lead-in: at most 120 bytes, naming one ref (*sp,
+** offsets in s) and ending in ':' (blanks, '*' and '_' after it count as
+** the end); the ':''s offset, else 0. */
+static size_t
+lead_in(const char *s, size_t ls, size_t le, const char *cwd,
+        struct xr_span *sp)
+{
+	struct one_ref x;
+
+	if (le - ls > 120)
+		return 0;
+	while (le > ls && s[le - 1] && strchr(" \t\r*_", s[le - 1]))
+		le--;
+	if (le == ls || s[le - 1] != ':')
+		return 0;
+	x.n = 0;
+	(void)grammar(s + ls, le - 1 - ls, XR_PLAIN, R_ANCHOR, cwd, one_ref, &x);
+	if (x.n != 1)
+		return 0;
+	*sp = x.sp;
+	sp->s += ls;
+	sp->e += ls;
+	return le - 1;
+}
+
+/* D5 at line k (#534): a lead-in ("Decision for you (OQ-185):"), its title
+** the line up to the ':', its passage the non-blank lines after it, up to
+** 6, to a blank line, a heading or the next lead-in; with none no
+** definition. The weakest rule: defs_find keeps it only for a key no other
+** rule defines. */
+static int
+d5(const char *s, const struct olines *o, size_t k, const char *cwd,
+   struct dres *d)
+{
+	size_t t = o->ls[k], c, j, h, got = 0, pl = 0;
+	char pb[XR_PASSAGE * 4 + 8];
+	struct xr_span sp;
+
+	if (!(c = lead_in(s, t, o->le[k], cwd, &d->sp)))
+		return 0;
+	for (j = k + 1; j < o->n && got < 6 && pl < sizeof pb - 8; j++)
+	{
+		const char *ln = s + o->ls[j];
+		size_t l = o->le[j] - o->ls[j];
+
+		if (o->fence[j])
+			continue;
+		for (h = 0; h < l && h < 7 && ln[h] == '#'; h++)
+			;
+		if (blank(ln, l) || (h && h < 7 && h < l && ln[h] == ' ') ||
+		    lead_in(s, o->ls[j], o->le[j], cwd, &sp))
+			break;
+		if (l > sizeof pb - 8 - pl)
+			l = sizeof pb - 8 - pl;
+		if (pl)
+			pb[pl++] = '\n';
+		memcpy(pb + pl, ln, l);
+		pl += l;
+		got++;
+	}
+	if (!got)
+		return 0;	/* a ':' line with no body after it */
+	while (t < c && s[t] && strchr(" \t*_", s[t]))
+		t++;
+	title_of(s + t, c - t, d->title);
+	if (!d->title[0])
+		return 0;
+	pl = u8_cut(pb, pl);
+	d->passage = passage_of(pb, pl);
+	d->rule = "D5";
+	return 1;
+}
+
 static const char *const A_IDF[] = { "id", "number", "entry_id", "key", "iid",
                                      0 };
 static const char *const A_TITLEF[] = { "title", "heading", "summary", "name",
@@ -4121,19 +4212,48 @@ d3(const struct dsrc *s, struct dset *ds)
 		}
 }
 
+/* t into ds, its key into seen; 0 for a 4th distinct key of one shape (#4:
+** a listing), t's passage freed */
+static int
+dkeep(struct dset *ds, struct dres *t, char (*seen)[3][XR_KEY_MAX + 16],
+      int *nseen)
+{
+	struct dres *d;
+	int sh = t->sp.shape, i;
+
+	for (i = 0; i < nseen[sh] && strcmp(seen[sh][i], t->sp.key); i++)
+		;
+	if (i == nseen[sh] && nseen[sh] == 3)
+	{
+		free(t->passage);
+		return 0;
+	}
+	if (i == nseen[sh])
+		memcpy(seen[sh][nseen[sh]++], t->sp.key, sizeof t->sp.key);
+	if (ds->n < XR_DEFS && (d = dpush(ds)))
+		*d = *t;
+	else
+		free(t->passage);
+	return 1;
+}
+
 /* Every definition of one paired block, at most XR_DEFS (v2.1 3.6). D1/D4
 ** are decided while streaming: a 4th distinct key of one shape is a listing
 ** (#4) and ends the scan with none, so a block costs O(lines) and at most
-** XR_DEFS kept results whatever its size. */
+** XR_DEFS kept results whatever its size. D5 (#534) is kept aside, under
+** its own #4, and added last for the keys no other rule defined. */
 static void
 defs_find(const struct dsrc *s, struct dset *ds)
 {
 	struct olines o;
-	size_t k;
-	char seen[6][3][XR_KEY_MAX + 16];
-	int nseen[6] = {0}, x;
+	struct dset ld;
+	struct dres *d;
+	size_t k, n0, i;
+	char seen[6][3][XR_KEY_MAX + 16], lseen[6][3][XR_KEY_MAX + 16];
+	int nseen[6] = {0}, nlseen[6] = {0}, x, lnone = 0;
 
 	memset(ds, 0, sizeof *ds);
+	memset(&ld, 0, sizeof ld);
 	if (s->failed || ((x = s->cmd ? excluded(s->cmd, s->cl, s->cwd) : X_NONE) &&
 	                  !(x & X_SUB)))
 		return;		/* #5; #1, #3, #4 (only in a $(…): D3 still runs) */
@@ -4142,30 +4262,29 @@ defs_find(const struct dsrc *s, struct dset *ds)
 	{
 		for (k = 0; k < o.n; k++)
 		{
-			struct dres t, *d;
-			int sh, i;
+			struct dres t;
 
 			memset(&t, 0, sizeof t);
-			if (o.fence[k] || (!d1(s->out, &o, k, s->cwd, &t) &&
-			    !d4(s->out, &o, k, s->cmd, s->cl, s->cwd, &t)))
+			if (o.fence[k])
 				continue;	/* #2: nothing in a fence */
-			sh = t.sp.shape;
-			for (i = 0; i < nseen[sh] && strcmp(seen[sh][i], t.sp.key); i++)
-				;
-			if (i == nseen[sh] && nseen[sh] == 3)
+			if (d1(s->out, &o, k, s->cwd, &t) ||
+			    d4(s->out, &o, k, s->cmd, s->cl, s->cwd, &t))
 			{
-				/* #4: more than 3 distinct D1/D4 keys of one shape;
-				** D2 and D3 still apply (ruling Q7) */
-				free(t.passage);
-				dfree(ds);
-				break;
+				if (!dkeep(ds, &t, seen, nseen))
+				{
+					/* #4: more than 3 distinct D1/D4 keys of one
+					** shape; D2 and D3 still apply (ruling Q7) */
+					dfree(ds);
+					dfree(&ld);
+					break;
+				}
 			}
-			if (i == nseen[sh])
-				memcpy(seen[sh][nseen[sh]++], t.sp.key, sizeof t.sp.key);
-			if (ds->n < XR_DEFS && (d = dpush(ds)))
-				*d = t;
-			else
-				free(t.passage);
+			else if (!lnone && d5(s->out, &o, k, s->cwd, &t) &&
+			         !dkeep(&ld, &t, lseen, nlseen))
+			{
+				dfree(&ld);
+				lnone = 1;
+			}
 		}
 	}
 	olines_free(&o);
@@ -4174,6 +4293,19 @@ defs_find(const struct dsrc *s, struct dset *ds)
 		   s->cmd, s->cl, s->cwd, ds);
 	if (s->bash && s->cmd && !s->noexit && ds->n < XR_DEFS)
 		d3(s, ds);
+	/* D5 the weakest: any other rule's definition of its key wins */
+	for (n0 = ds->n, k = 0; k < ld.n; k++)
+	{
+		for (i = 0; i < n0 && (ds->v[i].sp.shape != ld.v[k].sp.shape ||
+		                       strcmp(ds->v[i].sp.key, ld.v[k].sp.key)); i++)
+			;
+		if (i == n0 && ds->n < XR_DEFS && (d = dpush(ds)))
+		{
+			*d = ld.v[k];
+			ld.v[k].passage = NULL;
+		}
+	}
+	dfree(&ld);
 }
 
 /* A block's definitions to the sink, each with its anchor as one mention
@@ -4225,6 +4357,7 @@ struct xr_ent
 	int ndefs;
 	uint64_t defh[XR_DEFS];
 	char *title;
+	int weak;		/* title from D5 (#534) */
 };
 
 #define XR_HASH 8192		/* slots, > 2 x XR_KEYS */
@@ -4459,7 +4592,7 @@ ix_hit(void *ctx, const struct xr_hit *h)
 {
 	struct xr_index *x = ctx;
 	struct xr_ent *e = ix_get(x, h->sp);
-	int k;
+	int k, weak;
 
 	if (!e)
 		return;
@@ -4478,10 +4611,13 @@ ix_hit(void *ctx, const struct xr_hit *h)
 			e->defh[e->ndefs++] = th;
 		if (!e->ndefs)
 			e->ndefs = 1;	/* defined: never 0 past the cap */
-		if ((t = strdup(h->title)))
+		/* the newest definition's; a D5 one never over another rule's */
+		weak = h->rule && !strcmp(h->rule, "D5");
+		if ((!weak || !e->title || e->weak) && (t = strdup(h->title)))
 		{
 			free(e->title);
-			e->title = t;	/* the newest definition's */
+			e->title = t;
+			e->weak = weak;
 		}
 		return;
 	}

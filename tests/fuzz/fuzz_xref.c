@@ -1,6 +1,6 @@
 /* libFuzzer target: X-ray refs (#135, XR2a): the grammar and its normalizer,
 ** --ref's value rule and parse, and the Claude and shell decoders with the
-** refs sinks installed (D1-D4, the index, a full --ref scan). Every byte is
+** refs sinks installed (D1-D5, the index, a full --ref scan). Every byte is
 ** hostile: the corpus is whatever the session wrote.
 **
 ** Input: byte 0's low 2 bits pick the path, the rest is its input.
