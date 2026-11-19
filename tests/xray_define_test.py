@@ -446,7 +446,9 @@ import calendar  # noqa: E402
 USID = "11111111-2222-4333-8444-5555555555c5"
 DEF_KEYS = ["at", "chapter", "live", "offset", "passage", "project", "rule",
             "session", "title"]
-HOSTILE = "\033[31mA\u202eB\u0085C" + "x" * 10240
+# 2 KB: closed within the 3000-scalar output clip (#527: unclosed is none)
+HOSTILE = "\033[31mA\u202eB\u0085C" + "x" * 2048
+LONGHOST = ".".join(["h" * 49] * 4) + ".example.com"  # 211
 
 
 def fixture_fetched():
@@ -490,6 +492,31 @@ def fixture_fetched():
     call("2026-11-06T10:00:00Z", 6, "WebFetch",
          {"url": "https://evil.example.com/", "prompt": "sum"},
          "<title>" + HOSTILE + "</title>")
+    # #527: the title rule's QA 1.113.0 cases
+    for k, url, out in [
+            (7, "https://mdtag.example.com/g", "# HTML Guide\n\nUse the "
+             "`<title>` element to name a page; close it with `</title>`.\n"),
+            (8, "https://cmt.example.com/c",
+             "<!-- <title>Fake</title> --><title>Real</title>"),
+            (9, "https://svg.example.com/s", "<html><head></head><body><svg>"
+             "<title>Icon close</title></svg><h1>Page</h1></body></html>"),
+            (10, "https://fence.example.com/f", "intro\n```sh\n# install deps"
+             "\nnpm i\n```\n# Real Heading\n"),
+            (12, "https://ent.example.com/e", "<title>Don&#8217;t &#8211; "
+             "&#x27;q&#x27; a&nbsp;b &mdash; x&#x202E;y&#27;z&#xFFFFFFFF;"
+             "&hellip;</title>"),
+            (13, "https://zwj.example.com/z", "<title>" + "a" * 112 +
+             "\U0001F469\u200d\U0001F4BB</title>"),
+            (14, "https://mark.example.com/m", "<title>" + "a" * 119 +
+             "e\u0301</title>"),
+            (15, "https://inv.example.com/i",
+             "<title>a\u200bb\ufeffc\U000e0041d\u00ade</title>"),
+            (16, "https://%s/p" % LONGHOST, "<title>Long Host</title>")]:
+        call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
+                                                      "prompt": "sum"}, out)
+    call("2026-11-06T11:00:00Z", 11, "Bash",
+         {"command": "curl -sL https://raw.example.com/install.sh"},
+         "#!/bin/sh\n# Copyright 2026 Someone\necho hi\n")
     with open(os.path.join(pdir, USID + ".jsonl"), "w") as f:
         for o in lines:
             f.write(json.dumps(o) + "\n")
@@ -563,12 +590,49 @@ def test_fetched():
           and any("mention" in l for l in ls), p.stdout[-500:])
     p, ls, rv = res("https://evil.example.com/")
     t = rv[0]["title"] if rv else None
-    check("#515 a hostile title (ESC, RLO, NEL, 10 KB): clean, capped at "
+    check("#515 a hostile title (ESC, RLO, NEL, 2 KB): clean, capped at "
           "120 bytes on a character",
           t is not None and t.startswith("[31mA B C") and
           not re.search("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f"
                         "\u202a-\u202e\u2066-\u2069]", t) and
           len(t.encode()) == 120, repr(t)[:200])
+    def title(url):
+        rv = res(url)[2]
+        return rv[0]["title"] if len(rv) == 1 else None
+    t = title("https://mdtag.example.com/g")
+    check("#527 a markdown page that mentions `<title>`: its heading", t ==
+          "HTML Guide", t)
+    t = title("https://cmt.example.com/c")
+    check("#527 a <title> in an HTML comment is skipped", t == "Real", t)
+    p, ls, rv = res("https://svg.example.com/s")
+    check("#527 an inline SVG's <title> in the body is no page title",
+          not rv, rv)
+    t = title("https://fence.example.com/f")
+    check("#527 a \"# \" line in a code fence is no heading",
+          t == "Real Heading", t)
+    p, ls, rv = res("https://raw.example.com/install.sh")
+    check("#527 a curl'd script's \"# \" comment is no title (headings "
+          "are WebFetch markdown only)", not rv, rv)
+    t = title("https://ent.example.com/e")
+    check("#527 numeric and named entities decoded, a decoded bidi or "
+          "control blanked, an out-of-range one literal",
+          t == "Don\u2019t \u2013 'q' a b \u2014 x y z&#xFFFFFFFF;\u2026",
+          repr(t))
+    t = title("https://zwj.example.com/z")
+    check("#527 the 120-byte cut leaves no dangling ZWJ",
+          t == "a" * 112 + "\U0001F469", repr(t))
+    t = title("https://mark.example.com/m")
+    check("#527 the 120-byte cut never splits a combining mark from its "
+          "base", t == "a" * 119, repr(t))
+    t = title("https://inv.example.com/i")
+    check("#527 U+200B, U+FEFF, U+00AD and tag characters dropped",
+          t == "abcde", repr(t))
+    rv = res("https://%s/p" % LONGHOST)[2]
+    sub = rv[0]["subtitle"] if rv else ""
+    check("#527 a long host is capped so \" \u00b7 fetched ... in "
+          "<session>\" still fits",
+          sub.startswith(LONGHOST[:60] + "\u2026 \u00b7 fetched ") and
+          sub.endswith(" in xv-uf"), sub)
     q = dch("--xray", "xv-cl", "--ref", "#831", "--json")
     qs = [json.loads(l) for l in q.stdout.splitlines()]
     d = [l["definition"] for l in qs if "definition" in l]

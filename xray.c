@@ -3454,17 +3454,127 @@ title_of(const char *s, size_t n, char *out)
 	xr_title(s, n | XR_WHOLE, out, XR_TITLE_MAX * 4 + 1);
 }
 
-/* #515: a fetched page's title: s[0..n)'s first <title>…</title>, else its
-** first "# " heading; &amp; &lt; &gt; &quot; &#39; decoded, controls, C1
-** and bidi blanked, blanks collapsed, cut on a UTF-8 boundary at
-** XR_FETCH_TITLE bytes. "" for none. shortcut: "<title " with attributes
-** is no title, a page writes it bare. */
+/* s[i..n) starts with p, ASCII case folded */
+static int
+ci_at(const char *s, size_t n, size_t i, const char *p)
+{
+	size_t l = strlen(p);
+
+	return n - i >= l && !strncasecmp(s + i, p, l);
+}
+
+/* #527: [*b, *e) the <title> of s[0..n)'s HTML head, 1; else 0. Only when
+** s looks like HTML (a doctype, <html or <head before it, or nothing but
+** blanks and tags), never in a comment, <script>, <style> or <svg>, nor
+** past </head or <body; an unclosed one is none. */
+static int
+ft_html(const char *s, size_t n, size_t *b, size_t *e)
+{
+	static const char *const skip[][2] = {
+		{ "<!--", "-->" }, { "<script", "</script" },
+		{ "<style", "</style" }, { "<svg", "</svg" } };
+	const char *p;
+	size_t i, j, k;
+	int html = 0, lead = 1;
+
+	for (i = 0; i < n; i++)
+	{
+		if (s[i] != '<')
+		{
+			lead &= s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r');
+			continue;
+		}
+		for (k = 0; k < 4 && !ci_at(s, n, i, skip[k][0]); k++)
+			;
+		if (ci_at(s, n, i, "</head") || ci_at(s, n, i, "<body"))
+			return 0;
+		if (ci_at(s, n, i, "<title>"))
+		{
+			*b = i + 7;
+			j = xr_find(s + *b, n - *b, "</title", 7);
+			*e = *b + j;
+			return (html || lead) && j != SIZE_MAX;
+		}
+		html |= ci_at(s, n, i, "<!doctype") || ci_at(s, n, i, "<html") ||
+		        ci_at(s, n, i, "<head");
+		j = k < 4 ? xr_find(s + i, n - i, skip[k][1], strlen(skip[k][1])) : 0;
+		if (j == SIZE_MAX || !(p = memchr(s + i + j, '>', n - i - j)))
+			return 0;
+		i = (size_t)(p - s);
+	}
+	return 0;
+}
+
+/* #527: [*b, *e) the first "# " heading of markdown s[0..n), outside
+** fences (an unclosed one makes the rest code), 1; else 0 */
+static int
+ft_heading(const char *s, size_t n, size_t *b, size_t *e)
+{
+	size_t i, fl = 0;
+	char fc = 0;
+	int in = 0;
+
+	for (i = 0; i < n; i = *e + 1)
+	{
+		for (*e = i; *e < n && s[*e] != '\n'; ++*e)
+			;
+		if (in)
+			in = !fence_close(s, n, i, fc, fl);
+		else if (fence_open(s, n, i, &fc, &fl))
+			in = 1;
+		else if (*e - i > 2 && s[i] == '#' && s[i + 1] == ' ')
+		{
+			*b = i + 2;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* #527: s[0..n) a numeric character reference (&#NNN; or &#xHH;) to a
+** scalar: its length, *c the scalar; else 0 (it stays literal) */
+static size_t
+ft_num(const char *s, size_t n, uint32_t *c)
+{
+	size_t x = n > 2 && (s[2] == 'x' || s[2] == 'X'), i;
+	uint32_t v = 0;
+	int d;
+
+	if (n < 4 || s[0] != '&' || s[1] != '#')
+		return 0;
+	for (i = 2 + x; i < n && i < 11; i++)
+	{
+		d = A_DIG(s[i]) ? s[i] - '0' : x && (s[i] | 32) >= 'a' &&
+		    (s[i] | 32) <= 'f' ? (s[i] | 32) - 'a' + 10 : -1;
+		if (d < 0)
+			break;
+		v = v * (x ? 16 : 10) + (uint32_t)d;
+	}
+	if (i == 2 + x || i >= n || s[i] != ';' || !v || v > 0x10ffff ||
+	    (v >= 0xd800 && v <= 0xdfff))
+		return 0;
+	*c = v;
+	return i + 1;
+}
+
+/* #515: a fetched page's title: the <title> of s[0..n)'s HTML head
+** (ft_html), else, when s is markdown (md: a WebFetch's), its first "# "
+** heading outside fences; numeric and common named entities decoded,
+** controls, C1 and bidi blanked, U+200B, U+FEFF, U+00AD and tag characters
+** dropped, blanks collapsed, cut at XR_FETCH_TITLE bytes on a grapheme
+** (#418). "" for none. shortcut: "<title " with attributes is no title, a
+** page writes it bare. */
 void
-xr_fetch_title(const char *s, size_t n, char *out, size_t outsz)
+xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 {
 	static const char *const ent[] = { "&amp;", "&lt;", "&gt;", "&quot;",
-	                                   "&#39;", 0 };
-	size_t b, e = 0, i, a, o = 0, k, l;
+	                                   "&nbsp;", "&mdash;", "&ndash;",
+	                                   "&rsquo;", "&lsquo;", "&ldquo;",
+	                                   "&rdquo;", "&hellip;", 0 };
+	static const uint32_t ec[] = { '&', '<', '>', '"', 0xa0, 0x2014,
+	                               0x2013, 0x2019, 0x2018, 0x201c, 0x201d,
+	                               0x2026 };
+	size_t b = 0, e = 0, i, a, o = 0, k, l;
 	char u[4];
 	int gap = 0;
 	uint32_t c;
@@ -3472,23 +3582,9 @@ xr_fetch_title(const char *s, size_t n, char *out, size_t outsz)
 	if (!outsz)
 		return;
 	out[0] = '\0';
-	if (outsz <= XR_FETCH_TITLE)
+	if (outsz <= XR_FETCH_TITLE || (!ft_html(s, n, &b, &e) &&
+	                                (!md || !ft_heading(s, n, &b, &e))))
 		return;
-	if ((b = xr_find(s, n, "<title>", 7)) != SIZE_MAX &&
-	    (e = xr_find(s + b + 7, n - b - 7, "</title", 7)) != SIZE_MAX)
-		e += (b += 7);
-	else if (b != SIZE_MAX)	/* a title past the output's clip */
-	{
-		b += 7;
-		e = n;
-	}
-	else
-		for (b = e = 0, i = 0; i < n && b == e; i = e + 1)
-		{
-			for (e = i; e < n && s[e] != '\n'; e++)
-				;
-			b = n - i >= 2 && s[i] == '#' && s[i + 1] == ' ' ? i + 2 : e;
-		}
 	for (i = b; i < e; i += a)
 	{
 		for (k = 0; ent[k] && (e - i < (l = strlen(ent[k])) ||
@@ -3496,24 +3592,36 @@ xr_fetch_title(const char *s, size_t n, char *out, size_t outsz)
 			;
 		if (ent[k])
 		{
-			c = (uint32_t)"&<>\"'"[k];
-			a = strlen(ent[k]);
+			c = ec[k];
+			a = l;
 		}
-		else if (xr_ctl_at(s + i, e - i))
-		{
-			c = ' ';
-			a = xr_ctl_at(s + i, e - i);
-		}
-		else
+		else if (!(a = ft_num(s + i, e - i, &c)))
 			c = u8_next((const unsigned char *)s + i, e - i, &a);
-		if (u_space(c))
+		l = u8_put(u, c);
+		if (c == 0x200b || c == 0xfeff || c == 0xad ||
+		    (c >= 0xe0000 && c <= 0xe007f))
+			continue;	/* invisible */
+		if (xr_ctl_at(u, l) || u_space(c))
 		{
 			gap = 1;
 			continue;
 		}
-		l = u8_put(u, c);
 		if (o + (gap && o) + l > XR_FETCH_TITLE)
+		{
+			/* #418: no mark cut off its base, no ZWJ left last */
+			for (k = !gap && xr_u8_cont(u, l); k && o; o = a)
+			{
+				for (a = o - 1; a && ((unsigned char)out[a] & 0xc0) == 0x80;
+				     a--)
+					;
+				k = xr_u8_cont(out + a, o - a) != 0;
+			}
+			while (o >= 3 && !memcmp(out + o - 3, "\xe2\x80\x8d", 3))
+				o -= 3;
+			while (o && out[o - 1] == ' ')
+				o--;
 			break;
+		}
 		if (gap && o)
 			out[o++] = ' ';
 		gap = 0;
@@ -6644,7 +6752,7 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 		(void)grammar(c->cmd, c->cl, XR_CODE, RU, NULL, one_url, &m);
 	if (m.n != 1 || m.sp.shape != XR_URL)
 		return;
-	xr_fetch_title(out, ol, title, sizeof title);
+	xr_fetch_title(out, ol, c->kind == RC_CARD, title, sizeof title);
 	if (!title[0])
 		return;
 	rm_claude(d, &r, c->chapter);
@@ -12282,7 +12390,7 @@ url_res(const struct xr_scan *x, const struct xr_span *sp,
         struct xr_resolved *r)
 {
 	char u[XR_KEY_MAX + 1], age[40] = "", sub[XR_KEY_MAX + 400];
-	size_t h, hl;
+	size_t h, hl, c;
 	int k;
 
 	if (!x->fetched)
@@ -12293,8 +12401,10 @@ url_res(const struct xr_scan *x, const struct xr_span *sp,
 		age[0] = ' ';
 		res_age(age + 1, sizeof age - 1, time(NULL), x->fat);
 	}
-	k = snprintf(sub, sizeof sub, "%.*s \xc2\xb7 fetched%s in %s", (int)hl,
-	             u + h, age, x->fsess);
+	/* #527: the host capped so the rest always fits */
+	c = clip(u + h, hl, 60);
+	k = snprintf(sub, sizeof sub, "%.*s%s \xc2\xb7 fetched%s in %s", (int)c,
+	             u + h, c < hl ? "\xe2\x80\xa6" : "", age, x->fsess);
 	res_text(r->subtitle, sub, k < (int)sizeof sub ? (size_t)k
 	         : sizeof sub - 1, XR_RES_LINE);
 	snprintf(r->title, sizeof r->title, "%s", x->ftitle);

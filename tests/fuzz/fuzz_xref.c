@@ -684,11 +684,12 @@ resolvers(const char *s, size_t n)
 		abort();
 	{
 		/* #515: a fetched page's title: valid UTF-8 within 120 bytes,
-		** no control, C1 or bidi control, no blank at either end */
+		** no control, C1 or bidi control, no blank at either end; as
+		** markdown when the input's length is odd (#527) */
 		char ft[XR_FETCH_TITLE + 1];
 		size_t i, fl;
 
-		xr_fetch_title(s, n, ft, sizeof ft);
+		xr_fetch_title(s, n, (int)(n & 1), ft, sizeof ft);
 		fl = strlen(ft);
 		check_utf8(ft, fl);
 		if (fl > XR_FETCH_TITLE || (fl && (ft[0] == ' ' || ft[fl - 1] == ' ')))
