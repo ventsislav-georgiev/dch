@@ -1311,6 +1311,51 @@ def test_search_words():
           snips[0] == "the retry backoff phrase itself" and
           snips[1] == "backoff then retry 59" and o["more"] is True,
           (rc, len(snips), o and o["more"], snips[:3] + snips[-3:], err))
+    # LOW-UQ2: at 500 slots too: 60 newer turns of 10 word-only hits each
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for i in range(61):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/wproj",
+                                "timestamp": ts(i),
+                                "message": {"content": "ask %d" % i}}) + "\n")
+            for j in range(3 if i == 0 else 10):
+                t = ("kiwi pear exact %d" if i == 0 else
+                     "pear then kiwi %d.%%d" % i) % j
+                f.write(json.dumps({"type": "assistant", "timestamp": ts(i),
+                                    "message": {"content": [
+                                        {"type": "text", "text": t}]}}) + "\n")
+    rc, o, err = search("xr-sw", "kiwi pear")
+    sizes = {}
+    for h in (o or {}).get("hits", []):
+        sizes[h["chapter"]] = sizes.get(h["chapter"], 0) + 1
+    snips = [h["snippet"] for h in (o or {}).get("hits", [])]
+    check("search words: at 500 slots an old 3-hit phrase turn is kept, "
+          "first, and every turn shown is whole (LOW-UQ2)",
+          rc == 0 and len(sizes) == 50 and None not in sizes and
+          snips[:3] == ["kiwi pear exact 2", "kiwi pear exact 1",
+                        "kiwi pear exact 0"] and
+          snips[3] == "pear then kiwi 60.9" and
+          sorted(set(sizes.values())) == [3, 10] and o["more"] is True,
+          (rc, len(snips), sizes, snips[:4] + snips[-2:], err))
+    # #512 look mode across read windows (NIT-UQ5): the same shape, each
+    # turn padded with a 400 KB reply, so the phrase turn is many 1 MB reads
+    # back from the 60 newer word-only ones (no read-window knob exists)
+    pad = " ".join(["filler"] * 57000)
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for i in range(61):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/wproj",
+                                "timestamp": ts(i % 60),
+                                "message": {"content":
+                                    "kiwi pear exact" if i == 0 else
+                                    "pear kiwi ask %d" % i}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "timestamp": ts(i % 60),
+                                "message": {"content": [
+                                    {"type": "text", "text": pad}]}}) + "\n")
+    rc, o, err = search("xr-sw", "kiwi pear")
+    snips = [h["snippet"] for h in (o or {}).get("hits", [])]
+    check("search words: an old phrase turn many read windows back stays, "
+          "first (NIT-UQ5)",
+          rc == 0 and snips and snips[0] == "kiwi pear exact" and
+          o["more"] is True, (rc, snips[:3], o and o["more"], err))
     rc, o, err = search("xr-sw", "do")
     check("search words: 'do' is no hit in 'todo' (NIT-UO6)",
           rc == 0 and o["hits"] == [], (rc, o, err))
@@ -3182,16 +3227,16 @@ def test_search_scope():
           (r.returncode, r.stdout, r.stderr))
     # bidi controls (RLO; LRI..PDI) in a title and a tool name reorder the
     # terminal's line: blanked too (the tool name's strip is NIT-UO7)
-    put(5, P, [("push retry \u202etxt.exe \u2066lri\u2069 \u061c\u200f",
+    put(5, P, [("push retry \u202etxt.exe \u2066lri\u2069 \u061c\u200e\u200f",
                 "ok")], 1794300050, tool="Ba\u202esh\u2066x\u2069\x07")
     for a in ((), ("--scope", "project")):
         r = dch("--xray", "q5", "--search", "push retry", *a, env=env)
-        check("search %s: text output blanks RLO, LRI..PDI and ALM/RLM "
+        check("search %s: text output blanks RLO, LRI..PDI and ALM/LRM/RLM "
               "and BEL from a turn title and a tool name"
               % (" ".join(a) or "plain"),
               r.returncode == 0 and "txt.exe" in r.stdout and
               "Ba sh x  " in r.stdout and not any(
-                  c in r.stdout for c in "\x07\u202e\u2066\u2069\u061c\u200f"),
+                  c in r.stdout for c in "\x07\u202e\u2066\u2069\u061c\u200e\u200f"),
               (r.returncode, r.stdout, r.stderr))
 
 

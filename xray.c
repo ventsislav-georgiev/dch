@@ -10568,6 +10568,42 @@ res_under(const char *p, const char *root)
 	return p[rl] ? p + rl + 1 : p + rl;
 }
 
+/* lnk is a dangling symlink: its target, read textually, lies in the real
+** root rr (#525, QA 1.112.0 UQ3). A ".." part, or a target whose own nearest
+** parent is not a plain in-root dir (another link), says no: outside. */
+static int
+res_dangle_in(const char *lnk, const char *rr)
+{
+	char t[PATH_MAX], d[PATH_MAX], rd[PATH_MAX], *sl;
+	struct stat st;
+	ssize_t n = readlink(lnk, t, sizeof t - 1);
+
+	if (n <= 0)
+		return 0;
+	t[n] = '\0';
+	if (t[0] != '/')
+	{
+		/* relative to the link's real dir */
+		if (snprintf(d, sizeof d, "%s", lnk) >= (int)sizeof d ||
+		    !(sl = strrchr(d, '/')))
+			return 0;
+		sl[sl == d] = '\0';
+		if (!realpath(d, rd) || snprintf(d, sizeof d, "%s/%s", rd, t)
+		    >= (int)sizeof d)
+			return 0;
+		strcpy(t, d);
+	}
+	n = strlen(t);
+	/* a target that exists (a loop, a chain of links) is no plain miss */
+	if (strstr(t, "/../") || (n >= 3 && !strcmp(t + n - 3, "/..")) ||
+	    lstat(t, &st) == 0)
+		return 0;
+	while ((sl = strrchr(t, '/')) && sl > t &&
+	       (*sl = '\0', lstat(t, &st) != 0 && errno == ENOENT))
+		;
+	return realpath(t, d) && res_under(d, rr);
+}
+
 /* The passwd entry's home, as a copy: a later getpwuid frees what the one
 ** before returned (macOS), and the callers nest (res_wide and res_home_deny
 ** call res_home_ino): a use after free since #205, found by CI's ASan. */
@@ -11213,7 +11249,7 @@ res_git_prep(char *git, char *dir, char *home, char *av[], char *env[])
 	return a;
 }
 
-/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline.
+/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline (300 ms light).
 ** gh, a commit URL's "<owner>/<repo>" when its SHA is short: config's
 ** remote URLs run between, and a repo none of them names is not that
 ** commit's (QA 1.55.0 LOW-1). */
@@ -11252,7 +11288,8 @@ res_commit(const char *sha, const char *cwd, int live, int light,
 	}
 	snprintf(rev, sizeof rev, "%s^{commit}", sha);
 	a = res_git_prep(git, dir, home, av, env);
-	until = xr_now_ms() + XR_GIT_MS;
+	/* QA LOW-UQ1: light shares one 300 ms deadline across every call */
+	until = xr_now_ms() + (light ? 300 : XR_GIT_MS);
 	{
 		static char s0[] = "rev-parse", s1[] = "--is-inside-work-tree";
 
@@ -11309,7 +11346,8 @@ res_commit(const char *sha, const char *cwd, int live, int light,
 	}
 	if (rc == 1)
 	{
-		res_set(r, "timeout", "git timed out after 3 s");
+		res_set(r, "timeout", light ? "git timed out after 300 ms"
+		                               : "git timed out after 3 s");
 		return 1;
 	}
 	if (!foreign)
@@ -11325,9 +11363,6 @@ res_commit(const char *sha, const char *cwd, int live, int light,
 			size_t sl = strlen(r->subtitle);
 
 			memcpy(av + a, v, sizeof v);
-			/* QA LOW-UO2: light waits 300 ms for it, not the 3 s */
-			if (light && xr_now_ms() + 300 < until)
-				until = xr_now_ms() + 300;
 			if (res_run(av, env, until, &run) == 0 &&
 			    (run.status == 0 || run.status == 1))
 				snprintf(r->subtitle + sl, sizeof r->subtitle - sl,
@@ -12114,7 +12149,8 @@ res_file(const char *key, const char *text, const char *cwd, int light,
 		while ((sl = strrchr(rp, '/')) && sl > rp &&
 		       (*sl = '\0', lstat(rp, &st) != 0 && errno == ENOENT))
 			;
-		if (!rr[0] || !realpath(rp, shown) || !res_under(shown, rr))
+		if (!rr[0] || !(realpath(rp, shown) ? !!res_under(shown, rr)
+		                                    : res_dangle_in(rp, rr)))
 		{
 			res_set(r, "outside_project",
 			        "Outside this session's project");
@@ -13364,25 +13400,39 @@ static void
 sr_trim(struct xr_search *s)
 {
 	struct sr_hit *o, l;
-	size_t k, n = 0, t = 0, j, i;
+	size_t k, n = 0, t = 0, j, i, xi;
 	int cut = 0, ex;
 
-	/* the hit past the cap (the oldest of SR_SLOTS) is not kept: the oldest
-	** kept turn is cut only when that hit is under it too */
+	/* the hit past the cap is not kept: a transcript's oldest word-only
+	** one, the next sr_add would replace (LOW-UQ2), else the oldest. Its
+	** turn is cut when a kept hit is under it too, but for a phrase's turn */
 	if (s->n == SR_SLOTS)
 	{
-		struct sr_hit *x = sr_nth(s, s->n - 1);
+		struct sr_hit *x;
 
-		cut = sr_same(x, sr_nth(s, s->n - 2));
+		for (xi = s->n - 1; !s->shell && xi > 0 && s->hit[xi].exact; xi--)
+			;
+		if ((x = sr_nth(s, xi))->exact)
+			xi = s->n - 1, x = sr_nth(s, xi);
+		for (k = 0; k < s->n && cut >= 0; k++)
+			if (k != xi && sr_same(x, sr_nth(s, k)))
+				cut = !s->shell &&
+				      sr_nth(s, k)->exact > x->exact ? -1 : 1;
+		cut = cut > 0;
+		l = *x;	/* its turn: chapter and pend are all sr_same reads */
+		l.tool = l.snip = l.title = NULL;	/* freed just below */
 		sr_hit_free(x);
 		if (s->shell)
 			s->h0 = (s->h0 + 1) % SR_SLOTS;
+		else
+		{
+			memmove(x, x + 1, (s->n - 1 - xi) * sizeof *x);
+			memset(&s->hit[s->n - 1], 0, sizeof *s->hit);
+		}
 		s->n--;
 	}
 	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
 		return;		/* out of memory: the hits stay as they are */
-	if (cut)	/* its turn: chapter and pend are all sr_same reads */
-		memcpy(&l, sr_nth(s, s->n - 1), sizeof l);
 	for (ex = 2; ex-- > 0;)
 		for (k = 0; k < s->n; k++)
 		{

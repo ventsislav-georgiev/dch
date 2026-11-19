@@ -548,6 +548,31 @@ def test_light_file(n, repo, plain):
     r, ls, rv = ref(n, "src/gone.c:3", full=False)
     check("light #510: a missing file in the project: still missing",
           len(rv) == 1 and rv[0]["state"] == "missing", rv)
+    # #510 walks every level: a missing dir at depth is missing too (NIT-UQ5)
+    os.makedirs(os.path.join(repo, "deep", "er"))
+    for text in ("nodir/x.c:1", "deep/er/q/r/none.c:1"):
+        r, ls, rv = ref(n, text, full=False)
+        check("light #510: a missing dir in the project, %s: missing"
+              % text[:-2], len(rv) == 1 and rv[0]["state"] == "missing" and
+              rv[0]["subtitle"] == text[:-2], rv)
+    # #525: a dangling link is judged by where its target points
+    os.symlink(os.path.join(repo, "nodir2"), os.path.join(repo, "dangin"))
+    os.symlink("nodir3", os.path.join(repo, "danginrel"))
+    r, ls, rv = ref(n, "dangin/x.c", full=False)
+    check("light #525: a dangling link to a missing in-project dir: missing",
+          len(rv) == 1 and rv[0]["state"] == "missing", (rv, r.stdout[-300:]))
+    r, ls, rv = ref(n, "danginrel/x.c", full=False)
+    check("light #525: a dangling relative link in the project: missing",
+          len(rv) == 1 and rv[0]["state"] == "missing", (rv, r.stdout[-300:]))
+    for name, tgt in (("dangout", os.path.join(plain, "nodir")),
+                      ("dangdot", os.path.join(repo, "..", "plain", "nodir")),
+                      ("dangvia", os.path.join(repo, "outlink", "nodir")),
+                      ("loop1", "loop1")):
+        os.symlink(tgt, os.path.join(repo, name))
+        r, ls, rv = ref(n, name + "/x.c", full=False)
+        check("light #525: a dangling link %s (out, via a link out, a loop):"
+              " no line" % name, r.returncode == 0 and not rv and ls and
+              ls[-1].get("done") is True, r.stdout[-300:])
     r, ls, rv = ref(n, "big.light:1", full=False)
     check("light #500: over 2 MB: ok by stat, not too_large",
           len(rv) == 1 and rv[0]["state"] == "ok", rv)

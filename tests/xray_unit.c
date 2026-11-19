@@ -4284,6 +4284,37 @@ t_res_git(void)
 		      is(&r, "commit", "ok") && !strstr(r.subtitle, "HEAD") &&
 		      xr_now_ms() - t0 >= XR_GIT_MS - 50);
 	}
+	/* QA LOW-UQ1: a slow rev-parse holds light for ~300 ms, --full for 3 s */
+	{
+		struct xr_scan *x;
+		struct xr_span lsp;
+		char *ob = NULL;
+		size_t obl = 0;
+		FILE *of = open_memstream(&ob, &obl);
+
+		mode("slowrev");
+		put("pid", "", 0);
+		memset(&lsp, 0, sizeof lsp);
+		lsp.shape = XR_COMMIT;
+		snprintf(lsp.key, sizeof lsp.key, "commit:abcdef1234");
+		snprintf(lsp.full, sizeof lsp.full, "abcdef1234");
+		x = of ? xr_scan_new(of, "k", "s", "", 1, 0, 0, 300, xr_now_ms())
+		       : NULL;
+		t0 = xr_now_ms();
+		if (x)
+			xr_scan_light(x, &lsp, "abcdef1234", cwd, 1);
+		t0 = xr_now_ms() - t0;
+		CHECK("git #UQ1: a slow rev-parse: light is back in under 1.5 s "
+		      "(one 300 ms deadline for every git call)", x && t0 < 1500);
+		xr_scan_free(x);
+		if (of)
+			fclose(of);
+		free(ob);
+		t0 = xr_now_ms();
+		CHECK("git #UQ1: a slow rev-parse: --full still times out at 3 s",
+		      res("abcdef1234", "proj", 1, &r) == 1 &&
+		      is(&r, "commit", "timeout") && xr_now_ms() - t0 >= XR_GIT_MS - 50);
+	}
 	mode("ok");
 	e = slurp("env");
 	{
