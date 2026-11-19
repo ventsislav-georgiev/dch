@@ -147,7 +147,8 @@ whose `dch serve` lacks `--allow-create` answering in one status line, and
 sized to the rows on screen. A session row shows NAME (alias, else harness
 name, else name), STATE as a glyph and a word (Needs input, red and the
 loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
-ago it last printed: `now`, `22m`, `3h`, `2d`), AGENTS, MERGED (`✓ 251`) and
+ago it last printed: `now`, `22m`, `3h`, `2d`), AGENTS, SHELLS (its live background shells, shown once a
+session has one), MERGED (`✓ 251`) and
 PULL REQUESTS (from `--meta`'s `prs`: `solution#22330`, the repo said once
 when they share it, `+N` for those that do not fit). A History row shows its
 pin (`◆`), NAME, ENDED (closed, stopped, exited, crashed …, or running), WHEN and the
@@ -282,7 +283,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.118.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.119.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256

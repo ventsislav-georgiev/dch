@@ -925,7 +925,7 @@ pk_age(long when, char *b, size_t n)
 ** shown); the settings view's values, read once a frame. */
 static struct
 {
-	int name, state, age, agents, merged, last, gap;
+	int name, state, age, agents, shells, merged, last, gap;
 	int mw;		/* the widest merged text: its ✓ marks line up */
 } pk_c;
 
@@ -1036,6 +1036,7 @@ pk_cols(const struct pk *p, int k, int cnt)
 			continue;
 		}
 		pk_c.agents |= r->agents > 0;
+		pk_c.shells |= r->shells > 0;
 		if (r->merged > 0)
 		{
 			pk_mergedtxt(r->merged, 0, b, sizeof b);
@@ -1066,6 +1067,7 @@ pk_cols(const struct pk *p, int k, int cnt)
 		pk_c.f = 0;
 	PK_COL(age, hist ? 4 : 6)
 	PK_COL(agents, 6)
+	PK_COL(shells, 6)
 	PK_COL(merged, pk_c.merged > 6 ? pk_c.merged : 6)
 #undef PK_COL
 	if (last && used + pk_c.gap + 8 <= pk_w)
@@ -1099,6 +1101,11 @@ pk_heads(const struct pk *p)
 	{
 		pk_gap();
 		pk_rfit("AGENTS", pk_c.agents);
+	}
+	if (pk_c.shells)
+	{
+		pk_gap();
+		pk_rfit("SHELLS", pk_c.shells);
 	}
 	if (pk_c.merged)
 	{
@@ -1256,6 +1263,13 @@ pk_row(const struct pk *p, const struct pkrow *w, int sel)
 		snprintf(b, sizeof b, "%d", w->agents);
 		pk_set("");
 		pk_rfit(w->agents > 0 ? b : "", pk_c.agents);
+	}
+	if (pk_c.shells)
+	{
+		pk_gap();
+		snprintf(b, sizeof b, "%d", w->shells);
+		pk_set("");
+		pk_rfit(w->shells > 0 ? b : "", pk_c.shells);
 	}
 	if (pk_c.merged)
 	{
@@ -1422,9 +1436,9 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		"\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7\xe2\xa0\x87\xe2\xa0\x8f" };
 	static const char *const tabn[3] = { "Sessions", "Sidekicks", "History" };
 	struct pkkey keys[24];
-	char b[96], go[16];
+	char b[96], go[16], ag_s[32] = "";
 	const char *ret;
-	int nk = 0, k, t, rows, kl, cap, tabs = 0, pos, ri;
+	int nk = 0, k, t, i, act, ag, rows, kl, cap, tabs = 0, pos, ri;
 	/* the rows drawn: the kept ones (pk_pos), or the settings */
 #ifdef _WIN32
 	int n = pk_pos(p, p->tab, p->n[p->tab]);
@@ -1553,8 +1567,19 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 
 	/* the title, quiet, and what there is on the right, faint: on the
 	** tabs row when there is no title (the switch picker's, #252) */
+	/* "5/13 active · 🤖 2 · dch X": active = needs input or working,
+	** remote rows counted as the old session count did */
 	k = p->n[0] + p->n[1];
-	snprintf(b, sizeof b, "%d session%s %s dch %s", k, k == 1 ? "" : "s",
+	for (t = act = ag = 0; t < 2; t++)
+		for (i = 0; i < p->n[t]; i++)
+		{
+			act += pk_rank(p->r[t][i].state) < 2;
+			ag += p->r[t][i].agents;
+		}
+	if (ag)
+		snprintf(ag_s, sizeof ag_s, pk_utf ? " \xc2\xb7 \xf0\x9f\xa4\x96 %d"
+		         : " - %d agents", ag);
+	snprintf(b, sizeof b, "%d/%d active%s %s dch %s", act, k, ag_s,
 	         pk_utf ? "\xc2\xb7" : "-", DCH_VERSION);
 	if (*header)
 	{

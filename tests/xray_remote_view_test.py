@@ -809,7 +809,7 @@ def test_same_name():
         try:
             # the host's row comes with its probe: both rows listed
             check("same name: the picker lists both srv:xv-sh rows",
-                  v.wait(b"2 sessions", 15), (refused(), v.out[-300:]))
+                  v.wait(b"/2 active", 15), (refused(), v.out[-300:]))
             asked = []
             # the top row, then the bottom one: the two srv:xv-sh rows
             for keys in (b"kkk", b"jjj"):
@@ -838,7 +838,7 @@ def test_same_name():
                              ("o in the local row's view", False)):
             v = Pty([DCH, "-l"], cols=140, env=lenv)
             try:
-                v.wait(b"2 sessions", 15)
+                v.wait(b"/2 active", 15)
                 check("same name: x on the %s row opens its view" %
                       ("remote" if remote else "local"), row_view(v, remote))
                 same_attach(what, v, b"o", remote)
