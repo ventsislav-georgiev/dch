@@ -437,7 +437,7 @@ def main():
     run_steps(fixture, test_cli, test_written, test_card,
               test_failed_after_rows, test_card_width, test_card_zwj,
               test_refs_row_full, test_cap_url_bom, test_fetched,
-              test_prefilter_fold, test_read)
+              test_prefilter_fold, test_read, test_read_shell)
 
 
 # ---- #515: a URL the agent fetched resolves from the transcript ------------
@@ -834,6 +834,64 @@ def test_read():
         v.key(b"q")
     finally:
         v.close()
+
+
+# #531: only a reader's own output is read: not a write, a filter, a list
+READS = [("cat > out.md <<'EOF'\nsrc/engine.c:1\nEOF", None),
+         ("make 2>&1 | tail -30", None), ("npm test | grep -i fail", None),
+         ("cat a.md > b.md && echo done", None),
+         ("sed -n -i 's/a/b/p' src/engine.c", None),
+         ("sed -i 's/a/b/' src/engine.c", None),
+         ("sed 's/a/b/' src/engine.c", None),
+         ("cat NOTES", "cat"), ("cat NOTES | head", "cat"),
+         ("sed -n 1,5p NOTES", "sed"), ("sed --quiet 1,5p NOTES", "sed"),
+         ("sed --silent 1,5p NOTES", "sed"),
+         ("bash -lc 'cat NOTES'", "cat"), ("rg -n engine", "rg"),
+         ("grep -n engine", None)]
+
+
+def test_read_shell():
+    """xv-rs, an ended Claude whose Bash calls each print src/engine.c:K
+    (K the call's), their commands READS's"""
+    sid = "11111111-2222-4333-8444-5555555555c8"
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    lines = [{"type": "user", "cwd": P, "timestamp": "2026-11-01T10:00:00Z",
+              "message": {"content": "go"}}]
+    for k, (cmd, _) in enumerate(READS):
+        ts = "2026-11-01T10:%02d:00Z" % (k + 1)
+        out = "k%d src/engine.c:1\n" % k
+        lines.append({"type": "assistant", "timestamp": ts,
+                      "message": {"content": [{"type": "tool_use",
+                                               "id": "s%d" % k, "name": "Bash",
+                                               "input": {"command": cmd}}]}})
+        lines.append({"type": "user", "timestamp": ts,
+                      "toolUseResult": {"stdout": out}, "message": {
+                          "content": [{"type": "tool_result",
+                                       "tool_use_id": "s%d" % k,
+                                       "content": out}]}})
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    rec = {"name": "xv-rs", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": sid, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-rs.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+    p = dch("--xray", "xv-rs", "--ref", "src/engine.c", "--json")
+    rd = {}
+    for l in p.stdout.splitlines():
+        if '"mention"' in l:
+            m = json.loads(l)["mention"]
+            rd[m["line"]] = m.get("read", "absent")
+    for k, (cmd, want) in enumerate(READS):
+        check("#531 %r: read %s" % (cmd, json.dumps(want)),
+              rd.get("k%d src/engine.c:1" % k, "absent") == want,
+              (rd, p.stderr[-300:]))
 
 
 

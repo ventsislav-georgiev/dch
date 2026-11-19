@@ -6811,49 +6811,151 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 	free(r.cov);
 }
 
+/* #531: does the simple command w[k..e) (k its command word) read a file
+** onto stdout: a reader with a file operand, a word that is no option,
+** option value, redirect target, nor sed's, rg's or grep's pattern; sed
+** only with -n, --quiet or --silent and never -i or --in-place (it may be
+** editing). shortcut: a long option's value as its own word (--type c)
+** counts as an operand; no reader takes one that matters. */
+static const char *
+read_cmd(const struct sw *w, size_t k, size_t e)
+{
+	static const char *const readers[] = { "cat", "head", "tail", "sed",
+	                                       "bat", "rg", "grep", "less", 0 };
+	/* each reader's short options that take a value */
+	static const char *const vals[] = { "", "nc", "nc", "efl", "lHrm",
+	                                    "efABCmgtTrMjE", "efABCmdD",
+	                                    "bhjkoOpPtTxyz" };
+	const char *a, *p;
+	size_t j;
+	int i, sed, pat, opt = 1, quiet = 0, inpl = 0, files = 0;
+
+	for (i = 0; readers[i] && strcmp(base(SWD(w, k)), readers[i]); i++)
+		;
+	if (!readers[i])
+		return NULL;
+	sed = !strcmp(readers[i], "sed");
+	pat = sed || !strcmp(readers[i], "rg") || !strcmp(readers[i], "grep");
+	for (j = k + 1; j < e; j++)
+	{
+		a = SWD(w, j);
+		if (w->op[j])
+		{
+			j += j + 1 < e && !w->op[j + 1];	/* and its target */
+			continue;
+		}
+		if (j + 1 < e && w->op[j + 1] && w->re[j] == w->rs[j + 1] &&
+		    !a[strspn(a, "0123456789")])
+			continue;	/* 2>&1's 2 */
+		if (opt && a[0] == '-')
+		{
+			if (!strcmp(a, "--"))
+				opt = 0;
+			else if (a[1] == '-')
+			{
+				quiet |= !strcmp(a, "--quiet") || !strcmp(a, "--silent");
+				inpl |= !strncmp(a, "--in-place", 10);
+				pat &= strncmp(a, "--regexp", 8) && strncmp(a, "--file", 6) &&
+				       strncmp(a, "--expression", 12);
+			}
+			else
+				for (p = a + 1; *p; p++)
+				{
+					if (sed && *p == 'i')
+					{
+						inpl = 1;	/* the rest is its suffix */
+						break;
+					}
+					quiet |= sed && *p == 'n';
+					pat &= !strchr("ef", *p);
+					if (strchr(vals[i], *p))
+					{
+						j += !p[1] && j + 1 < e && !w->op[j + 1];
+						break;
+					}
+				}
+			continue;
+		}
+		if (pat)
+			pat = 0;
+		else
+			files++;
+	}
+	/* rg with no path searches the cwd: still a read; grep reads stdin */
+	files += !files && !strcmp(readers[i], "rg");
+	return files && (!sed || (quiet && !inpl)) ? readers[i] : NULL;
+}
+
+/* #517, #531: the reader whose output is the shell line cmd's, else NULL.
+** Only a pipeline's first command reads (a later | tail or | grep filters
+** another command's output), its stdout to no file (> f, >> f; 2>&1 is
+** fine); in a list (; && || & newline) the one pipeline with output must
+** be it (cd prints nothing). sh -c, bash -lc '<script>': the script's
+** line (depth: how deep in such scripts) */
+static const char *
+read_line(const char *cmd, size_t cl, int depth)
+{
+	static const char *const shells[] = { "sh", "bash", "zsh", 0 };
+	static const char *const outs[] = { ">", ">>", ">|", "&>", "&>>", 0 };
+	const char *cd, *r = NULL, *o;
+	struct sw w;
+	size_t s, e, pe, k, j;
+	int line, sc, n = 0;
+
+	shell_words(cmd, cl, &w, 0);
+	for (s = 0; w.b && s < w.n && s < SW_MAX; s = pe + 1)
+	{
+		for (pe = s; pe < w.n && pe < SW_MAX &&
+		     !(w.op[pe] && !strpbrk(SWD(&w, pe), "<>") &&
+		       strcmp(SWD(&w, pe), "|")); pe++)
+			;
+		for (e = s; e < pe && !(w.op[e] && !strcmp(SWD(&w, e), "|")); e++)
+			;
+		/* bash -lc <script>: Codex's joined words the line's own, a
+		** script one word (Claude's quoted one) its own line */
+		for (k = cmd_head(&w, s, e, &line, &cd), sc = 0;
+		     k + 2 < e && in_list(base(SWD(&w, k)), shells) &&
+		     SWD(&w, k + 1)[0] == '-' && strchr(SWD(&w, k + 1), 'c');
+		     k = cmd_head(&w, k + 2, e, &line, &cd))
+			if ((sc = k + 3 >= e || w.op[k + 3]))
+				break;
+		if (k >= e || (!sc && !strcmp(base(SWD(&w, k)), "cd")))
+			continue;
+		if (n++)
+		{
+			r = NULL;	/* a second command's output mixes in */
+			break;
+		}
+		r = !sc ? read_cmd(&w, k, e) : depth < 4 ?
+		    read_line(SWD(&w, k + 2), strlen(SWD(&w, k + 2)), depth + 1) :
+		    NULL;
+		for (j = s; r && j < pe; j++)
+		{
+			o = j > s && !w.op[j - 1] && w.re[j - 1] == w.rs[j] &&
+			    !SWD(&w, j - 1)[strspn(SWD(&w, j - 1), "0123456789")] ?
+			    SWD(&w, j - 1) : "1";	/* the fd it redirects */
+			if (w.op[j] && in_list(SWD(&w, j), outs) && !strcmp(o, "1"))
+				r = NULL;
+		}
+	}
+	if (w.n > SW_MAX)
+		r = NULL;	/* past the cap a command may follow */
+	free(w.b);
+	return r;
+}
+
 /* #517: c's read tool, its output what the agent read: Read, Grep, Glob or
-** NotebookRead (c->name), else a shell command (cmd) one of whose simple
-** commands is a reader (that word); NULL for none */
+** NotebookRead (c->name), else a shell command's reader (read_line); NULL
+** for none */
 static const char *
 read_call(const struct rcall *c)
 {
 	static const char *const tools[] = { "Read", "Grep", "Glob",
 	                                     "NotebookRead", 0 };
-	static const char *const readers[] = { "cat", "head", "tail", "sed",
-	                                       "bat", "rg", "grep", "less", 0 };
-	static const char *const shells[] = { "sh", "bash", "zsh", 0 };
-	const char *cd, *r = NULL;
-	struct sw w;
-	size_t s, e, k;
-	int line, j;
 
 	if (in_list(c->name, tools))
 		return c->name;
-	if (c->kind != RC_BASH || !c->cmd)
-		return NULL;
-	shell_words(c->cmd, c->cl, &w, 0);
-	for (s = 0; w.b && s < w.n && s < SW_MAX && !r; s = e + 1)
-	{
-		for (e = s; e < w.n && e < SW_MAX &&
-		     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
-			;
-		/* Codex's bash -lc <script>: its words joined, the script's run */
-		for (k = cmd_head(&w, s, e, &line, &cd);
-		     k + 2 < e && in_list(base(SWD(&w, k)), shells) &&
-		     SWD(&w, k + 1)[0] == '-' && strchr(SWD(&w, k + 1), 'c');
-		     k = cmd_head(&w, k + 2, e, &line, &cd))
-			;
-		if (k >= e)
-			continue;
-		for (j = 0; readers[j] && strcmp(base(SWD(&w, k)), readers[j]); j++)
-			;
-		/* sed reads only with -n (else it may be editing) */
-		if (readers[j] && (strcmp(readers[j], "sed") ||
-		                   (k + 1 < e && !strncmp(SWD(&w, k + 1), "-n", 2))))
-			r = readers[j];
-	}
-	free(w.b);
-	return r;
+	return c->kind == RC_BASH && c->cmd ? read_line(c->cmd, c->cl, 0) : NULL;
 }
 
 static void
@@ -11790,41 +11892,55 @@ res_gh_ask(char *const av[], char *const env[], long long until,
 ** detached grandchild (its own session, no tty, stdio on /dev/null, no fd
 ** of ours) asks under the full deadline and fills the cache for the next
 ** draw. One fill per entry at a time: an O_EXCL "<entry>.lock", stale past
-** 60 s (a fill lasts XR_GIT_MS plus the reap's grace). */
-static void
+** 60 s (a fill lasts XR_GIT_MS plus the reap's grace) or more than 60 s
+** ahead. 1: a fill started or one runs; 0: none can (QA 1.114.0 LOW-US1). */
+static int
 res_fill(char *const av[], char *const env[], struct res_run *run,
          const char *repo, const char *num, struct xr_resolved *r)
 {
-	char path[PATH_MAX], lock[PATH_MAX + 8];
-	struct stat st;
+	char path[PATH_MAX], lock[PATH_MAX + 8], old[PATH_MAX + 40];
+	struct stat st, so;
 	long k, max;
+	time_t age;
 	pid_t pid;
-	int fd;
+	int fd, ws = 0;
 
 	if (!res_cache_path(path, sizeof path, repo, num, 1) ||
 	    snprintf(lock, sizeof lock, "%s.lock", path) >= (int)sizeof lock)
-		return;
-	if (lstat(lock, &st) == 0 && time(NULL) - st.st_mtime > 60)
-		(void)unlink(lock);
+		return 0;
+	if (lstat(lock, &st) == 0 &&
+	    ((age = time(NULL) - st.st_mtime) > 60 || age < -60))
+	{
+		/* taken over by rename (QA 1.114.0 NIT-US3): one caller wins it */
+		snprintf(old, sizeof old, "%s.%ld.stale", lock, (long)getpid());
+		if (rename(lock, old) != 0)
+			return errno == ENOENT;	/* ENOENT: another caller took it */
+		if (lstat(old, &so) == 0 && so.st_ino != st.st_ino)
+		{
+			(void)rename(old, lock);	/* a fresh one: put it back */
+			return 1;
+		}
+		(void)unlink(old);
+	}
 	if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
-		return;
+		return errno == EEXIST;
 	close(fd);
 	if ((pid = fork()) < 0)
 	{
 		(void)unlink(lock);
-		return;
+		return 0;
 	}
 	if (pid > 0)
 	{
-		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+		while (waitpid(pid, &ws, 0) < 0 && errno == EINTR)
 			;
-		return;
+		return WIFEXITED(ws) && WEXITSTATUS(ws) == 0;
 	}
 	if (setsid() < 0 || (pid = fork()) != 0)
 	{
 		if (pid <= 0)	/* setsid or fork failed: no fill holds it */
 			(void)unlink(lock);
-		_exit(0);
+		_exit(pid <= 0);
 	}
 	if ((fd = open("/dev/null", O_RDWR)) >= 0)
 		for (k = 0; k < 3; k++)
@@ -11844,7 +11960,8 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 ** one call serves a bare #N; --jq keeps the answer to four fields. No gh,
 ** no auth, no network, the deadline, not github.com, any odd answer: 0.
 ** light (#522) answers from the cache only; a miss starts res_fill and
-** waits up to XR_GH_LIGHT_MS for its entry. */
+** waits up to XR_GH_LIGHT_MS for its entry, or asks gh under it when no
+** fill can run (an unusable cache: 1.113's path). */
 static int
 res_issue(const struct xr_span *sp, const char *cwd, int light,
           struct xr_resolved *r)
@@ -11916,7 +12033,9 @@ res_issue(const struct xr_span *sp, const char *cwd, int light,
 	if (light)
 	{
 		/* most gh answers land well inside XR_GH_LIGHT_MS: shown at once */
-		res_fill(av, env, &run, repo, num, r);
+		if (!res_fill(av, env, &run, repo, num, r))
+			return res_gh_ask(av, env, xr_now_ms() + XR_GH_LIGHT_MS, &run,
+			                  repo, num, r);
 		for (until = xr_now_ms() + XR_GH_LIGHT_MS; xr_now_ms() < until;)
 		{
 			(void)poll(NULL, 0, 50);

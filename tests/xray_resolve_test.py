@@ -674,6 +674,12 @@ case "$*" in
 *repos/acme/widgets/issues/702)
   /bin/sleep 0.3
   echo '{"number":702,"title":"Quick enough","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/703)
+  /bin/sleep 1
+  echo '{"number":703,"title":"One at a time","state":"open","kind":"issue"}' ;;
+*repos/acme/widgets/issues/704)
+  /bin/ps -o pgid= -p $PPID > '%(pids)s.pgid'
+  echo '{"number":704,"title":"On its own","state":"open","kind":"issue"}' ;;
 *) echo 'gh: unexpected' >&2; exit 1 ;;
 esac
 """
@@ -1026,6 +1032,70 @@ def test_github(m):
         check("#522 --full: still waits for gh and shows the title",
               len(rv) == 1 and rv[0]["title"] == "Slow but sure" and
               "resolved" in ls[-2], (rv, lg))
+        # ---- #530: an unusable cache starts no fill: light asks gh itself
+        for label in ("a symlinked gh/", "a file in the gh/ path",
+                      "the cache home a file"):
+            shutil.rmtree(cache, ignore_errors=True)
+            tgt = os.path.join(T, "ghcache-dir")
+            shutil.rmtree(tgt, ignore_errors=True)
+            os.makedirs(tgt)
+            if label == "the cache home a file":
+                open(cache, "w").close()
+            else:
+                os.makedirs(os.path.join(cache, "dch"))
+                if label == "a symlinked gh/":
+                    os.symlink(tgt, ghd)
+                else:
+                    open(ghd, "w").close()
+            t0 = time.time()
+            r, ls, rv, lg = q("acme/widgets#702", full=False, keep=True)
+            dt = time.time() - t0
+            check("#530 light: %s: gh asked directly, the title in < 1 s, "
+                  "nothing written" % label, len(rv) == 1 and
+                  rv[0]["title"] == "Quick enough" and dt < 1 and lg and
+                  not os.listdir(tgt), (dt, rv, lg))
+            if os.path.isfile(cache):
+                os.unlink(cache)
+        for label, off in (("an hour ahead", 3600), ("61 s old", -61)):
+            shutil.rmtree(cache, ignore_errors=True)
+            os.makedirs(ghd)
+            lock = os.path.join(ghd, "acme,widgets,702.lock")
+            open(lock, "w").close()
+            os.utime(lock, (time.time() + off,) * 2)
+            r, ls, rv, lg = q("acme/widgets#702", full=False, keep=True)
+            check("#530 light: a fill lock %s is stale: broken, filled, the "
+                  "title" % label, len(rv) == 1 and
+                  rv[0]["title"] == "Quick enough" and lg and
+                  wait_for(idle, 10), (rv, lg, os.listdir(ghd)))
+        for label in ("", ", a 61 s old lock taken over by one"):
+            shutil.rmtree(cache, ignore_errors=True)
+            open(log, "w").close()
+            if label:
+                os.makedirs(ghd)
+                lock = os.path.join(ghd, "acme,widgets,703.lock")
+                open(lock, "w").close()
+                os.utime(lock, (time.time() - 61,) * 2)
+            ps5 = [subprocess.Popen([DCH, "--xray", n, "--ref",
+                                     "acme/widgets#703", "--scope", "session",
+                                     "--json"], env=genv,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+                   for _ in range(5)]
+            for p in ps5:
+                p.wait(30)
+            wait_for(idle, 10)
+            runs = open(log).read().count("issues/703")
+            check("#530 light: 5 refs at once on a 1 s gh run gh once (the "
+                  "O_EXCL lock%s)" % label, runs == 1 and
+                  not [f for f in os.listdir(ghd) if ".lock" in f],
+                  (runs, os.listdir(ghd)))
+        pg = pids + ".pgid"
+        r, ls, rv, lg = q("acme/widgets#704", full=False)
+        wait_for(lambda: os.path.exists(pg) and idle(), 10)
+        fpg = open(pg).read().strip() if os.path.exists(pg) else ""
+        check("#530 light: the fill leaves the caller's process group "
+              "(setsid)", fpg.isdigit() and int(fpg) != os.getpgrp(),
+              (fpg, os.getpgrp()))
         check("#522: no stray gh or dch children left", wait_for(idle, 10),
               open(pids).read() if os.path.exists(pids) else None)
     finally:
