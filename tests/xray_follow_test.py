@@ -361,7 +361,7 @@ def test_follow_tasks_memory():
     """--follow --tasks --memory (#446): after the snapshot the one-shot
     --tasks and --memory blocks, then a task's or a memory's whole row when
     it moves, a gone line for a memory removed; a reset sends all again; a
-    tasks_command's answer is a whole block again when it moves."""
+    tasks_command's answer moves as row deltas, its runs backed off (#532)."""
     n = "xc-ftm"
     bindir = os.path.join(T, "bin")
     fdir = os.path.join(T, "fake")
@@ -557,7 +557,7 @@ def test_follow_tasks_memory():
               r.stderr == "dch: bad usage: --memory and --tasks\n",
               (r.returncode, r.stderr))
 
-        # a tasks_command: its answer whole, again when it moves (5 s)
+        # a tasks_command: its answer whole, then its rows when they move
         cfg = os.path.join(T, "config-tm")
         rows = os.path.join(T, "tm-rows")
         sh = os.path.join(T, "tm-cmd.sh")
@@ -584,10 +584,60 @@ def test_follow_tasks_memory():
         k5 = len(cf.got)
         with open(rows, "w") as f:
             f.write(json.dumps({"id": "c2", "title": "Moved"}) + "\n")
-        cf.wait(lambda o: "done" in o, 9, frm=k5)
+        cf.wait(lambda o: "task" in o and o["task"]["id"] == "c1", 9,
+                frm=k5)
         _, tc2, _ = lines(n, "--tasks", "--json", env=cenv)
-        check("tasks+memory: the command's moved answer comes whole again",
-              cf.objs(k5) == tc2, (cf.objs(k5), tc2))
+        check("tasks+memory: the command's moved answer, its header the "
+              "same, comes as its new row and the removed row's gone line "
+              "(#532)", cf.objs(k5) == [tc2[1], {"task": {"id": "c1",
+                                                          "gone": True}}],
+              (cf.objs(k5), tc2))
+        cf.stop()
+
+        # #532: 500 rows, one moves: that one row line; the command's runs
+        # back off while its answer stays the same
+        runs = os.path.join(T, "tm-runs")
+        with open(sh, "w") as f:
+            f.write("#!/bin/sh\npython3 -c 'import time; print(time.time())'"
+                    " >> %s\nexec cat %s\n" % (runs, rows))
+        big = [{"id": "r%03d" % i, "title": "Row %d" % i} for i in range(500)]
+
+        def put_rows(v):
+            with open(rows + ".new", "w") as f:
+                f.write("".join(json.dumps(r) + "\n" for r in v))
+            os.rename(rows + ".new", rows)
+
+        put_rows(big)
+        cf = Follow(n, dict(cenv, DCH_XRAY_TEVERY="300"), ["--tasks"])
+        wait_for(lambda: sum("done" in o for o in cf.objs()) >= 2, 10)
+        open(runs, "w").close()
+        time.sleep(6)
+        ts = [float(x) for x in open(runs).read().split()]
+        gaps = [b - a for a, b in zip(ts, ts[1:])]
+        check("tasks+memory: a command's unchanged answer backs its re-runs "
+              "off (0.3 s doubling to 1.8 s: in 6 s not 20 runs, a gap of "
+              "1 s or more)", 4 <= len(ts) <= 9 and max(gaps) >= 1.0,
+              (ts, gaps))
+        k6 = len(cf.got)
+        big[250]["title"] = "Row 250 moved"
+        put_rows(big)
+        cf.wait(lambda o: "task" in o and o["task"]["id"] == "r250", 9,
+                frm=k6)
+        time.sleep(1)
+        _, tc3, _ = lines(n, "--tasks", "--json", env=cenv)
+        r250 = [o for o in tc3 if o.get("task", {}).get("id") == "r250"]
+        check("tasks+memory: one row of a 500-row command answer moves: "
+              "only that row's line is sent (#532)",
+              cf.objs(k6) == r250 and len(r250) == 1,
+              (len(cf.objs(k6)), cf.objs(k6)[:3], r250))
+        k7c = len(cf.got)
+        put_rows(big[:-1])
+        cf.wait(lambda o: "task" in o and o["task"].get("gone"), 9, frm=k7c)
+        time.sleep(1)
+        check("tasks+memory: a row the command no longer lists sends its "
+              "gone line only (#532)", cf.objs(k7c) ==
+              [{"task": {"id": "r499", "gone": True}}],
+              (len(cf.objs(k7c)), cf.objs(k7c)[:3]))
     finally:
         for x in (fl, cf):
             if x:
@@ -746,7 +796,7 @@ def test_follow_slow_cmd():
         def prompt(lat):
             return all(d is not None and d < 0.6 for d in lat)
 
-        # 1. 4.9 s, under the clock: refs prompt, its moved answer whole
+        # 1. 4.9 s, under the clock: refs prompt, its moved answer sent
         e1 = cfg("slow", "sleep 4.9; cat %s" % rows)
         fl = Follow(n, e1, ["--tasks"])
         fl.wait(lambda o: "done" in o, 15)
@@ -902,7 +952,7 @@ def test_follow_slow_cmd():
         fl.stop()
 
         # 6. after a reset, two 4.8 s commands: the last answer at once, a
-        # ref 0.3 s later prompt, the new answer whole when it lands
+        # ref 0.3 s later prompt, the new answer's deltas when it lands
         with open(rows, "w") as f:
             f.write(json.dumps({"id": "r1", "title": "Before"}) + "\n")
         e6 = cfg("reset", "sleep 4.8; cat %s" % rows, "exec sleep 4.8")
@@ -942,10 +992,14 @@ def test_follow_slow_cmd():
         ob = fl.objs(k6)
         j = next((j for j, o in enumerate(ob) if "task" in o and
                   o["task"]["id"] == "r2"), -1)
-        check("slow command (#468): the new answer comes later as a whole "
-              "tasks block", r6 and j > i + 1 and hdr_of(ob[j - 1]) == "task"
-              and ob[j - 1].get("source") == "command" and
-              "done" in ob[j + 1], ob[j - 1:j + 2])
+        # #532: its header the same, as its row deltas (r2 in the reset's
+        # block already when a cadence run landed first)
+        check("slow command (#468): the new answer comes later as its row "
+              "deltas", r6 and j > i + 1 and
+              (hdr_of(ob[j - 1]) == "task" and "done" in ob[j + 1]
+               if pre[-1] == "r2" else
+               ob[j + 1] == {"task": {"id": "r1", "gone": True}}),
+              ob[j - 1:j + 2])
         fl.stop()
 
         # 7. SIGTERM, then SIGKILL, of the follow mid-run: the run's job,

@@ -14486,6 +14486,16 @@ xf_mem_ms(void)
 	return ms > 0 && ms < XF_MEM_MS ? ms : XF_MEM_MS;
 }
 
+/* XF_TASKS_MS; DCH_XRAY_TEVERY=<ms> lowers it (tests only) */
+static long
+xf_tasks_ms(void)
+{
+	const char *e = getenv("DCH_XRAY_TEVERY");
+	long ms = e ? atol(e) : 0;
+
+	return ms > 0 && ms < XF_TASKS_MS ? ms : XF_TASKS_MS;
+}
+
 #define XF_MEMRE_MS 1000L	/* --memory: the re-list after a dir event (#449) */
 enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8, XE_MEM = 16,
        XE_JOB = 32 };
@@ -14522,6 +14532,8 @@ struct xf
 	char *cmdout[2];	/* the command's last answer, NULL: built in */
 	char warn[2][XCMD_WARN_MAX];
 	long long at[2];	/* the command's next run; [1] the listing's */
+	long tms;		/* the tasks command's cadence: doubled per same
+				** answer up to 6x xf_tasks_ms (#532), 0 unset */
 	pid_t job[2];		/* the command's run, a child of ours, 0 none */
 	int jfd[2];		/* its answer's pipe, -1 none (#461) */
 	char *jbuf[2];		/* the answer read so far */
@@ -14982,6 +14994,14 @@ xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 static int
 xf_deltas(struct xf *f, const struct xr_answer *a)
 {
+	long long soon = xr_now_ms() + xf_tasks_ms();
+
+	if (f->tms > xf_tasks_ms())	/* a batch: the tasks cadence back (#532) */
+	{
+		f->tms = xf_tasks_ms();
+		if (!f->job[0] && f->at[0] > soon)
+			f->at[0] = soon;
+	}
 	if (xr_delta_write(stdout, f->sent, a) != 0)
 	{
 		f->rc = ferror(stdout) ? xr_out_exit(0) : xr_failed();
@@ -15056,15 +15076,36 @@ xf_cmd_run(struct xf *f, int b, char **t)
 	return 0;
 }
 
+/* Block b's next run, its answer just in (old: the one before it): the
+** tasks command backs off while its answer stays the same (#532) */
+static void
+xf_cadence(struct xf *f, int b, const char *old)
+{
+	long base = xf_tasks_ms();
+
+	if (b)
+	{
+		f->at[1] = xr_now_ms() + xf_mem_ms();
+		return;
+	}
+	if (f->tms && old && f->cmdout[0] && !strcmp(old, f->cmdout[0]))
+		f->tms = f->tms * 2 < base * 6 ? f->tms * 2 : base * 6;
+	else
+		f->tms = base;
+	f->at[0] = xr_now_ms() + f->tms;
+}
+
 /* A run that could not start as a job: the command now, in the loop; the
 ** next run its cadence after this one's end (#461). */
 static void
 xf_cmd(struct xf *f, int b)
 {
+	char *old = f->cmdout[b];
+
 	xf_job_kill(f, b);
-	free(f->cmdout[b]);
 	(void)xf_cmd_run(f, b, &f->cmdout[b]);
-	f->at[b] = xr_now_ms() + (b ? xf_mem_ms() : XF_TASKS_MS);
+	xf_cadence(f, b, old);
+	free(old);
 }
 
 /* A timed run (#461): in a child of ours, its answer back on a pipe the
@@ -15153,7 +15194,7 @@ xf_job(struct xf *f, int b)
 static int
 xf_job_read(struct xf *f, int b)
 {
-	char buf[16384], *nb;
+	char buf[16384], *nb, *old;
 	ssize_t n;
 
 	while ((n = read(f->jfd[b], buf, sizeof buf)) > 0)
@@ -15172,7 +15213,7 @@ xf_job_read(struct xf *f, int b)
 	}
 	if (n < 0 && (errno == EAGAIN || errno == EINTR))
 		return 0;
-	free(f->cmdout[b]);
+	old = f->cmdout[b];
 	f->cmdout[b] = NULL;
 	f->warn[b][0] = '\0';
 	if (f->jn[b] && f->jbuf[b][0] == '1')
@@ -15180,7 +15221,8 @@ xf_job_read(struct xf *f, int b)
 	else if (f->jn[b])
 		snprintf(f->warn[b], sizeof f->warn[b], "%s", f->jbuf[b] + 1);
 	xf_job_kill(f, b);	/* exited already: reaped */
-	f->at[b] = xr_now_ms() + (b ? xf_mem_ms() : XF_TASKS_MS);
+	xf_cadence(f, b, old);
+	free(old);
 	return 1;
 }
 
@@ -15328,8 +15370,8 @@ out:
 }
 
 /* Block b now, against the one last written: whole after a snapshot
-** (all), for a command's answer or a header that moved; else its rows'
-** deltas. Nonzero: f->rc says why to end. */
+** (all) or for a header that moved; else its rows' deltas, a command's
+** answer's too (#532). Nonzero: f->rc says why to end. */
 static int
 xf_blk(struct xf *f, int b, int all)
 {
@@ -15347,7 +15389,7 @@ xf_blk(struct xf *f, int b, int all)
 		return 0;
 	}
 	h = strcspn(now, "\n");
-	if (all || !old || f->cmdout[b] || strncmp(old, now, h + 1))
+	if (all || !old || strncmp(old, now, h + 1))
 		fputs(now, stdout);
 	else if (xf_row_deltas(old, now, b) != 0)
 	{
@@ -15376,7 +15418,7 @@ xf_blocks(struct xf *f, int all)
 		if (!(b ? f->memory : f->tasks) || (!all && f->cmdout[b]))
 			continue;
 		if (all && !f->cmd[b])
-			f->at[b] = xr_now_ms() + (b ? xf_mem_ms() : XF_TASKS_MS);
+			f->at[b] = xr_now_ms() + (b ? xf_mem_ms() : xf_tasks_ms());
 		if (!all && b && f->mtouched == xm_live_touched(f->cl ? f->cl->xm
 		                                             : NULL))
 			continue;
