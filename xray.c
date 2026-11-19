@@ -11213,7 +11213,7 @@ res_git_prep(char *git, char *dir, char *home, char *av[], char *env[])
 	return a;
 }
 
-/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline.
+/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline (300 ms light).
 ** gh, a commit URL's "<owner>/<repo>" when its SHA is short: config's
 ** remote URLs run between, and a repo none of them names is not that
 ** commit's (QA 1.55.0 LOW-1). */
@@ -11252,7 +11252,8 @@ res_commit(const char *sha, const char *cwd, int live, int light,
 	}
 	snprintf(rev, sizeof rev, "%s^{commit}", sha);
 	a = res_git_prep(git, dir, home, av, env);
-	until = xr_now_ms() + XR_GIT_MS;
+	/* QA LOW-UQ1: light shares one 300 ms deadline across every call */
+	until = xr_now_ms() + (light ? 300 : XR_GIT_MS);
 	{
 		static char s0[] = "rev-parse", s1[] = "--is-inside-work-tree";
 
@@ -11325,9 +11326,6 @@ res_commit(const char *sha, const char *cwd, int live, int light,
 			size_t sl = strlen(r->subtitle);
 
 			memcpy(av + a, v, sizeof v);
-			/* QA LOW-UO2: light waits 300 ms for it, not the 3 s */
-			if (light && xr_now_ms() + 300 < until)
-				until = xr_now_ms() + 300;
 			if (res_run(av, env, until, &run) == 0 &&
 			    (run.status == 0 || run.status == 1))
 				snprintf(r->subtitle + sl, sizeof r->subtitle - sl,
