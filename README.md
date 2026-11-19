@@ -1993,8 +1993,10 @@ character`, exit 2). ASCII letters match in either case; nothing else folds.
 - **The likely answer (#506).** Every hit ends in `"answer"`, true for one hit
   per group (and for the one object), or none. "What did we decide" wants the
   conclusion, so among the hits by the assistant with no tool (`who`
-  `"assistant"`, `tool` null) it is the one in the newest turn, and within
-  that turn the latest `offset`, nearest the turn's end. A group with no such
+  `"assistant"`, `tool` null) it is the newest one: the greatest `offset`. That
+  is the newest turn's reply nearest its end when that turn has one; when the
+  newest turn's hits are only prompts or tool output, it is an earlier turn's
+  reply (QA 1.111.0 NIT-UP4). A group with no such
   hit has every `answer` false. It is picked by turn order and offset, not by
   position (the whole text ranks first). Without `--json` the line of that
   hit starts with `→ ` in place of its first spaces.

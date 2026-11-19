@@ -134,7 +134,8 @@ parse_pieces(const uint8_t *d, size_t n, size_t room, struct sb *out)
 ** one of --follow, --ref, --search (#297), --chapter, --tasks (#319),
 ** --memory (#322), --clear, but --follow with --tasks and --memory
 ** (#446), --since (#516); --scope,
-** --full, --budget-ms only with --ref; each value by its rule; no timeout
+** --full, --budget-ms, --no-github (#518) only with --ref, --scope with
+** --ref or --search (#501); each value by its rule; no timeout
 ** and no cap for --follow alone. */
 static void
 xray_inv(int ac, char **av, const unsigned char *kind, int fl)
@@ -142,7 +143,8 @@ xray_inv(int ac, char **av, const unsigned char *kind, int fl)
 	static const char *const opt[] = { "--json", "--follow", "--clear",
 	                                   "--full", "--ref", "--chapter",
 	                                   "--scope", "--budget-ms", "--search",
-	                                   "--tasks", "--memory", "--since" };
+	                                   "--tasks", "--memory", "--since",
+	                                   "--no-github" };
 	unsigned seen = 0, k, one;
 	int i;
 
@@ -150,12 +152,12 @@ xray_inv(int ac, char **av, const unsigned char *kind, int fl)
 		abort();
 	for (i = 2; i < ac; i++)
 	{
-		for (k = 0; k < 12 && strcmp(av[i], opt[k]); k++)
+		for (k = 0; k < 13 && strcmp(av[i], opt[k]); k++)
 			;
-		if (k == 12 || kind[i] != CK_FLAG || seen & 1u << k)
+		if (k == 13 || kind[i] != CK_FLAG || seen & 1u << k)
 			abort();
 		seen |= 1u << k;
-		if (k < 4 || k == 9 || k == 10)
+		if (k < 4 || k == 9 || k == 10 || k == 12)
 			continue;
 		if (++i >= ac || kind[i] != (k == 6 || k == 7 ? CK_VALUE : CK_TEXT) ||
 		    (k == 5 && !xray_anchor_ok(av[i])) ||
@@ -168,8 +170,9 @@ xray_inv(int ac, char **av, const unsigned char *kind, int fl)
 	one = seen & (2 | 4 | 16 | 32 | 256 | 512 | 1024 | 2048);
 	if (seen & 2)	/* --follow takes --tasks and --memory (#446) */
 		one &= ~(512u | 1024u);
-	if (!(seen & 1) || one & (one - 1) || (seen & (8 | 64 | 128) &&
+	if (!(seen & 1) || one & (one - 1) || (seen & (8 | 128 | 4096) &&
 	                                       !(seen & 16)) ||
+	    (seen & 64 && !(seen & (16 | 256))) ||
 	    fl != (seen & 2 ? CTL_FOREVER | CTL_NOCAP : 0))
 		abort();
 }
