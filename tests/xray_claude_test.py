@@ -1311,6 +1311,31 @@ def test_search_words():
           snips[0] == "the retry backoff phrase itself" and
           snips[1] == "backoff then retry 59" and o["more"] is True,
           (rc, len(snips), o and o["more"], snips[:3] + snips[-3:], err))
+    # LOW-UQ2: at 500 slots too: 60 newer turns of 10 word-only hits each
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for i in range(61):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/wproj",
+                                "timestamp": ts(i),
+                                "message": {"content": "ask %d" % i}}) + "\n")
+            for j in range(3 if i == 0 else 10):
+                t = ("kiwi pear exact %d" if i == 0 else
+                     "pear then kiwi %d.%%d" % i) % j
+                f.write(json.dumps({"type": "assistant", "timestamp": ts(i),
+                                    "message": {"content": [
+                                        {"type": "text", "text": t}]}}) + "\n")
+    rc, o, err = search("xr-sw", "kiwi pear")
+    sizes = {}
+    for h in (o or {}).get("hits", []):
+        sizes[h["chapter"]] = sizes.get(h["chapter"], 0) + 1
+    snips = [h["snippet"] for h in (o or {}).get("hits", [])]
+    check("search words: at 500 slots an old 3-hit phrase turn is kept, "
+          "first, and every turn shown is whole (LOW-UQ2)",
+          rc == 0 and len(sizes) == 50 and None not in sizes and
+          snips[:3] == ["kiwi pear exact 2", "kiwi pear exact 1",
+                        "kiwi pear exact 0"] and
+          snips[3] == "pear then kiwi 60.9" and
+          sorted(set(sizes.values())) == [3, 10] and o["more"] is True,
+          (rc, len(snips), sizes, snips[:4] + snips[-2:], err))
     rc, o, err = search("xr-sw", "do")
     check("search words: 'do' is no hit in 'todo' (NIT-UO6)",
           rc == 0 and o["hits"] == [], (rc, o, err))

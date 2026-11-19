@@ -13363,25 +13363,38 @@ static void
 sr_trim(struct xr_search *s)
 {
 	struct sr_hit *o, l;
-	size_t k, n = 0, t = 0, j, i;
+	size_t k, n = 0, t = 0, j, i, xi;
 	int cut = 0, ex;
 
-	/* the hit past the cap (the oldest of SR_SLOTS) is not kept: the oldest
-	** kept turn is cut only when that hit is under it too */
+	/* the hit past the cap is not kept: a transcript's oldest word-only
+	** one, the next sr_add would replace (LOW-UQ2), else the oldest. Its
+	** turn is cut when a kept hit is under it too, but for a phrase's turn */
 	if (s->n == SR_SLOTS)
 	{
-		struct sr_hit *x = sr_nth(s, s->n - 1);
+		struct sr_hit *x;
 
-		cut = sr_same(x, sr_nth(s, s->n - 2));
+		for (xi = s->n - 1; !s->shell && xi > 0 && s->hit[xi].exact; xi--)
+			;
+		if ((x = sr_nth(s, xi))->exact)
+			xi = s->n - 1, x = sr_nth(s, xi);
+		for (k = 0; k < s->n && cut >= 0; k++)
+			if (k != xi && sr_same(x, sr_nth(s, k)))
+				cut = !s->shell &&
+				      sr_nth(s, k)->exact > x->exact ? -1 : 1;
+		cut = cut > 0;
+		l = *x;	/* its turn: chapter and pend are all sr_same reads */
 		sr_hit_free(x);
 		if (s->shell)
 			s->h0 = (s->h0 + 1) % SR_SLOTS;
+		else
+		{
+			memmove(x, x + 1, (s->n - 1 - xi) * sizeof *x);
+			memset(&s->hit[s->n - 1], 0, sizeof *s->hit);
+		}
 		s->n--;
 	}
 	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
 		return;		/* out of memory: the hits stay as they are */
-	if (cut)	/* its turn: chapter and pend are all sr_same reads */
-		memcpy(&l, sr_nth(s, s->n - 1), sizeof l);
 	for (ex = 2; ex-- > 0;)
 		for (k = 0; k < s->n; k++)
 		{
