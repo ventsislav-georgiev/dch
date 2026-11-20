@@ -1,0 +1,12 @@
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "u0", "name": "Bash", "input": {"command": "cat NOTES | python3 run.py"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:0\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "u0", "content": "see src/a.c:0"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "u1", "name": "Bash", "input": {"command": "cat a; cat b"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:1\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "u1", "content": "see src/a.c:1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "u2", "name": "Bash", "input": {"command": "cat a\ncat b"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:2\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "u2", "content": "see src/a.c:2"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "u3", "name": "Bash", "input": {"command": "set -e; true && source x && . y; export A=1; cat f | grep x | sort"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:3\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "u3", "content": "see src/a.c:3"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "u4", "name": "Bash", "input": {"command": "cat f | psql; cat g > h"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:4\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "u4", "content": "see src/a.c:4"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "u5", "name": "Bash", "input": {"command": "cat f | | head |"}}]}}
+{"type": "user", "toolUseResult": {"stdout": "src/a.c:5\n"}, "message": {"content": [{"type": "tool_result", "tool_use_id": "u5", "content": "see src/a.c:5"}]}}

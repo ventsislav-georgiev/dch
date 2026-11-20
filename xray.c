@@ -7150,7 +7150,8 @@ read_line(const char *cmd, size_t cl, int depth)
 {
 	static const char *const shells[] = { "sh", "bash", "zsh", 0 };
 	static const char *const outs[] = { ">", ">>", ">|", "&>", "&>>", 0 };
-	static const char *const quiet[] = { "cd", 0 };
+	static const char *const quiet[] = { "cd", "set", "true", "source", ".",
+	                                     "export", 0 };
 	static const char *const filters[] = { "head", "tail", "grep", "rg",
 	                                       "sed", "sort", "uniq", "wc", "cut",
 	                                       "tee", "less", "bat", "cat", "tr",
@@ -7159,7 +7160,7 @@ read_line(const char *cmd, size_t cl, int depth)
 	const char *cd, *r = NULL, *o, *pr;
 	struct sw w;
 	size_t s, e, pe, k, j, fs, fe, fk;
-	int line, sc, n = 0, bad = 0;
+	int line, sc, bad = 0;
 
 	shell_words(cmd, cl, &w, 0);
 	for (s = 0; w.b && s < w.n && s < SW_MAX; s = pe + 1)
@@ -7180,11 +7181,6 @@ read_line(const char *cmd, size_t cl, int depth)
 				break;
 		if (k >= e || (!sc && in_list(base(SWD(&w, k)), quiet)))
 			continue;
-		if (n++)
-		{
-			bad = 1;	/* a second command's output mixes in */
-			break;
-		}
 		pr = !sc ? read_cmd(&w, k, e) : depth < 4 ?
 		    read_line(SWD(&w, k + 2), strlen(SWD(&w, k + 2)), depth + 1) :
 		    NULL;
