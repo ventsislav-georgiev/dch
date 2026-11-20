@@ -4270,9 +4270,11 @@ t_res_git(void)
 		t0 = xr_now_ms() - t0;
 		if (of)
 			fflush(of);
-		CHECK("git #UO2: a slow merge-base: light is back in under 1 s, "
+		/* 2 s: CI-load headroom, still under the 3 s full deadline this
+		 * guards; #UQ1's 1 s catches a 1200 ms light deadline instead */
+		CHECK("git #UO2: a slow merge-base: light is back in under 2 s, "
 		      "the ok line, no on/not-on-HEAD label",
-		      x && t0 < 1000 && ob && strstr(ob, "\"state\":\"ok\"") &&
+		      x && t0 < 2000 && ob && strstr(ob, "\"state\":\"ok\"") &&
 		      strstr(ob, "a subject") && !strstr(ob, "HEAD"));
 		xr_scan_free(x);
 		if (of)
