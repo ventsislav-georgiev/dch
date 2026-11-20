@@ -5649,7 +5649,7 @@ xr_scan_done(struct xr_scan *x)
 int
 xr_scan_defs(const struct xr_scan *x)
 {
-	return x->defs ? x->defs : x->lead != NULL;	/* a held D5: no define_command */
+	return x->defs;	/* not a held D5 (#559): define_command outranks it */
 }
 
 int

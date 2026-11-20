@@ -438,7 +438,7 @@ def main():
               test_failed_after_rows, test_card_width, test_card_zwj,
               test_refs_row_full, test_cap_url_bom, test_fetched,
               test_prefilter_fold, test_read, test_read_shell,
-              test_lead_in)
+              test_lead_in, test_lead_cmd)
 
 
 # ---- #515: a URL the agent fetched resolves from the transcript ------------
@@ -1024,6 +1024,60 @@ def test_lead_in():
           "fence does)", not d and
           [(x["rule"], x["passage"]) for x in e] == [("D5", "after it")],
           (d, e, out))
+
+
+def test_lead_cmd():
+    """#559: xv-lc, an ended Claude whose reply has a lead-in for OQ-400;
+    the define_command outranks it, and with no answer it stays"""
+    record("xv-lc", "11111111-2222-4333-8444-5555555555ca", [
+        {"type": "user", "cwd": P, "timestamp": "2026-11-01T10:00:00Z",
+         "message": {"content": "go"}},
+        {"type": "assistant", "timestamp": "2026-11-01T10:01:00Z",
+         "message": {"content": [{"type": "text", "text":
+                                  "Decision for you (OQ-400):\n- a) yes"
+                                  "\n- b) no"}]}}])
+
+    def ask():
+        p = dch("--xray", "xv-lc", "--ref", "OQ-400", "--json")
+        return [json.loads(l)["definition"] for l in p.stdout.splitlines()
+                if '"definition"' in l], p.stdout[-400:]
+
+    def row():
+        v = Pty([DCH, "--xray", "xv-lc"], 30, 100)
+        v.wait(b"Refs 1")
+        v.pump(0.3)
+        v.key(b"\033[Z\033[Z", 1.0)  # Refs; OQ-400 its only row
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        v.wait(b"Mentions: this session", start=mark)
+        until(lambda: (v.pump(0.1), "searching" not in screen(v, mark))[1],
+              10)
+        v.pump(0.3)
+        s = screen(v, mark)
+        v.key(b"q")
+        v.close()
+        return s
+
+    config(script("lead_def.py", "import json, sys\nprint(json.dumps("
+                  "{'title': 'From the command ' + sys.argv[-1]}))\n"))
+    d, out = ask()
+    check("#559 --ref: a define_command that defines the ref beats its "
+          "lead-in", [(x["rule"], x["title"]) for x in d] ==
+          [("command", "From the command OQ-400")], (d, out))
+    s = row()
+    check("#559 Refs row's card: the command's definition, not the lead-in",
+          re.search(r"Definition\n From the command OQ-400 (·|-) your "
+                    r"define_command\n", s), s)
+    config(script("lead_none.py", "pass\n"))
+    d, out = ask()
+    check("#559 --ref: a define_command that gives nothing leaves the "
+          "lead-in", [(x["rule"], x["title"]) for x in d] ==
+          [("D5", "Decision for you (OQ-400)")], (d, out))
+    s = row()
+    check("#559 Refs row's card: no answer from the command, the lead-in "
+          "stays", re.search(r"Definition\n D5 Decision for you \(OQ-400\)",
+                             s) and "your define_command" not in s, s)
+    config(None)
 
 
 # #531: only a reader's own output is read: not a write, a filter, a list
