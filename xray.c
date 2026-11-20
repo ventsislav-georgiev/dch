@@ -3827,9 +3827,9 @@ one_ref(void *ctx, const struct xr_span *sp)
 	return x->n > 1;
 }
 
-/* #534: line [ls, le) a lead-in: at most 120 bytes, naming one ref (*sp,
-** offsets in s) and ending in ':' (blanks, '*' and '_' after it count as
-** the end); the ':''s offset, else 0. */
+/* #534: line [ls, le) a lead-in: at most 120 bytes, naming one ref (not an
+** issue or pull, #560: *sp, offsets in s) and ending in ':' (blanks, '*' and
+** '_' after it count as the end); the ':''s offset, else 0. */
 static size_t
 lead_in(const char *s, size_t ls, size_t le, const char *cwd,
         struct xr_span *sp)
@@ -3844,8 +3844,8 @@ lead_in(const char *s, size_t ls, size_t le, const char *cwd,
 		return 0;
 	x.n = 0;
 	(void)grammar(s + ls, le - 1 - ls, XR_PLAIN, R_ANCHOR, cwd, one_ref, &x);
-	if (x.n != 1)
-		return 0;
+	if (x.n != 1 || x.sp.shape == XR_ISSUE || x.sp.shape == XR_PULL)
+		return 0;	/* #560: those have real titles (resolve) */
 	*sp = x.sp;
 	sp->s += ls;
 	sp->e += ls;
@@ -3891,6 +3891,17 @@ d5(const char *s, const struct olines *o, size_t k, const char *cwd,
 		return 0;	/* a ':' line with no body after it */
 	while (t < c && s[t] && strchr(" \t*_", s[t]))
 		t++;
+	/* #562: a quote or list marker is not the title ("> ", "- ", "1. ") */
+	if (t + 1 < c && (s[t] == '>' || s[t] == '-') && s[t + 1] == ' ')
+		t += 2;
+	else
+	{
+		for (h = t; h < c && A_DIG(s[h]); h++)
+			;
+		if (h > t && h - t < 10 && h + 1 < c &&
+		    (s[h] == '.' || s[h] == ')') && s[h + 1] == ' ')
+			t = h + 2;
+	}
 	title_of(s + t, c - t, d->title);
 	if (!d->title[0])
 		return 0;
@@ -5649,7 +5660,7 @@ xr_scan_done(struct xr_scan *x)
 int
 xr_scan_defs(const struct xr_scan *x)
 {
-	return x->defs ? x->defs : x->lead != NULL;	/* a held D5: no define_command */
+	return x->defs;	/* not a held D5 (#559): define_command outranks it */
 }
 
 int
@@ -8366,6 +8377,7 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 					resp_set(d, s, n);
 					refs_text(d, s, n, XR_REFS_CAP,
 				          XR_MD | XR_TERMS);
+					lead_text(d, s, n);
 					if (ent_here(d, NULL))
 						ent_prose(d->want, "assistant", s, n);
 				}

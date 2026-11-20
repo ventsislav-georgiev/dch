@@ -1,0 +1,2 @@
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": "go"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "> Quoted (OQ-317):\n> body\n\n1. Step (OQ-318):\nbody\n\n2) Next (OQ-319):\nb\n\n- Bullet (OQ-320):\nb\n\nChanges in #93:\n- a"}]}}

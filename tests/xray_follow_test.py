@@ -724,6 +724,119 @@ def test_follow_tasks_memory():
         dch("-k", n)
 
 
+def test_follow_cadence():
+    """#532 (QA 1.118 NIT-UW4): the tasks_command's cadence by its shape, not
+    its clock: runs of a counting command at DCH_XRAY_TEVERY=250 (cap 1.5 s)
+    are compared with each other, so a loaded machine moves all gaps alike."""
+    n = "xc-fcad"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj-cad")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("cadence: claude spawned", r.returncode == 0, r.stderr)
+    cf = None
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        os.makedirs(pdir, exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+
+        def put(objs, mode="a"):
+            with open(tp, mode) as f:
+                f.write("".join(json.dumps(o) + "\n" for o in objs))
+
+        put([{"type": "user", "cwd": proj,
+              "message": {"content": "plan it #31"}}], "w")
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 10)
+        cfg = os.path.join(T, "config-cad")
+        rows = os.path.join(T, "cad-rows")
+        runs = os.path.join(T, "cad-runs")
+        sh = os.path.join(T, "cad-cmd.sh")
+        with open(sh, "w") as f:
+            f.write("#!/bin/sh\npython3 -c 'import sys, time; print(time.time(),"
+                    " open(sys.argv[1]).read().strip())' %s >> %s\n"
+                    "exec cat %s\n" % (rows, runs, rows))
+        os.chmod(sh, 0o755)
+        with open(cfg, "w") as f:
+            f.write("tasks_command = %s\n" % sh)
+
+        def put_row(title):
+            with open(rows + ".new", "w") as f:
+                f.write(json.dumps({"id": "a", "title": title}) + "\n")
+            os.rename(rows + ".new", rows)
+
+        def ran():
+            """each run's start time and the title it read"""
+            if not os.path.exists(runs):
+                return []
+            return [(float(a), b.split('"title": "')[1][:1]) for a, b in
+                    (l.split(" ", 1) for l in open(runs) if l.strip())]
+
+        put_row("b")
+        cf = Follow(n, dict(ENV, DCH_CONFIG=cfg, DCH_XRAY_TEVERY="250"),
+                    ["--tasks"])
+        wait_for(lambda: len(ran()) >= 7, 40)
+        ts = [t for t, _ in ran()]
+        g = [b - a for a, b in zip(ts, ts[1:])]
+        # 0.25, 0.5, 1, 1.5, 1.5, 1.5 s plus each run's own time
+        check("cadence: an unchanged answer's gaps grow (the 4th gap is "
+              "0.5 s or more past the 2nd)", len(g) >= 6 and
+              min(g[3:]) - max(g[:2]) >= 0.5, g)
+        check("cadence: the gaps stop growing at 6x the base (the 6th gap is "
+              "no more than 2 s past the 4th; uncapped is 6 s)", len(g) >= 6 and
+              g[5] - g[3] <= 2.0, g)
+
+        # a same-length row change, at the longest gap
+        k = len(cf.got)
+        put_row("Z")
+        sent = cf.wait(lambda o: o.get("task", {}).get("title") == "Z", 12,
+                       frm=k)
+        check("cadence: a row changed to another of the same length is sent "
+              "(b to Z)", sent, cf.objs(k))
+        wait_for(lambda: any(w == "Z" for _, w in ran()), 12)
+        c = next(i for i, (_, w) in enumerate(ran()) if w == "Z")
+        wait_for(lambda: len(ran()) > c + 1, 12)
+        ts = [t for t, _ in ran()]
+        check("cadence: a changed answer brings its next run in at the base "
+              "(0.5 s or more under the gap before it)",
+              len(ts) > c + 1 and ts[c + 1] - ts[c] <= g[5] - 0.5,
+              (c, g, ts[c:c + 2]))
+
+        # a batch, right after a run at the longest gap again
+        wait_for(lambda: len(ran()) >= c + 5, 20)
+        ts = [t for t, _ in ran()]
+        gl = ts[c + 4] - ts[c + 3]
+        n0 = len(ran())
+        wait_for(lambda: len(ran()) > n0, 6)
+        n1 = len(ran())
+        put([{"type": "user", "message": {"content": "go on #32"}}])
+        tb = time.time()
+        wait_for(lambda: len(ran()) > n1, 12)
+        nxt = [t for t, _ in ran()[n1:]]
+        check("cadence: a batch after the backoff brings the next run in "
+              "within the base (0.5 s or more under the longest gap)",
+              nxt and nxt[0] - tb <= gl - 0.5, (nxt[:1], tb, gl))
+    finally:
+        if cf:
+            cf.stop()
+        dch("-k", n)
+
+
 def test_follow_memory_touch_flood():
     """#462: 4100 Reads of unrelated .md files must not push out a later
     Read of a memory (the live touch table keeps only paths that can be
@@ -2115,6 +2228,7 @@ def main():
     try:
         test_follow_claude()
         test_follow_tasks_memory()
+        test_follow_cadence()
         test_follow_memory_touch_flood()
         test_follow_slow_cmd()
         test_follow_fast()

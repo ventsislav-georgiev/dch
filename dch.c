@@ -13464,7 +13464,7 @@ xr_since_one(const char *path, const struct stat *st, int codex,
 ** as DCH_REF_KEY; never for a ref starting with '-' (xcmd_rows); each
 ** answer a definition of <n>'s, "source":"command", after a clean exit
 ** only (#412: xcmd_rows holds them); no answer, done's define_warn. After the files, before done: it runs only when they found
-** none, so a card's transcript definition never waits on it. */
+** none (a lone D5 is none, #559), so a card's transcript definition never waits on it. */
 static int
 xr_cmd_def(const char *line, void *arg)
 {
