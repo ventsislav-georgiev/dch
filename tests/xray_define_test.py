@@ -527,7 +527,14 @@ def fixture_fetched():
             (47, "https://sur.example.com/s", "<title>a&#xD800;b&#xDFFF;c"
              "</title>"),
             (45, "https://eng.example.com/e", "<title>x\U0001F3F4\U000E0067"
-             "\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F</title>")]:
+             "\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F</title>"),
+            (48, "https://cut.example.com/c", "<title>" + "a" * 100 +
+             "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067"
+             "\U000E007F</title>"),
+            (49, "https://strayt.example.com/s", "<title>Go \U0001F3F4"
+             "\U000E0067\U000E0062\U000E007F\U000E0041\U000E0042 AB</title>"),
+            (50, "https://svgself.example.com/s",
+             "<head><svg/><title>AfterSvg</title>")]:
         call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
                                                       "prompt": "sum"}, out)
     call("2026-11-06T11:00:00Z", 11, "Bash",
@@ -707,6 +714,15 @@ def test_fetched():
     check("#541 tag characters after U+1F3F4 stay: the England flag",
           t == "x\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E"
           "\U000E0067\U000E007F", repr(t))
+    t = title("https://cut.example.com/c")
+    check("#564 the 120-byte cut drops a flag's tag run with no cancel tag, "
+          "and its U+1F3F4", t == "a" * 100, repr(t))
+    t = title("https://strayt.example.com/s")
+    check("#564 tag characters after a cancel tag are dropped",
+          t == "Go \U0001F3F4\U000E0067\U000E0062\U000E007F AB", repr(t))
+    t = title("https://svgself.example.com/s")
+    check("#564 a self-closing <svg/> in the head is closed: the title "
+          "after it", t == "AfterSvg", t)
     rv = res("https://%s/p" % LONGHOST)[2]
     sub = rv[0]["subtitle"] if rv else ""
     check("#527 a long host is capped so \" \u00b7 fetched ... in "

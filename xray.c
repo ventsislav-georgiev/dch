@@ -3511,6 +3511,8 @@ ft_html(const char *s, size_t n, size_t *b, size_t *e)
 		html |= ci_at(s, n, i, "<!doctype") || ci_tag(s, n, i, "<html") ||
 		        ci_tag(s, n, i, "<head");
 		j = k < 4 ? xr_find(s + i, n - i, skip[k][1], strlen(skip[k][1])) : 0;
+		if (k == 3 && (p = memchr(s + i, '>', n - i)) && p[-1] == '/')
+			j = 0;	/* #564: <svg/> is closed */
 		if (j == SIZE_MAX || !(p = memchr(s + i + j, '>', n - i - j)))
 			return 0;
 		i = (size_t)(p - s);
@@ -3613,7 +3615,7 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 		l = u8_put(u, c);
 		if (c == 0x200b || c == 0xfeff || c == 0xad ||
 		    (c >= 0xe0000 && c <= 0xe007f &&
-		     prev != 0x1f3f4 && !(prev >= 0xe0000 && prev <= 0xe007f)))
+		     prev != 0x1f3f4 && !(prev >= 0xe0000 && prev < 0xe007f)))
 			continue;	/* invisible */
 		if (xr_ctl_at(u, l) || u_space(c))
 		{
@@ -3623,6 +3625,14 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 		}
 		if (o + (gap && o) + l > XR_FETCH_TITLE)
 		{
+			/* #564: no flag left without its cancel tag: drop the
+			** tag run and its U+1F3F4 */
+			for (k = 0; o >= 4; k = 1, o -= 4)
+				if ((c = u8_next((const unsigned char *)out + o - 4,
+				                 4, &a)) < 0xe0000 || c > 0xe007e)
+					break;
+			if (k && o >= 4 && !memcmp(out + o - 4, "\xf0\x9f\x8f\xb4", 4))
+				o -= 4;
 			/* #418: no mark cut off its base, no ZWJ left last */
 			for (k = !gap && xr_u8_cont(u, l); k && o; o = a)
 			{
