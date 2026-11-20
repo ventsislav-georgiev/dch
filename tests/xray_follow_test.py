@@ -645,8 +645,9 @@ def test_follow_tasks_memory():
 
         def applied():
             """the follow's tasks block as a client keeps it: a header
-            starts it again, a row replaces its id's in place or is added
-            last, a gone line removes it, a done line replaces the last"""
+            starts it again and its rows are listed; after its done line a
+            row replaces its id's in place or is added last, a gone line
+            removes it, a done line replaces the last"""
             hd, v, done = None, [], None
             for o in cf.objs():
                 t = o.get("task")
@@ -655,6 +656,8 @@ def test_follow_tasks_memory():
                     hd, v, done = o, [], None
                 elif "done" in o:
                     done = o
+                elif t and not done:
+                    v.append(t)
                 elif t and t.get("gone"):
                     v = [r for r in v if r["id"] != t["id"]]
                 elif t and t["id"] in ids:
@@ -706,6 +709,14 @@ def test_follow_tasks_memory():
                   "with --tasks, its done line's warn too (#552)", 3)
         converges(big[:2], "tasks+memory: its exit 0 again clears the done "
                   "line's warn (#552)")
+        again = {"id": "r000", "title": "Again"}
+        converges(big[:2] + [again], "tasks+memory: an id the command lists "
+                  "twice converges with --tasks, both rows (#553)")
+        converges([dict(big[0], title="Changed"), big[1], again],
+                  "tasks+memory: the first row of a repeated id changes: "
+                  "converges with --tasks (#553)")
+        converges(big[:2], "tasks+memory: the id once again converges with "
+                  "--tasks (#553)")
     finally:
         for x in (fl, cf):
             if x:
