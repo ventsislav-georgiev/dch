@@ -2481,6 +2481,8 @@ which a client can use as its version probe.
   - `{"memory":{…}}`: a memory's or instruction file's whole row, keyed by
     `id`, when it changes or is new; `{"memory":{"id":…,"gone":true}}`
     when it is gone.
+  - its `done` line, after its rows' lines, when it changes (its `count`,
+    `dropped` or `warn`).
   - a whole block again when its header changes (its `source` or
     `partial`), or when its rows' order would not follow from the row
     lines: rows it kept in another order, or a new row not last.
@@ -2498,7 +2500,7 @@ which a client can use as its version probe.
   after each run up to 30 s, back to 5 s on a changed answer or a
   transcript batch. A changed answer is sent as the row deltas above
   (a changed or new row's line, a gone line for a row it no longer
-  lists), or whole in the cases above (a changed header, rows in a new
+  lists, its done line when it changed), or whole in the cases above (a changed header, rows in a new
   order). Every run
   goes on beside the stream (one of each at a time): a slow or hung command
   never holds back the transcript's lines. So the block after a snapshot

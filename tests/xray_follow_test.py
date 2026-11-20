@@ -599,12 +599,15 @@ def test_follow_tasks_memory():
         runs = os.path.join(T, "tm-runs")
         with open(sh, "w") as f:
             f.write("#!/bin/sh\npython3 -c 'import time; print(time.time())'"
-                    " >> %s\nexec cat %s\n" % (runs, rows))
+                    " >> %s\ncat %s\nexit $(cat %s.rc)\n" % (runs, rows, rows))
         big = [{"id": "r%03d" % i, "title": "Row %d" % i} for i in range(500)]
 
-        def put_rows(v):
+        def put_rows(v, rc=0):
+            with open(rows + ".rc", "w") as f:
+                f.write("%d\n" % rc)
             with open(rows + ".new", "w") as f:
-                f.write("".join(json.dumps(r) + "\n" for r in v))
+                f.write("".join((r if isinstance(r, str) else json.dumps(r)) +
+                                "\n" for r in v))
             os.rename(rows + ".new", rows)
 
         put_rows(big)
@@ -635,39 +638,42 @@ def test_follow_tasks_memory():
         cf.wait(lambda o: "task" in o and o["task"].get("gone"), 9, frm=k7c)
         time.sleep(1)
         check("tasks+memory: a row the command no longer lists sends its "
-              "gone line only (#532)", cf.objs(k7c) ==
-              [{"task": {"id": "r499", "gone": True}}],
+              "gone line and the done line's new count only (#532, #552)",
+              cf.objs(k7c) == [{"task": {"id": "r499", "gone": True}},
+                               {"done": True, "count": 499, "dropped": 0}],
               (len(cf.objs(k7c)), cf.objs(k7c)[:3]))
 
         def applied():
             """the follow's tasks block as a client keeps it: a header
             starts it again, a row replaces its id's in place or is added
-            last, a gone line removes it"""
-            v = []
+            last, a gone line removes it, a done line replaces the last"""
+            hd, v, done = None, [], None
             for o in cf.objs():
                 t = o.get("task")
                 ids = [r["id"] for r in v]
                 if "source" in o and "session" in o:
-                    v = []
+                    hd, v, done = o, [], None
+                elif "done" in o:
+                    done = o
                 elif t and t.get("gone"):
                     v = [r for r in v if r["id"] != t["id"]]
                 elif t and t["id"] in ids:
                     v[ids.index(t["id"])] = t
                 elif t:
                     v.append(t)
-            return v
+            return hd, v, done
 
-        def converges(v, label):
+        def converges(v, label, rc=0):
             k = len(cf.got)
-            put_rows(v)
-            wait_for(lambda: [(r["id"], r["title"]) for r in applied()] ==
-                     [(r["id"], r["title"]) for r in v], 9)
-            time.sleep(1)
+            put_rows(v, rc)
             _, one, _ = lines(n, "--tasks", "--json", env=cenv)
+            want = (one[0], [o["task"] for o in one if "task" in o], one[-1])
+            wait_for(lambda: applied() == want, 9)
+            time.sleep(1)
             got = applied()
-            check(label, got == [o["task"] for o in one if "task" in o],
-                  ([r["id"] for r in got][:6],
-                   [o["task"]["id"] for o in one if "task" in o][:6]))
+            check(label, got == want,
+                  ([r["id"] for r in got[1]][:6], got[2],
+                   [r["id"] for r in want[1]][:6], want[2]))
             return cf.objs(k)
 
         big = big[:-1] + [{"id": "s000", "title": "Appended"}]
@@ -675,13 +681,31 @@ def test_follow_tasks_memory():
                         "converges with --tasks (#551)")
         check("tasks+memory: a row the command appends last is sent as its "
               "row line, not the whole block (#551)",
-              [o for o in got if "task" in o] == [{"task": applied()[-1]}],
+              got[:1] == [{"task": applied()[1][-1]}] and
+              len(got) <= 2 and all("done" in o for o in got[1:]),
               (len(got), got[:3]))
         converges(big[::-1], "tasks+memory: the command's rows in reverse "
                   "order converge with --tasks (#551)")
         converges(big[:1] + [{"id": "m000", "title": "Inserted"}] + big[1:],
                   "tasks+memory: a row the command inserts second "
                   "converges with --tasks (#551)")
+        big.insert(1, {"id": "m000", "title": "Inserted"})
+        k9 = len(cf.got)
+        put_rows(big)
+        time.sleep(2)
+        check("tasks+memory: the command's answer the same again sends "
+              "nothing (#532)", cf.objs(k9) == [], cf.objs(k9)[:3])
+        converges(big[:2], "tasks+memory: the command's count falling to 2 "
+                  "converges with --tasks, its done line too (#552)")
+        converges(big[:2] + ["not json"], "tasks+memory: a line the command "
+                  "skips converges with --tasks, its done line's dropped "
+                  "too (#552)")
+        converges(big[:2], "tasks+memory: dropped back to 0 converges with "
+                  "--tasks (#552)")
+        converges(big[:2], "tasks+memory: the command's exit 3 converges "
+                  "with --tasks, its done line's warn too (#552)", 3)
+        converges(big[:2], "tasks+memory: its exit 0 again clears the done "
+                  "line's warn (#552)")
     finally:
         for x in (fl, cf):
             if x:

@@ -15479,13 +15479,13 @@ xf_rows(const char *text, size_t pre, struct xf_row **sorted, size_t *n)
 
 /* Block b's rows that moved from old to now: a new or changed row's line
 ** in now's order, then {"<kind>":{"id":…,"gone":true}} for each row left
-** out. 1, nothing written, when deltas applied by id cannot give now's
-** order: the rows both hold moved, a new row is not last (#551). -1 out
-** of memory. */
+** out, then now's done line when it moved (#552). 1, nothing written,
+** when deltas applied by id cannot give now's order: the rows both hold
+** moved, a new row is not last (#551). -1 out of memory. */
 static int
 xf_row_deltas(const char *old, const char *now, int b)
 {
-	const char *kind = b ? "memory" : "task", *at = NULL;
+	const char *kind = b ? "memory" : "task", *at = NULL, *od, *dn;
 	size_t pre = strlen(kind) + 10, no, nn, k;	/* {"kind":{"id": */
 	struct xf_row *ov, *os, *nv, *ns, *h;
 	int rc = -1, added = 0;
@@ -15513,6 +15513,9 @@ xf_row_deltas(const char *old, const char *now, int b)
 		if (os[k].klen && !bsearch(&os[k], ns, nn, sizeof *ns, xf_row_cmp))
 			printf("{\"%s\":{\"id\":%.*s,\"gone\":true}}\n", kind,
 			       (int)os[k].klen, os[k].key);
+	if ((dn = strstr(now, "\n{\"done\":")) &&	/* the last line */
+	    (!(od = strstr(old, "\n{\"done\":")) || strcmp(od, dn)))
+		fputs(dn + 1, stdout);	/* its count, dropped and warn */
 moved:
 	free(nv);
 	free(ns);
