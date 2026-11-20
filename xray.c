@@ -7139,20 +7139,27 @@ read_cmd(const struct sw *w, size_t k, size_t e)
 }
 
 /* #517, #531: the reader whose output is the shell line cmd's, else NULL.
-** Only a pipeline's first command reads (a later | tail or | grep filters
-** another command's output), its stdout to no file (> f, >> f; 2>&1 is
-** fine); in a list (; && || & newline) the one pipeline with output must
-** be it (cd prints nothing). sh -c, bash -lc '<script>': the script's
-** line (depth: how deep in such scripts) */
+** A pipeline's first command reads and its later ones must only filter
+** (make | tail and cat f | python3 run.py are not reads), its stdout to no
+** file (> f, >> f; 2>&1 is fine); in a list (; && || & newline) every
+** pipeline with output must be one, the first's reader named (cd, set,
+** true, source, . and export print nothing). sh -c, bash -lc '<script>':
+** the script's line (depth: how deep in such scripts) */
 static const char *
 read_line(const char *cmd, size_t cl, int depth)
 {
 	static const char *const shells[] = { "sh", "bash", "zsh", 0 };
 	static const char *const outs[] = { ">", ">>", ">|", "&>", "&>>", 0 };
-	const char *cd, *r = NULL, *o;
+	static const char *const quiet[] = { "cd", 0 };
+	static const char *const filters[] = { "head", "tail", "grep", "rg",
+	                                       "sed", "sort", "uniq", "wc", "cut",
+	                                       "tee", "less", "bat", "cat", "tr",
+	                                       "nl", "column", "fold", "rev", "jq",
+	                                       0 };
+	const char *cd, *r = NULL, *o, *pr;
 	struct sw w;
-	size_t s, e, pe, k, j;
-	int line, sc, n = 0;
+	size_t s, e, pe, k, j, fs, fe, fk;
+	int line, sc, n = 0, bad = 0;
 
 	shell_words(cmd, cl, &w, 0);
 	for (s = 0; w.b && s < w.n && s < SW_MAX; s = pe + 1)
@@ -7171,26 +7178,40 @@ read_line(const char *cmd, size_t cl, int depth)
 		     k = cmd_head(&w, k + 2, e, &line, &cd))
 			if ((sc = k + 3 >= e || w.op[k + 3]))
 				break;
-		if (k >= e || (!sc && !strcmp(base(SWD(&w, k)), "cd")))
+		if (k >= e || (!sc && in_list(base(SWD(&w, k)), quiet)))
 			continue;
 		if (n++)
 		{
-			r = NULL;	/* a second command's output mixes in */
+			bad = 1;	/* a second command's output mixes in */
 			break;
 		}
-		r = !sc ? read_cmd(&w, k, e) : depth < 4 ?
+		pr = !sc ? read_cmd(&w, k, e) : depth < 4 ?
 		    read_line(SWD(&w, k + 2), strlen(SWD(&w, k + 2)), depth + 1) :
 		    NULL;
-		for (j = s; r && j < pe; j++)
+		/* each later command of the pipeline must filter */
+		for (fs = e + 1; pr && fs <= pe; fs = fe + 1)
+		{
+			for (fe = fs; fe < pe && !(w.op[fe] && !strcmp(SWD(&w, fe), "|"));
+			     fe++)
+				;
+			fk = cmd_head(&w, fs, fe, &line, &cd);
+			if (fk >= fe || !in_list(base(SWD(&w, fk)), filters))
+				pr = NULL;
+		}
+		for (j = s; pr && j < pe; j++)
 		{
 			o = j > s && !w.op[j - 1] && w.re[j - 1] == w.rs[j] &&
 			    !SWD(&w, j - 1)[strspn(SWD(&w, j - 1), "0123456789")] ?
 			    SWD(&w, j - 1) : "1";	/* the fd it redirects */
 			if (w.op[j] && in_list(SWD(&w, j), outs) && !strcmp(o, "1"))
-				r = NULL;
+				pr = NULL;
 		}
+		if (!pr)
+			bad = 1;	/* its output is no read, or mixes in */
+		else if (!r)
+			r = pr;
 	}
-	if (w.n > SW_MAX)
+	if (bad || w.n > SW_MAX)
 		r = NULL;	/* past the cap a command may follow */
 	free(w.b);
 	return r;
