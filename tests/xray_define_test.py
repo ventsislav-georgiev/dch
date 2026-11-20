@@ -545,11 +545,21 @@ def fixture_fetched():
             ("wget -qO- https://yes.example.com/a", "<title>Wget Out</title>"),
             ("sudo curl -s https://yes2.example.com/a 2>&1 | head",
              "<title>Sudo Curl</title>"),
-            # #540: still stdout, still a fetch
+            # #540, #542: still stdout, still the only fetch
             ("curl -s --output-dir /tmp https://y3.example.com/a",
              "<title>Output Dir</title>"),
             ("curl -sL -o /dev/stdout https://y4.example.com/a",
-             "<title>Dev Stdout</title>")), 21):
+             "<title>Dev Stdout</title>"),
+            ("cd /tmp && curl -s https://y5.example.com/a",
+             "<title>After Cd</title>"),
+            ("(curl -s https://y6.example.com/a)",
+             "<title>Subshell</title>"),
+            ("curl -s https://y7.example.com/a && echo ok",
+             "<title>Then Echo</title>"),
+            ("curl -s https://y8.example.com/a &",
+             "<title>Background</title>"),
+            ("echo https://y9.example.com/a | xargs curl -s",
+             "<title>Xargs</title>")), 21):
         call("2026-11-07T10:%02d:00Z" % k, k, "Bash", {"command": cmd}, out)
     call("2026-11-07T11:00:00Z", 20, "WebFetch",
          {"url": "https://q.example.com/x?r=/", "prompt": "sum"},
@@ -699,7 +709,12 @@ def test_fetched():
               len(rv) == 1 and rv[0]["title"] == t, rv)
     for u, t, why in (
             ("https://y3.example.com/a", "Output Dir", "#540 --output-dir"),
-            ("https://y4.example.com/a", "Dev Stdout", "#540 -o /dev/stdout")):
+            ("https://y4.example.com/a", "Dev Stdout", "#540 -o /dev/stdout"),
+            ("https://y5.example.com/a", "After Cd", "#542 cd /tmp && curl"),
+            ("https://y6.example.com/a", "Subshell", "#542 (curl)"),
+            ("https://y7.example.com/a", "Then Echo", "#542 curl && echo ok"),
+            ("https://y8.example.com/a", "Background", "#542 curl &"),
+            ("https://y9.example.com/a", "Xargs", "#542 echo URL | xargs curl")):
         p, ls, rv = res(u)
         check("%s: still a fetch, titled" % why,
               len(rv) == 1 and rv[0]["title"] == t, rv)

@@ -1,0 +1,14 @@
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b0", "name": "Bash", "input": {"command": "cd /tmp && curl -s https://ex.com/a"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b0", "content": "<title>T0</title>"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "(curl -s https://ex.com/a)"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": "<title>T1</title>"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b2", "name": "Bash", "input": {"command": "curl -s https://ex.com/a && echo ok"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b2", "content": "<title>T2</title>"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b3", "name": "Bash", "input": {"command": "curl -s https://ex.com/a &"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b3", "content": "<title>T3</title>"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b4", "name": "Bash", "input": {"command": "echo https://ex.com/a | xargs curl -s"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b4", "content": "<title>T4</title>"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b5", "name": "Bash", "input": {"command": "curl -s --output-dir /tmp https://ex.com/a"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b5", "content": "<title>T5</title>"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b6", "name": "Bash", "input": {"command": "curl -sL -o /dev/stdout https://ex.com/a"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b6", "content": "<title>T6</title>"}]}}

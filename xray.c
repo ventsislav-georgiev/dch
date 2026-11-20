@@ -6993,26 +6993,58 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 	struct one_url m;
 	struct remit r;
 	struct sw w;
-	const char *cd;
-	size_t k, e, j, uend = c->cl;
-	int line, ok = c->kind == RC_CARD;
+	const char *cd, *o;
+	size_t k, e, j, s, u, uend = c->cl;
+	int line, paren, ok = c->kind == RC_CARD;
 
 	if (!c->cmd || (c->kind != RC_CARD && c->kind != RC_BASH))
 		return;
 	if (!ok)
 	{
 		shell_words(c->cmd, c->cl, &w, 0);
-		for (e = 0; w.b && e < w.n && e < SW_MAX &&
-		     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
-			;
-		k = w.b && e <= SW_MAX ? cmd_head(&w, 0, e, &line, &cd) : e;
+		/* ( opens a subshell, and a leading cd prints nothing (as in
+		** read_line): the fetch is the first command after them */
+		paren = w.b && w.n && !strcmp(SWD(&w, 0), "(");
+		for (s = paren; ; s = e + 1)
+		{
+			for (e = s; w.b && e < w.n && e < SW_MAX &&
+			     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
+				;
+			k = w.b && e <= SW_MAX ? cmd_head(&w, s, e, &line, &cd) : e;
+			if (k >= e || e >= w.n || !w.op[e] ||
+			    strcmp(base(SWD(&w, k)), "cd"))
+				break;
+		}
+		u = e;
+		/* echo URL | xargs curl -s: the second command fetches */
+		if (k < e && e < w.n && !strcmp(base(SWD(&w, k)), "echo") &&
+		    !strcmp(SWD(&w, e), "|") && e + 1 < w.n &&
+		    !strcmp(base(SWD(&w, e + 1)), "xargs"))
+		{
+			for (s = e + 1, e = s; e < w.n && e < SW_MAX &&
+			     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
+				;
+			k = cmd_head(&w, s, e, &line, &cd);
+		}
 		ok = k < e && in_list(base(SWD(&w, k)), fetchers) &&
 		     fetch_stdout(&w, k, e);
 		for (j = e; ok && j < w.n; j++)	/* a list's other commands mix in */
-			ok = !w.op[j] || !strcmp(SWD(&w, j), "|") ||
-			     strpbrk(SWD(&w, j), "<>");
-		if (ok && e < w.n)
-			uend = w.rs[e];	/* the URL: before the first operator */
+		{
+			o = SWD(&w, j);
+			if (!w.op[j] || !strcmp(o, "|") || strpbrk(o, "<>") ||
+			    (j + 1 == w.n && (!strcmp(o, "&") ||
+			                      (paren && !strcmp(o, ")")))))
+				continue;
+			/* && echo ok: a short line, if it runs nothing */
+			if (strcmp(o, "&&") || j + 1 >= w.n ||
+			    strcmp(base(SWD(&w, j + 1)), "echo"))
+				ok = 0;
+			for (j += 2; ok && j < w.n && !w.op[j]; j++)
+				ok = !strpbrk(SWD(&w, j), "$`");
+			j--;
+		}
+		if (ok && u < w.n)
+			uend = w.rs[u];	/* the URL: before the first operator */
 		free(w.b);
 	}
 	memset(&m, 0, sizeof m);
