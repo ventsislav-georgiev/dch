@@ -3463,6 +3463,18 @@ ci_at(const char *s, size_t n, size_t i, const char *p)
 	return n - i >= l && !strncasecmp(s + i, p, l);
 }
 
+/* s[i..n) starts with the tag name p and the name ends there: a '>', a '/'
+** or a blank follows (#539: `<bodyguard` is no `<body`) */
+static int
+ci_tag(const char *s, size_t n, size_t i, const char *p)
+{
+	size_t l = strlen(p);
+
+	return ci_at(s, n, i, p) && n - i > l &&
+	       (s[i + l] == '>' || s[i + l] == '/' || s[i + l] == ' ' ||
+	        (s[i + l] >= '\t' && s[i + l] <= '\r'));
+}
+
 /* #527: [*b, *e) the <title> of s[0..n)'s HTML head, 1; else 0. Only when
 ** s looks like HTML (a doctype, <html or <head before it, or nothing but
 ** blanks and tags), never in a comment, <script>, <style> or <svg>, nor
@@ -3484,9 +3496,10 @@ ft_html(const char *s, size_t n, size_t *b, size_t *e)
 			lead &= s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r');
 			continue;
 		}
-		for (k = 0; k < 4 && !ci_at(s, n, i, skip[k][0]); k++)
+		for (k = 0; k < 4 && !(k ? ci_tag : ci_at)(s, n, i, skip[k][0]);
+		     k++)
 			;
-		if (ci_at(s, n, i, "</head") || ci_at(s, n, i, "<body"))
+		if (ci_tag(s, n, i, "</head") || ci_tag(s, n, i, "<body"))
 			return 0;
 		if (ci_at(s, n, i, "<title>"))
 		{
@@ -3495,8 +3508,8 @@ ft_html(const char *s, size_t n, size_t *b, size_t *e)
 			*e = *b + j;
 			return (html || lead) && j != SIZE_MAX;
 		}
-		html |= ci_at(s, n, i, "<!doctype") || ci_at(s, n, i, "<html") ||
-		        ci_at(s, n, i, "<head");
+		html |= ci_at(s, n, i, "<!doctype") || ci_tag(s, n, i, "<html") ||
+		        ci_tag(s, n, i, "<head");
 		j = k < 4 ? xr_find(s + i, n - i, skip[k][1], strlen(skip[k][1])) : 0;
 		if (j == SIZE_MAX || !(p = memchr(s + i + j, '>', n - i - j)))
 			return 0;

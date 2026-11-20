@@ -513,7 +513,13 @@ def fixture_fetched():
              "e\u0301</title>"),
             (15, "https://inv.example.com/i",
              "<title>a\u200bb\ufeffc\U000e0041d\u00ade</title>"),
-            (16, "https://%s/p" % LONGHOST, "<title>Long Host</title>")]:
+            (16, "https://%s/p" % LONGHOST, "<title>Long Host</title>"),
+            (41, "https://tn1.example.com/a", "<html><head><bodyguard>"
+             "</bodyguard><title>Real</title></head>"),
+            (42, "https://tn2.example.com/a",
+             "<head><svgfoo/><title>Real</title>"),
+            (43, "https://tn3.example.com/a",
+             "<html><header>nav</header><title>Real</title>")]:
         call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
                                                       "prompt": "sum"}, out)
     call("2026-11-06T11:00:00Z", 11, "Bash",
@@ -635,6 +641,11 @@ def test_fetched():
     p, ls, rv = res("https://raw.example.com/install.sh")
     check("#527 a curl'd script's \"# \" comment is no title (headings "
           "are WebFetch markdown only)", not rv, rv)
+    for n in "123":
+        t = title("https://tn%s.example.com/a" % n)
+        check("#539 a tag name ends at > / or a blank: <bodyguard>, "
+              "<svgfoo/>, </header> are not <body>, <svg>, </head (%s)" % n,
+              t == "Real", t)
     t = title("https://ent.example.com/e")
     check("#527 numeric and named entities decoded, a decoded bidi or "
           "control blanked, an out-of-range one literal",
