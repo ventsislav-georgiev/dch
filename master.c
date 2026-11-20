@@ -71,6 +71,13 @@ struct client
 	** the program's queries. The next MSG_ATTACH clears it; a --restart
 	** carries it (the blob's view line). */
 	int viewing;
+	/* Passive (MSG_PASSIVE, #566): attached as a silent extra. It gets
+	** the output and its input goes in, but its size never applies and it
+	** counts in no busy check; peer is the pid the kernel recorded for
+	** the connection, which dch --passive/--active name it by. A
+	** --restart carries the flag (the blob's passive line). */
+	int passive;
+	long peer;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
 	** receives framed responses on the same socket attached clients
@@ -3135,6 +3142,7 @@ struct resume_state
 	unsigned char cin[RESUME_MAX_CLI][PKT_HDR + PKT_MAX];
 	size_t cinlen[RESUME_MAX_CLI];
 	unsigned char cview[RESUME_MAX_CLI];	/* its view was up */
+	unsigned char cpassive[RESUME_MAX_CLI];	/* it was passive (#566) */
 	int ncfd;
 	unsigned char *snap;
 	size_t snaplen;
@@ -3272,6 +3280,8 @@ restart_save(const char *path, int lfd, int ackfd, int ringfd, int core)
 		** where a field on the cli line would cost it the client */
 		if (p->viewing)
 			fprintf(f, "view %d\n", p->fd);
+		if (p->passive)
+			fprintf(f, "passive %d\n", p->fd);
 	}
 
 	/* Drop the snapshot rather than write one the loader will reject: past
@@ -3435,6 +3445,15 @@ restart_load(void)
 			for (i = 0; i < resume.ncfd; i++)
 				if (resume.cfd[i] == cfd)
 					resume.cview[i] = 1;
+			continue;
+		}
+		if (sscanf(line, "passive %d", &cfd) == 1)
+		{
+			int i;
+
+			for (i = 0; i < resume.ncfd; i++)
+				if (resume.cfd[i] == cfd)
+					resume.cpassive[i] = 1;
 			continue;
 		}
 		if (strncmp(line, "dec ", 4) == 0)
@@ -3866,20 +3885,26 @@ do_cmd(struct client *p, const unsigned char *payload, unsigned int plen)
 
 	if (plen >= 1 && (payload[0] & DCH_CMD_F_STAT))
 	{
-		unsigned char st[DCH_CMD_STAT_LEN];
+		unsigned char st[DCH_CMD_STAT_LEN2];
 		struct client *c;
-		unsigned int n = 0;
+		unsigned int n = 0, np = 0;
+		unsigned int sl = payload[0] & DCH_CMD_F_PASSIVE
+		                  ? DCH_CMD_STAT_LEN2 : DCH_CMD_STAT_LEN;
 
 		for (c = clients; c; c = c->next)
-			n += c->attached ? 1 : 0;
+		{
+			n += c->attached && !c->passive ? 1 : 0;
+			np += c->attached && c->passive ? 1 : 0;
+		}
 		st[0] = (unsigned char)(the_pty.ws.ws_row & 0xff);
 		st[1] = (unsigned char)(the_pty.ws.ws_row >> 8);
 		st[2] = (unsigned char)(the_pty.ws.ws_col & 0xff);
 		st[3] = (unsigned char)(the_pty.ws.ws_col >> 8);
 		st[4] = (unsigned char)(n & 0xff);
 		st[5] = (unsigned char)((n >> 8) & 0xff);
-		if (queue_frame(p, MSG_CMD_STAT, DCH_CMD_STAT_LEN, st,
-		                DCH_CMD_STAT_LEN) < 0)
+		st[6] = (unsigned char)(np & 0xff);
+		st[7] = (unsigned char)((np >> 8) & 0xff);
+		if (queue_frame(p, MSG_CMD_STAT, sl, st, sl) < 0)
 			return -1;
 	}
 	for (total = 0; cur_argv && cur_argv[argc]; argc++)
@@ -3988,6 +4013,7 @@ link_client(int fd)
 		return NULL;
 	}
 	p->fd = fd;
+	p->peer = fd_peer_pid(fd);
 	p->pprev = &clients;
 	p->next = *(p->pprev);
 	if (p->next)
@@ -4244,9 +4270,11 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Window size change request, without a forced redraw. */
 	else if (type == MSG_WINCH)
 	{
-		/* Held: the size is still recorded; the respawn applies it. */
-		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
-		if (the_pty.fd >= 0)
+		/* Held: the size is still recorded; the respawn applies it. A
+		** passive client's size never applies (#566). */
+		if (!p->passive)
+			memcpy(&the_pty.ws, payload, sizeof(struct winsize));
+		if (the_pty.fd >= 0 && !p->passive)
 			ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
 		dch_vt_resize(the_pty.ws.ws_col, the_pty.ws.ws_row);
 		if (p->want_replay && (queue_replay(p) < 0 ||
@@ -4274,9 +4302,11 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		}
 
 		/* Set the window size. */
-		/* Held: the size is still recorded; the respawn applies it. */
-		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
-		if (the_pty.fd >= 0)
+		/* Held: the size is still recorded; the respawn applies it.
+		** Passive: the size stays (#566); the replay is at it. */
+		if (!p->passive)
+			memcpy(&the_pty.ws, payload, sizeof(struct winsize));
+		if (the_pty.fd >= 0 && !p->passive)
 			ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
 		dch_vt_resize(the_pty.ws.ws_col, the_pty.ws.ws_row);
 
@@ -4311,6 +4341,37 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		{
 			killpty(&the_pty, SIGWINCH);
 		}
+	}
+
+	/* Passive attach (#566): on an attached connection the client marks
+	** itself; on a control one, {on; pid} marks the attached clients with
+	** that peer pid. Not "someone showed up": no gate opening. */
+	else if (type == MSG_PASSIVE)
+	{
+		struct client *c;
+		long pid;
+		int hit = 0;
+
+		if (p->role == ROLE_ATTACHED)
+		{
+			p->passive = len >= 1 && payload[0];
+			return 0;
+		}
+		p->role = ROLE_CONTROL;
+		if (len < 5)
+			return queue_status(p, MSG_ACK, DCH_ST_ERR);
+		pid = (long)((unsigned long)payload[1] |
+		             (unsigned long)payload[2] << 8 |
+		             (unsigned long)payload[3] << 16 |
+		             (unsigned long)payload[4] << 24);
+		for (c = clients; c; c = c->next)
+			if (c->role == ROLE_ATTACHED && pid > 0 && c->peer == pid)
+			{
+				c->passive = payload[0] != 0;
+				hit = 1;
+			}
+		dch_trace("passive=%d pid=%ld hit=%d", payload[0], pid, hit);
+		return queue_status(p, MSG_ACK, hit ? DCH_ST_OK : DCH_ST_ERR);
 	}
 
 	/* A verb this master does not know — i.e. the client is NEWER than the
@@ -4540,6 +4601,7 @@ master_adopt(void)
 			continue;
 		p->attached = p->armed = 1;
 		p->viewing = resume.cview[i];
+		p->passive = resume.cpassive[i];
 		p->role = ROLE_ATTACHED;
 		/* Half-read frame from before the exec. Without it the next
 		** read() lands mid-packet and the stream desyncs for good. */

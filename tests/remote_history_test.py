@@ -231,7 +231,8 @@ def main():
               "in its old place",
               row.get("cwd") == cwd and keys[-1] == "cwd"
               and keys[:len(LS_KEYS)] == LS_KEYS
-              and set(keys[len(LS_KEYS):-1]) <= {"cols", "rows", "clients"},
+              and set(keys[len(LS_KEYS):-1]) <= {"cols", "rows", "clients",
+                                                  "passive_clients"},
               r.stdout)
         r = dch(slow, "--ls-json", "--remote", *H)
         rem = [x for x in json.loads(r.stdout) if "host" in x]
