@@ -567,10 +567,13 @@ def test_light_file(n, repo, plain):
     for name, tgt in (("dangout", os.path.join(plain, "nodir")),
                       ("dangdot", os.path.join(repo, "..", "plain", "nodir")),
                       ("dangvia", os.path.join(repo, "outlink", "nodir")),
+                      ("dangdd", os.path.join(repo, "nodir", "..", "..",
+                                              "plain", "nodir")),
+                      ("dangchain", os.path.join(repo, "dangout")),
                       ("loop1", "loop1")):
         os.symlink(tgt, os.path.join(repo, name))
         r, ls, rv = ref(n, name + "/x.c", full=False)
-        check("light #525: a dangling link %s (out, via a link out, a loop):"
+        check("light #525: a dangling link %s (out, via a link out, '..' back out, a chain, a loop):"
               " no line" % name, r.returncode == 0 and not rv and ls and
               ls[-1].get("done") is True, r.stdout[-300:])
     r, ls, rv = ref(n, "big.light:1", full=False)

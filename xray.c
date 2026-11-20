@@ -11030,8 +11030,10 @@ res_under(const char *p, const char *root)
 }
 
 /* lnk is a dangling symlink: its target, read textually, lies in the real
-** root rr (#525, QA 1.112.0 UQ3). A ".." part, or a target whose own nearest
-** parent is not a plain in-root dir (another link), says no: outside. */
+** root rr (#525, QA 1.112.0 UQ3). A ".." part, or a target that exists (a
+** loop, a chain of links), says no; else the target's nearest existing
+** parent decides: in the root (a missing path or one through an in-root
+** link) says yes, anything out of it, a link out too, says no. */
 static int
 res_dangle_in(const char *lnk, const char *rr)
 {
