@@ -582,7 +582,12 @@ def fixture_fetched():
             ("cd /tmp && curl -s -o f https://n6.example.com/a",
              "<title>Cd To File</title>"),
             ("curl -s https://n7.example.com/a & cat x",
-             "<title>Bg Then Cat</title>")), 21):
+             "<title>Bg Then Cat</title>"),
+            # #565: an echo's text is in the output: no tag, no expansion
+            ("curl -s https://n8.example.com/a && echo $HOME",
+             "<title>Echo Home</title>"),
+            ("curl -s https://n9.example.com/a && echo '<title>X</title>'",
+             "<html><title>Echo Fake</title>")), 21):
         call("2026-11-07T10:%02d:00Z" % k, k, "Bash", {"command": cmd}, out)
     call("2026-11-07T11:00:00Z", 20, "WebFetch",
          {"url": "https://q.example.com/x?r=/", "prompt": "sum"},
@@ -759,7 +764,10 @@ def test_fetched():
               len(rv) == 1 and rv[0]["title"] == t, rv)
     for u, why in (("https://n5.example.com/a", "&& echo $(date)"),
                    ("https://n6.example.com/a", "cd && curl -o f"),
-                   ("https://n7.example.com/a", "curl & cat x")):
+                   ("https://n7.example.com/a", "curl & cat x"),
+                   ("https://n8.example.com/a", "&& echo $HOME (#565)"),
+                   ("https://n9.example.com/a", "&& echo '<title>X</title>' "
+                    "(#565)")):
         p, ls, rv = res(u)
         check("#542 %s: not the only stdout fetch, no title" % why,
               p.returncode == 0 and not rv, rv)

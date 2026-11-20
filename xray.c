@@ -7056,12 +7056,12 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 			    (j + 1 == w.n && (!strcmp(o, "&") ||
 			                      (paren && !strcmp(o, ")")))))
 				continue;
-			/* && echo ok: a short line, if it runs nothing */
+			/* && echo ok: a short line, if it runs nothing and has no tag (#565) */
 			if (strcmp(o, "&&") || j + 1 >= w.n ||
 			    strcmp(base(SWD(&w, j + 1)), "echo"))
 				ok = 0;
 			for (j += 2; ok && j < w.n && !w.op[j]; j++)
-				ok = !strpbrk(SWD(&w, j), "$`");
+				ok = !strpbrk(SWD(&w, j), "$`<");
 			j--;
 		}
 		if (ok && u < w.n)
