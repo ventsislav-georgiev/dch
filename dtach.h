@@ -173,8 +173,10 @@ enum
 				** grid size. ONLY sent when the request set
 				** DCH_READ_F_META (dch --follow). */
 	MSG_CMD_STAT	= 17,	/* payload: {u16 rows LE; u16 cols LE; u16
-				** attached clients LE} — the pty winsize the
-				** master holds. ONLY sent, ahead of the
+				** attached clients LE; with DCH_CMD_F_PASSIVE
+				** u16 passive clients LE} — the pty winsize
+				** the master holds; "attached" leaves the
+				** passive ones out (#566). ONLY sent, ahead of the
 				** MSG_CMD reply, when the request set
 				** DCH_CMD_F_STAT (dch --ls-json). */
 	/* X-ray shell ring (#119). Control verbs; the master protocol only,
@@ -212,6 +214,18 @@ enum
 				** DCH_ST_BUSY when some of them were dropped
 				** (the program is not reading and 4 MB wait).
 				** A master before it answers DCH_ST_UNSUP. */
+	MSG_PASSIVE	= 24,	/* Passive attach (#566). On an attached
+				** connection, payload {u8 on}: this client
+				** (dch -a --passive); a master before it
+				** ignores it. On a control connection,
+				** payload {u8 on; u32 pid LE}: every attached
+				** client whose peer pid is pid (dch --passive
+				** / --active). MSG_ACK reply: DCH_ST_OK, or
+				** DCH_ST_ERR when none has that pid; a master
+				** before it answers DCH_ST_UNSUP. A passive
+				** client gets output and sends input, but
+				** never sets the pty size and counts in no
+				** busy check or "clients". */
 };
 #define DCH_RESTART_F_RING 0x01	/* adopts the blob's ringfd and core lines */
 
@@ -287,7 +301,11 @@ enum
 
 /* MSG_CMD flags byte (payload[0]; masters before it ignore the payload) */
 #define DCH_CMD_F_STAT    0x01	/* also send MSG_CMD_STAT first */
+#define DCH_CMD_F_PASSIVE 0x02	/* with STAT: a u16 passive-client count
+				** follows (DCH_CMD_STAT_LEN2); a master
+				** before #566 sends the short stat */
 #define DCH_CMD_STAT_LEN  6	/* MSG_CMD_STAT payload size */
+#define DCH_CMD_STAT_LEN2 8	/* ... with DCH_CMD_F_PASSIVE */
 
 #define DCH_WAIT_MAX 512	/* MSG_WAIT pattern cap */
 
@@ -364,6 +382,10 @@ void dch_trace(const char *fmt, ...)
 extern int dch_trace_fd;
 
 void write_buf_or_fail(int fd, const void *buf, size_t count);
+/* the pid at the other end of a connected local socket, or -1 */
+long fd_peer_pid(int fd);
+/* dch -a --passive (#566): the attach marks itself passive */
+extern int dch_attach_passive;
 void write_packet_or_fail(int fd, const struct packet *pkt);
 size_t packet_payload_len(const struct packet *pkt);
 

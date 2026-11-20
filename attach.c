@@ -535,6 +535,7 @@ detach_double_us(void)
 ** it has 1004 on (Claude Code does); otherwise they are swallowed.
 ** DCH_FOCUS_RESIZE=0, or focus_resize = false in the config, turns all of it
 ** off: no 1004 from the client, nothing intercepted. */
+int dch_attach_passive;		/* dch -a --passive (#566) */
 static int focus_on;		/* this attach turned 1004 on */
 static int inner_focus;		/* the inner program has 1004 on */
 static int fo_st, fo_val, fo_hit;	/* focus_scan's parser state */
@@ -1157,6 +1158,16 @@ attach_main(int noerror)
 	pkt.type = MSG_ATTACH;
 	pkt.len = (unsigned short)dch_replay_scrollback();
 	write_packet_or_fail(s, &pkt);
+	/* #566: passive before the sizing frame below, so that never applies;
+	** a master before it skips the frame. shortcut: local only, a remote
+	** attach attaches active; upgrade when Prosper hides remote ones. */
+	if (dch_attach_passive && attach_sock < 0)
+	{
+		pkt.type = MSG_PASSIVE;
+		pkt.len = 1;
+		pkt.u.buf[0] = 1;
+		write_packet_or_fail(s, &pkt);
+	}
 
 	/* We would like a redraw, too. WINCH when unspecified — see the
 	** resume path above; a ^L redraw double-types into modern TUIs. */

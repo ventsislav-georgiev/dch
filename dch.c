@@ -109,7 +109,7 @@ packet_payload_len(const struct packet *pkt)
 	    pkt->type == MSG_READ || pkt->type == MSG_WAIT ||
 	    pkt->type == MSG_RESTART || pkt->type == MSG_RESPAWN ||
 	    pkt->type == MSG_CMD || pkt->type == MSG_RING_READ ||
-	    pkt->type == MSG_RESTART_CAPS)
+	    pkt->type == MSG_RESTART_CAPS || pkt->type == MSG_PASSIVE)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -2561,26 +2561,36 @@ is_master_of(long pid, const char *sp)
 	return ok;
 }
 
-/* The pid listening on sp, as the kernel recorded it, or -1. */
-static long
-sock_peer_pid(const char *sp)
+/* The pid at the other end of the connected local socket fd, as the kernel
+** recorded it, or -1. */
+long
+fd_peer_pid(int fd)
 {
-	int s = control_connect_path(sp);
 	long pid = -1;
 #if defined(LOCAL_PEERPID)
 	pid_t p;
 	socklen_t l = sizeof p;
 
-	if (s >= 0 && getsockopt(s, SOL_LOCAL, LOCAL_PEERPID, &p, &l) == 0)
+	if (fd >= 0 && getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &p, &l) == 0)
 		pid = p;
 #elif defined(SO_PEERCRED)
 	/* struct ucred needs _GNU_SOURCE; its ABI is { pid, uid, gid }. */
 	unsigned int cr[3];
 	socklen_t l = sizeof cr;
 
-	if (s >= 0 && getsockopt(s, SOL_SOCKET, SO_PEERCRED, cr, &l) == 0)
+	if (fd >= 0 && getsockopt(fd, SOL_SOCKET, SO_PEERCRED, cr, &l) == 0)
 		pid = (long)cr[0];
 #endif
+	return pid;
+}
+
+/* The pid listening on sp, as the kernel recorded it, or -1. */
+static long
+sock_peer_pid(const char *sp)
+{
+	int s = control_connect_path(sp);
+	long pid = fd_peer_pid(s);
+
 	if (s >= 0)
 		close(s);
 	return pid;
@@ -2781,6 +2791,8 @@ usage(void)
 	    "  dch --cwd <dir> --spawn ...  the spawned session's start dir\n"
 	    "  dch --scrollback <n>  with an attach: the last n lines of the\n"
 	    "                   session's scrollback first (DCH_REPLAY_SCROLLBACK)\n"
+	    "  dch --passive    with an attach: attach passive, a silent extra that\n"
+	    "                   never sets the size or makes the session busy\n"
 	    "  dch --hosts <h1,h2,...>   the remote hosts, [label=]host[:port],\n"
 	    "                   instead of your online tailnet peers\n"
 	    "  dch --remote     with -ls, -lj, --ls-json, --history: remote rows\n"
@@ -2802,6 +2814,9 @@ usage(void)
 	    "  dch --run <name> <text...>                 type text, press enter\n"
 	    "  dch --keys <name> <key...>                 send keys (ctrl+c, up, f2, ...)\n"
 	    "  dch --read <name> [--ansi] [--recent [N]]  print session screen\n"
+	    "  dch --passive|--active <name> --pid <pid>  mark the attached client\n"
+	    "                                             with that pid passive or\n"
+	    "                                             active again (#566)\n"
 	    "  dch --read <name> --cursor                 screen on stdout, plus\n"
 	    "                                             `cursor <row> <col>\n"
 	    "                                             <visible> <wrap>` (1-based)\n"
@@ -3189,6 +3204,7 @@ spawn_master(char *exe, const char *name, char *sockp,
 static const char stuck_fmt[] = "dch: " STUCK_MSG "\n";
 
 static int attach_xray_view(void);
+static int passive_clients_on(const char *path);
 static int attach_remote;	/* this attach is a host's: so is its chord's view */
 /* The next attach's route as the picked row or the view is (#210), not as
 ** its name routes: 1 the host's, -1 local, 0 by the name. One attach. */
@@ -3252,8 +3268,11 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 			                     sock_dir, cand) >= sizeof(sp))
 				continue;
 			struct stat st;
+			int live;
+			/* passive clients (#566) leave a session free */
 			if (stat(sp, &st) != 0 || !S_ISSOCK(st.st_mode) ||
-			    live_clients_on(sp) == 0)
+			    (live = live_clients_on(sp)) == 0 ||
+			    live <= passive_clients_on(sp))
 			{
 				memcpy(session_name, cand, strlen(cand) + 1);
 				break;
@@ -5406,6 +5425,51 @@ respawn_req(const char *path, int op, char **cmd, int ncmd)
 	return type == MSG_ACK && len <= 0xffff ? (int)len : DCH_ST_ERR;
 }
 
+/* dch --passive/--active <name> --pid <pid> (#566): MSG_PASSIVE marks the
+** attached client with that peer pid. 0 done; 1 with a one-line reason. */
+static int
+do_passive_verb(const char *name, long pid, int on)
+{
+	unsigned char req[5], payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	int s, rc;
+
+	if (pid <= 0)
+	{
+		fprintf(stderr, "dch: --%s needs --pid <pid>\n",
+		        on ? "passive" : "active");
+		return 1;
+	}
+	if (make_sock_path(name) < 0)
+		return 1;
+	if ((s = control_connect_path(sock_path)) < 0)
+	{
+		if (errno == EAGAIN)
+			fprintf(stderr, stuck_fmt, name);
+		else
+			fprintf(stderr, "dch: no session: %s\n", name);
+		return 1;
+	}
+	req[0] = (unsigned char)(on != 0);
+	req[1] = (unsigned char)(pid & 0xff);
+	req[2] = (unsigned char)((pid >> 8) & 0xff);
+	req[3] = (unsigned char)((pid >> 16) & 0xff);
+	req[4] = (unsigned char)((pid >> 24) & 0xff);
+	send_ctl(s, MSG_PASSIVE, req, sizeof req);
+	rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+	close(s);
+	if (rc <= 0)
+		return ctl_dead_exit(&r, on ? "passive" : "active");
+	if (type == MSG_ACK && len == DCH_ST_ERR)
+	{
+		fprintf(stderr, "dch: %s: no attached client with pid %ld\n",
+		        name, pid);
+		return 1;
+	}
+	return ctl_status_exit(type == MSG_ACK ? len : DCH_ST_ERR);
+}
+
 /* Arm a respawn (or, on a held session, perform it now); no command = hold,
 ** cancel = drop the arm (and end a held session). */
 static int
@@ -5522,6 +5586,7 @@ struct cmd_info
 	size_t tail_len;
 	int stat;			/* 1: the master sent MSG_CMD_STAT */
 	unsigned int rows, cols, clients;	/* pty winsize, attached */
+	unsigned int passive;		/* passive clients (#566); 0 from older */
 };
 
 static void
@@ -5564,13 +5629,16 @@ cmd_query_f(const char *path, struct cmd_info *ci, unsigned char flags)
 		}
 		if (type == MSG_CMD_STAT)
 		{
-			if (len == DCH_CMD_STAT_LEN)
+			if (len == DCH_CMD_STAT_LEN ||
+			    len == DCH_CMD_STAT_LEN2)
 			{
 				ci->stat = 1;
 				ci->rows = payload[0] | (unsigned int)payload[1] << 8;
 				ci->cols = payload[2] | (unsigned int)payload[3] << 8;
 				ci->clients = payload[4] |
 				              (unsigned int)payload[5] << 8;
+				ci->passive = len < DCH_CMD_STAT_LEN2 ? 0
+				    : payload[6] | (unsigned int)payload[7] << 8;
 			}
 			continue;
 		}
@@ -5627,6 +5695,21 @@ cmd_query_f(const char *path, struct cmd_info *ci, unsigned char flags)
 	ci->tail = q;
 	ci->tail_len = (size_t)(end - q);
 	return 0;
+}
+
+/* The passive clients attached at `path` (#566); 0 from a master before it
+** or none listening. */
+static int
+passive_clients_on(const char *path)
+{
+	struct cmd_info ci;
+	int n;
+
+	if (cmd_query_f(path, &ci, DCH_CMD_F_STAT | DCH_CMD_F_PASSIVE) != 0)
+		return 0;
+	n = (int)ci.passive;
+	cmd_info_free(&ci);
+	return n;
 }
 
 static int
@@ -17050,7 +17133,7 @@ main_run(int argc, char **argv)
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
 	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP,
-	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW }
+	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW, A_PASSIVE }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
@@ -17058,6 +17141,8 @@ main_run(int argc, char **argv)
 	int opt_agent_json = 0, opt_hist_json = 0, opt_json = 0;
 	int opt_remote = 0;
 	int opt_lsfollow = 0;	/* --ls-json --follow (#103) */
+	long opt_pid = 0;	/* --passive/--active's --pid (#566) */
+	int opt_passive = 0;	/* --passive 1, --active 0 */
 	int say_at = 0, say_n = 0;
 	char opt_as[512] = "";
 	int opt_cols = 0, opt_rows = 0;
@@ -17239,6 +17324,42 @@ main_run(int argc, char **argv)
 			}
 			opt_cwd = argv[i];
 			cskip[i - 1] = cskip[i] = 1;
+			i++;
+		}
+		else if ((strcmp(a, "--passive") == 0 && !attach_only &&
+		          i + 1 < argc && argv[i + 1][0] &&
+		          argv[i + 1][0] != '-') ||
+		         strcmp(a, "--active") == 0)
+		{
+			/* #566: the verb; a bare --passive is the attach flag */
+			action = A_PASSIVE;
+			opt_passive = a[2] == 'p';
+			if (++i >= argc || !argv[i][0] ||
+			    strlen(argv[i]) >= sizeof session_name)
+			{
+				fprintf(stderr, "dch: %s needs a session name\n", a);
+				return 1;
+			}
+			snprintf(session_name, sizeof session_name, "%s",
+			         argv[i++]);
+		}
+		else if (strcmp(a, "--passive") == 0)
+		{
+			dch_attach_passive = 1;
+			i++;
+		}
+		else if (strcmp(a, "--pid") == 0)
+		{
+			char *e = NULL;
+
+			if (++i < argc)
+				opt_pid = strtol(argv[i], &e, 10);
+			if (i >= argc || e == argv[i] || *e || opt_pid <= 0 ||
+			    opt_pid > 0x7fffffffL)
+			{
+				fprintf(stderr, "dch: --pid wants a process id\n");
+				return 1;
+			}
 			i++;
 		}
 		else if (strcmp(a, "--scrollback") == 0)
@@ -18056,7 +18177,7 @@ main_run(int argc, char **argv)
 		                        sl.n };
 		/* pty size and attached clients (#099), from the same MSG_CMD
 		** round trip; rows/cols/clients, or -1: the master can't say */
-		long (*sz)[3] = cr.v ? calloc((size_t)sl.n + 1, sizeof *sz)
+		long (*sz)[4] = cr.v ? calloc((size_t)sl.n + 1, sizeof *sz)
 		                     : NULL;
 		char cdirs[16][1100], sp[1100];
 		int nd = 0;
@@ -18070,13 +18191,15 @@ main_run(int argc, char **argv)
 			if (sz)
 				sz[k][0] = -1;
 			session_sock_path(sl.v[k], sp, sizeof sp);
-			if (cmd_query_f(sp, &ci, DCH_CMD_F_STAT) != 0)
+			if (cmd_query_f(sp, &ci, DCH_CMD_F_STAT |
+			                DCH_CMD_F_PASSIVE) != 0)
 				continue;
 			if (sz && ci.stat)
 			{
 				sz[k][0] = ci.rows;
 				sz[k][1] = ci.cols;
 				sz[k][2] = ci.clients;
+				sz[k][3] = ci.passive;
 			}
 			if (ci.pid > 0 && strcmp(ci.state, "held") != 0)
 			{
@@ -18154,8 +18277,9 @@ main_run(int argc, char **argv)
 				(void)put_shells(c->pid, c->sid, tp_ok ? tp : NULL, 1);
 			/* omitted, not 0, when the master can't answer */
 			if (sz && sz[k][0] >= 0)
-				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",
-				       sz[k][1], sz[k][0], sz[k][2]);
+				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld,"
+				       "\"passive_clients\":%ld",
+				       sz[k][1], sz[k][0], sz[k][2], sz[k][3]);
 			/* last, so every key before keeps its place; null with
 			** no record (DCH_NO_HISTORY) or an ended one */
 			struct hrec h = {0};
@@ -18555,6 +18679,8 @@ main_run(int argc, char **argv)
 		                       opt_cancel);
 	case A_CMD:
 		return do_cmd_verb(session_name);
+	case A_PASSIVE:
+		return do_passive_verb(session_name, opt_pid, opt_passive);
 	case A_SEND:
 		return do_send_verb(session_name, inner_argv, inner_argc, 0);
 	case A_RUN:
