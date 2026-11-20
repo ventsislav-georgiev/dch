@@ -537,16 +537,14 @@ Disable the detach character.
 and
 .B \-d
 without a name, and the detach\-key switch open a full\-screen picker with
-up to three tabs, each with its count:
+tabs, each with its count:
 .BR Sessions ;
-.BR Sidekicks ,
-the live sessions whose name, alias or harness title matches
-.B sidekick_pattern
-in the config file (a POSIX extended regular expression, case\-insensitive,
-default
-.BR \-qa ;
-an invalid one, or one matching every name, is matched as plain text; empty
-turns the tab off), shown only when there are some; and
+one per session group, named by it, in the config's order, shown only when
+it has sessions (see
+.B group
+under
+.BR "CONFIG FILE" );
+and
 .BR History ,
 the ended sessions of
 .BR \-\-history ,
@@ -557,7 +555,7 @@ A name with a session running is decided by the name, not by its records:
 pinned, it stays on History with ENDED
 .B running
 (in the accent) and WHEN its last output; not pinned, it is not on History
-(it is on Sessions or Sidekicks) until it ends.
+(it is on Sessions or a group's tab) until it ends.
 With remote hosts on, History also lists the other hosts' (see
 .BR "REMOTE HOSTS" ),
 as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host
@@ -648,7 +646,7 @@ The filter stays across tab switches and reloads until
 which clears it; a later
 .B Esc
 quits.
-On Sessions and Sidekicks:
+On Sessions and the groups' tabs:
 .B Enter
 attaches (or kills, detaches for
 .BR \-k ,
@@ -753,7 +751,7 @@ apart from
 xterm's modifyOtherKeys form is read too.
 .B o
 does the same on any terminal.
-On Sessions and Sidekicks
+On Sessions and the groups' tabs
 .B Shift\-Enter
 attaches, as
 .B Enter
@@ -4220,7 +4218,7 @@ and
 .B \-\-cwd
 before the verb), and
 .B dch
-alone is the picker with the remote rows only (no History, Sidekicks,
+alone is the picker with the remote rows only (no History, groups,
 row actions or settings).
 Its config is
 .IR %APPDATA%\(rsdch\(rsconfig ,
@@ -4296,8 +4294,29 @@ and under
 .TP
 .B sidekick_pattern
 A string read by the session picker, default
-.BR \-qa ;
-empty: no Sidekicks tab.
+.BR \-qa :
+its one group,
+.BR Sidekicks ,
+when the file has no valid
+.B group
+line; empty: no group.
+.TP
+\fBgroup\fP = \fIname\fP = \fIregex\fP
+One line per session group, repeated, in tab order; not set by
+.BR "dch \-\-config" ,
+which keeps these lines as they are.
+The value is split at its first =, both parts trimmed: the name 1\-32
+bytes, the regex at most 255, a POSIX extended one, case\-insensitive (an
+invalid one, or one matching every name, is matched as plain text).
+A live session goes to the first group whose regex matches its name, alias
+or harness title, else to Sessions.
+A line with an empty name or regex, or one over its cap, is skipped and the
+others still apply; at most 8 groups, the lines after the 8th ignored.
+Any valid group line replaces
+.BR sidekick_pattern ;
+none with an empty
+.B sidekick_pattern
+means no groups.
 .TP
 .B picker_sort
 .B activity

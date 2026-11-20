@@ -119,20 +119,35 @@ Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 ### The session picker
 
 `dch -l`, `dch -k` / `dch -d` without a name, and the detach-key switch open
-the same full-screen picker, modelled on Prosper's Agent Island. It has up to
-three tabs, each with its count: **Sessions**; **Sidekicks**, the live
-sessions whose name, alias or harness title (the Claude or Codex name the row
-shows) matches `sidekick_pattern` in the config file (a POSIX extended regex,
-case-insensitive, default `-qa`; an invalid one, or one that matches every
-name, is matched as plain text; set it empty for no tab), shown only when
-there are some; and **History**, the ended sessions of `--history`, one row
+the same full-screen picker, modelled on Prosper's Agent Island. Its tabs,
+each with its count: **Sessions**; one tab per session group, named by it,
+in the config's order, shown only when it has sessions; and **History**.
+A group is a `group = <name> = <regex>` line in the [config
+file](#config-file), one per group: the name (1-32 bytes) before the value's
+first `=`, the regex (at most 255 bytes) after it, both trimmed. The regex is
+a POSIX extended one, case-insensitive; an invalid one, or one that matches
+every name, is matched as plain text. A live session goes to the first group
+whose regex matches its name, alias or harness title (the Claude or Codex
+name the row shows), else to Sessions. A line with an empty name or regex, or
+one over its cap, is skipped and the others still apply; at most 8 groups,
+the lines after the 8th ignored. With no valid group line, `sidekick_pattern`
+(default `-qa`) is the one group, **Sidekicks**, as before; any group line
+replaces it, and no group line with `sidekick_pattern =` (empty) means no
+groups:
+
+```
+group = Review = -review$
+group = Sidekicks = -qa
+```
+
+**History** holds the ended sessions of `--history`, one row
 per session name (its newest record, pinned when any record of the name is):
 every pinned name, then the newest other names while there are fewer than 50
 rows, so pinned names alone can make more (`--history` itself still lists
 every record, newest first). A name with a session running is decided by the
 name, not by its records: pinned, it stays on History, its ENDED `running` in
 the accent and WHEN its last output, and `Enter` attaches that session; not
-pinned, it is not on History (it is on Sessions or Sidekicks), and its older
+pinned, it is not on History (it is on Sessions or a group's tab), and its older
 records come back when it ends. With remote hosts on, History also lists the
 other hosts' ended sessions as `host:name`, the host faint, at most 50 names
 per host on top of the local rows, so a full local History never hides them
@@ -168,7 +183,7 @@ input), the view, moving about; destructive keys are red. A window too narrow
 for all of them drops the agents' group, then the view's, never cutting a
 hint.
 
-| Key | Sessions / Sidekicks | History |
+| Key | Sessions / a group's | History |
 | --- | --- | --- |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move |
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab | next / previous tab |
@@ -209,10 +224,11 @@ quits.
 accent), `(default)` when the file has none, and what it is for. `Enter`
 changes the selected one — a bool toggles (turning `auto_allow` on asks
 first), a choice (`picker_sort`, `detach_key`) steps to the next, a string
-(`sidekick_pattern`; empty: no Sidekicks tab) is typed on the status line,
+(`sidekick_pattern`; empty: no Sidekicks tab; group lines are not listed,
+edit the file for them) is typed on the status line,
 `Ctrl-D` keeping it. `u` resets the key to its default, `Esc`, `q` or `,` goes
 back. Each change is written like `dch --config` does and applies at once (the
-sort, the Sidekicks split).
+sort, the group split).
 
 A question waits for `y`; any other key cancels. Actions run the matching
 `dch` verb in the background: the status line shows `restarting …` while it
@@ -845,7 +861,8 @@ running sessions.
 | Key | Value | Default |
 | --- | --- | --- |
 | `auto_allow` | `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`): the master answers Claude Code's plain permission prompts, see [Auto-allow](#auto-allow) | `false` |
-| `sidekick_pattern` | a string, read by the session picker; empty: no Sidekicks tab | `-qa` |
+| `sidekick_pattern` | a string, read by the session picker as its one group, Sidekicks, when the file has no `group` line; empty: no group | `-qa` |
+| `group` | `<name> = <regex>`, repeated, one per session group in tab order, at most 8 (see [The session picker](#the-session-picker)); not set by `dch --config`, which keeps these lines as they are | none |
 | `picker_sort` | `activity` or `name`: the session picker's sort, also set by its `s` key | `activity` |
 | `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
@@ -3901,7 +3918,7 @@ before the verb.
 
 `dch` alone is the picker, `dch -l`'s, with the remote rows only: arrows or
 `j`/`k` move, Enter attaches, `q` or Esc quits; it redraws on a resize and
-re-probes the hosts in the background. No History or Sidekicks tab, no row
+re-probes the hosts in the background. No History or group tab, no row
 actions, no settings view.
 
 Not yet on Windows: the kitty-keyboard form of the detach key.

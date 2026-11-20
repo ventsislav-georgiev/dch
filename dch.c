@@ -225,21 +225,20 @@ config_line(char *line, const char *key)
 	return v;
 }
 
-/* Value of `key` in the config ("key = value" lines, '#' comments, blanks
-** around both trimmed, last one wins) into out[cap]. 1 when set, else 0;
-** -1 when that line is over 1023 bytes or its value over cap - 1: out is
-** "", never a cut value (#344). Read fresh on every call: the file is
+/* Every config line that sets `key` ("key = value" lines, '#' comments,
+** blanks around both trimmed), in file order, to fn: its value, or NULL for
+** a line over 1023 bytes (#344). Read fresh on every call: the file is
 ** tiny, and an edit (by hand, `dch --config`, or Prosper) takes effect on
 ** the next read. */
-int
-dch_config_get(const char *key, char *out, size_t cap)
+static void
+config_each(const char *key, void (*fn)(void *, const char *), void *arg)
 {
 	char path[1024], line[1024], *v;
-	int found = 0, cut, c;
+	int cut, c;
 	FILE *f;
 
 	if (!dch_config_path(path, sizeof(path)) || !(f = fopen(path, "r")))
-		return 0;
+		return;
 	/* fgets zeroes the last byte only when it fills the buffer: a NUL in a
 	** short line does not make it look over-long (#350) */
 	for (line[sizeof(line) - 1] = 1; fgets(line, sizeof(line), f);
@@ -252,16 +251,41 @@ dch_config_get(const char *key, char *out, size_t cap)
 			for (cut = 1; (c = getc(f)) != EOF && c != '\n';)
 				;
 		if ((v = config_line(line, key)))
-		{
-			found = cut || snprintf(out, cap, "%s", v) >= (int)cap ? -1 : 1;
-			if (found < 0)
-				out[0] = '\0';
-		}
+			fn(arg, cut ? NULL : v);
 		if (c == EOF)
 			break;	/* the file's end: no read after it */
 	}
 	fclose(f);
-	return found;
+}
+
+struct config_val
+{
+	char *out;
+	size_t cap;
+	int found;
+};
+
+static void
+config_last(void *arg, const char *v)
+{
+	struct config_val *g = arg;
+
+	g->found = !v || snprintf(g->out, g->cap, "%s", v) >= (int)g->cap
+	           ? -1 : 1;
+	if (g->found < 0)
+		g->out[0] = '\0';
+}
+
+/* Value of `key` in the config (config_each's lines, the last one wins)
+** into out[cap]. 1 when set, else 0; -1 when that line is over 1023 bytes
+** or its value over cap - 1: out is "", never a cut value (#344). */
+int
+dch_config_get(const char *key, char *out, size_t cap)
+{
+	struct config_val g = { out, cap, 0 };
+
+	config_each(key, config_last, &g);
+	return g.found;
 }
 
 /* The keys `dch --config` and the picker's settings view know (picker.h
@@ -271,7 +295,8 @@ const struct dch_conf config_keys[] = {
 	/* the master answers permission prompts */
 	{ "auto_allow", 1, "false", NULL,
 	  "Answer plain permission prompts with Yes" },
-	/* the picker's sidekick sessions; empty: no Sidekicks tab */
+	/* the picker's Sidekicks group when no group line is set (#544);
+	** empty: no group */
 	{ "sidekick_pattern", 0, "-qa", NULL,
 	  "Sessions listed under Sidekicks (a regex)" },
 	/* the picker's sort, its s key */
@@ -2884,7 +2909,18 @@ usage(void)
 	    "                                             Claude Code's plain\n"
 	    "                                             permission prompts\n"
 	    "                                             with Yes; not in lite),\n"
-	    "                                             sidekick_pattern,\n"
+	    "                                             sidekick_pattern (the\n"
+	    "                                             picker's Sidekicks\n"
+	    "                                             group when the file has\n"
+	    "                                             no `group = <name> =\n"
+	    "                                             <regex>` line; those,\n"
+	    "                                             8 at most, one tab each\n"
+	    "                                             in order, a session in\n"
+	    "                                             the first that matches,\n"
+	    "                                             are kept, not set here;\n"
+	    "                                             no group line and an\n"
+	    "                                             empty sidekick_pattern:\n"
+	    "                                             no group),\n"
 	    "                                             picker_sort\n"
 	    "                                             (activity|name),\n"
 	    "                                             detach_key\n"
@@ -9900,17 +9936,89 @@ pk_on_winch(int sig)
 	pk_winch = 1;
 }
 
-/* Does s match the sidekick pattern: as the regex (mode 1), or as text,
-** ignoring case (mode 2)? */
-static int
-pk_sidekick(int mode, regex_t *re, const char *pat, const char *s)
+/* A session group (#544): its tab's name and its pattern, matched as the
+** regex (mode 1) or as text, ignoring case (mode 2). */
+struct pkgrp
 {
+	char name[33], pat[256];
+	regex_t re;
+	int mode;
+};
+
+struct pkgrps
+{
+	struct pkgrp g[PK_GMAX];
+	int n;
+};
+
+/* A `group = <name> = <regex>` line's value: split at its first '=', both
+** trimmed; an empty name or regex, or one over its cap, is skipped. */
+static void
+pk_group(void *arg, const char *v)
+{
+	struct pkgrps *gs = arg;
+	const char *eq = v ? strchr(v, '=') : NULL, *r;
+	size_t nl;
+
+	if (!eq || gs->n >= PK_GMAX)
+		return;
+	for (nl = (size_t)(eq - v); nl && (v[nl - 1] == ' ' ||
+	     v[nl - 1] == '\t'); nl--)
+		;
+	for (r = eq + 1; *r == ' ' || *r == '\t'; r++)
+		;
+	if (!nl || nl >= sizeof gs->g->name || !*r ||
+	    strlen(r) >= sizeof gs->g->pat)
+		return;
+	memcpy(gs->g[gs->n].name, v, nl);
+	gs->g[gs->n].name[nl] = '\0';
+	snprintf(gs->g[gs->n++].pat, sizeof gs->g->pat, "%s", r);
+}
+
+/* The groups: the config's group lines, else sidekick_pattern (default
+** "-qa"; empty: none) as one named Sidekicks; each pattern compiled. */
+static void
+pk_groups(struct pkgrps *gs)
+{
+	struct pkgrp *g;
+	int k;
+
+	memset(gs, 0, sizeof *gs);
+	config_each("group", pk_group, gs);
+	if (!gs->n)
+	{
+		snprintf(gs->g->name, sizeof gs->g->name, "Sidekicks");
+		snprintf(gs->g->pat, sizeof gs->g->pat, "-qa");
+		(void)dch_config_get("sidekick_pattern", gs->g->pat,
+		                     sizeof gs->g->pat);
+		gs->n = gs->g->pat[0] != '\0';
+	}
+	for (k = 0; k < gs->n; k++)
+	{
+		g = &gs->g[k];
+		g->mode = regcomp(&g->re, g->pat, REG_EXTENDED | REG_ICASE |
+		                  REG_NOSUB) == 0 ? 1 : 2;
+		/* a regex every name matches splits nothing: text, as an
+		** invalid one is */
+		if (g->mode == 1 && regexec(&g->re, "", 0, NULL, 0) == 0)
+		{
+			regfree(&g->re);
+			g->mode = 2;
+		}
+	}
+}
+
+/* Does s match group g's pattern? */
+static int
+pk_ingroup(const struct pkgrp *g, const char *s)
+{
+	const char *pat = g->pat;
 	size_t n = strlen(pat), k;
 
-	if (!s || !mode)
+	if (!s)
 		return 0;
-	if (mode == 1)
-		return regexec(re, s, 0, NULL, 0) == 0;
+	if (g->mode == 1)
+		return regexec(&g->re, s, 0, NULL, 0) == 0;
 	for (; *s; s++)
 	{
 		for (k = 0; k < n && s[k] && tolower((unsigned char)s[k]) ==
@@ -9922,7 +10030,7 @@ pk_sidekick(int mode, regex_t *re, const char *pat, const char *s)
 	return 0;
 }
 
-/* The session named `name` on Sessions or Sidekicks, this host's; NULL
+/* The session named `name` on Sessions or a group's tab, this host's; NULL
 ** when none runs. Their rows are named as the sockets are: canon_name's. */
 static const struct pkrow *
 pk_running(const struct pk *p, const char *name)
@@ -9931,7 +10039,7 @@ pk_running(const struct pk *p, const char *name)
 	const char *f = canon_name(name, cb, sizeof cb);
 	int t, k;
 
-	for (t = 0; t < 2; t++)
+	for (t = 0; t < PK_HIST; t++)
 		for (k = 0; k < p->n[t]; k++)
 			if (!p->r[t][k].remote && !strcmp(p->r[t][k].name, f))
 				return &p->r[t][k];
@@ -9966,54 +10074,50 @@ pk_load(struct pk *p)
 {
 	struct slist sl = {0};
 	struct hrec *h;
-	char pat[256] = "-qa", sel[3][600];
+	char sel[PK_TABS][600];
 	const char *home = getenv("HOME");
 	size_t hl = home ? strlen(home) : 0;
-	regex_t re;
+	struct pkgrps gs;
 	struct dch_rrow *rr = NULL;
 	struct dch_rrec *rh = NULL;
-	int mode = 0, k, j, t, nh, pin, nr, nrh, base = 0, cnt = 0;
+	int k, j, t, g, nh, pin, nr, nrh, base = 0, cnt = 0, ok;
 
 	pk_selnames(p, sel);
-	for (t = 0; t < 3; t++)
+	for (t = 0; t < PK_TABS; t++)
 	{
 		free(p->r[t]);
 		p->r[t] = NULL;
 		p->n[t] = 0;
 	}
-	/* set to nothing: no Sidekicks tab */
-	(void)dch_config_get("sidekick_pattern", pat, sizeof pat);
-	if (pat[0])
-	{
-		mode = regcomp(&re, pat, REG_EXTENDED | REG_ICASE | REG_NOSUB)
-		       == 0 ? 1 : 2;
-		/* a regex every name matches splits nothing: text, as an
-		** invalid one is */
-		if (mode == 1 && regexec(&re, "", 0, NULL, 0) == 0)
-		{
-			regfree(&re);
-			mode = 2;
-		}
-	}
+	pk_groups(&gs);
+	for (g = 0; g < PK_GMAX; g++)
+		snprintf(p->gname[g], sizeof p->gname[g], "%s",
+		         g < gs.n ? gs.g[g].name : "");
 	list_sessions(&sl);
 	load_aliases(&sl);
 	load_harness_names(&sl);
 	load_codex_names(&sl);
-	dch_remote_hist_tab(!p->settings && p->tab == 2);
+	dch_remote_hist_tab(!p->settings && p->tab == PK_HIST);
 	nr = pk_remote ? dch_remote_rows(&rr, 0) : 0;
-	p->r[0] = calloc((size_t)(sl.n + nr) + 1, sizeof **p->r);
-	p->r[1] = calloc((size_t)sl.n + 1, sizeof **p->r);
-	for (k = 0; p->r[0] && p->r[1] && k < sl.n; k++)
+	ok = (p->r[0] = calloc((size_t)(sl.n + nr) + 1, sizeof **p->r)) != NULL;
+	for (g = 0; g < gs.n; g++)
+		ok &= (p->r[g + 1] = calloc((size_t)sl.n + 1, sizeof **p->r))
+		      != NULL;
+	for (k = 0; ok && k < sl.n; k++)
 	{
-		/* the harness title too: a "-qa" is often only Claude's name
-		** for the session, the one the row shows (#086) */
-		int side = pk_sidekick(mode, &re, pat, sl.v[k]) ||
-		           pk_sidekick(mode, &re, pat, sl.alias[k]) ||
-		           pk_sidekick(mode, &re, pat, sl.harness[k]);
-		struct pkrow *w = &p->r[side][p->n[side]++];
+		struct pkrow *w;
 		const char *meta;
 		long mep;
 
+		/* the first group that matches; the harness title too: a "-qa"
+		** is often only Claude's name for the session, the one the row
+		** shows (#086) */
+		for (g = 0; g < gs.n && !pk_ingroup(&gs.g[g], sl.v[k]) &&
+		     !pk_ingroup(&gs.g[g], sl.alias[k]) &&
+		     !pk_ingroup(&gs.g[g], sl.harness[k]); g++)
+			;
+		t = g < gs.n ? g + 1 : 0;
+		w = &p->r[t][p->n[t]++];
 		snprintf(w->name, sizeof w->name, "%s", sl.v[k]);
 		snprintf(w->title, sizeof w->title, "%s", slist_label(&sl, k));
 		snprintf(w->state, sizeof w->state, "%s", session_state(sl.v[k]));
@@ -10023,8 +10127,9 @@ pk_load(struct pk *p)
 		if ((meta = session_meta(sl.v[k], &mep)))
 			(void)dch_meta_prs(meta, w->prs, sizeof w->prs, &w->merged);
 	}
-	if (mode == 1)
-		regfree(&re);
+	for (g = 0; g < gs.n; g++)
+		if (gs.g[g].mode == 1)
+			regfree(&gs.g[g].re);
 	slist_free(&sl);
 	/* the other hosts' sessions, by their host:name, as they last
 	** answered (remote.c re-probes them behind the picker) */
@@ -10034,26 +10139,26 @@ pk_load(struct pk *p)
 
 	nh = history_load(&h);
 	nrh = pk_remote ? dch_remote_history(&rh, 0) : 0;
-	p->r[2] = calloc((size_t)(nh + nrh) + 1, sizeof **p->r);
+	p->r[PK_HIST] = calloc((size_t)(nh + nrh) + 1, sizeof **p->r);
 	p->interrupted = 0;
 	for (k = 0; k < nh; k++)
 		p->interrupted += rv_all_takes(&h[k]);
 	/* one row per name (#144): its newest record, pinned when any of
 	** the name's is, live when any of the name's is; h is newest first */
-	for (k = 0; p->r[2] && k < nh; k++)
+	for (k = 0; p->r[PK_HIST] && k < nh; k++)
 	{
 		struct pkrow *w;
 
-		for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname,
+		for (j = 0; j < p->n[PK_HIST] && strcmp(p->r[PK_HIST][j].sname,
 		     h[k].name); j++)
 			;
-		if (j < p->n[2])
+		if (j < p->n[PK_HIST])
 		{
-			p->r[2][j].pinned |= h[k].pinned;
-			p->r[2][j].live |= h[k].live;
+			p->r[PK_HIST][j].pinned |= h[k].pinned;
+			p->r[PK_HIST][j].live |= h[k].live;
 			continue;
 		}
-		w = &p->r[2][p->n[2]++];
+		w = &p->r[PK_HIST][p->n[PK_HIST]++];
 		snprintf(w->name, sizeof w->name, "%s", h[k].file);
 		snprintf(w->sname, sizeof w->sname, "%s", h[k].name);
 		/* alias, else the agent's session name, else the dch
@@ -10072,12 +10177,12 @@ pk_load(struct pk *p)
 		w->live = h[k].live;
 	}
 	/* a name decides (#254): one with a session running (its row on
-	** Sessions or Sidekicks, or a live record) says "running" and when
+	** Sessions or a group's tab, or a live record) says "running" and when
 	** that session last had output; shown only when pinned, else it is
 	** that session's tab's */
-	for (k = pin = 0; k < p->n[2]; k++)
+	for (k = pin = 0; k < p->n[PK_HIST]; k++)
 	{
-		struct pkrow *w = &p->r[2][k];
+		struct pkrow *w = &p->r[PK_HIST][k];
 		const struct pkrow *s = pk_running(p, w->sname);
 
 		if (s || w->live)
@@ -10090,37 +10195,38 @@ pk_load(struct pk *p)
 	}
 	/* every pinned name, then the newest of the rest while the total is
 	** under the cap */
-	for (k = j = 0; k < p->n[2]; k++)
-		if (p->r[2][k].pinned || (!p->r[2][k].live && pin < PK_HIST_MAX))
+	for (k = j = 0; k < p->n[PK_HIST]; k++)
+		if (p->r[PK_HIST][k].pinned ||
+		    (!p->r[PK_HIST][k].live && pin < PK_HIST_MAX))
 		{
-			pin += !p->r[2][k].pinned;
-			p->r[2][j++] = p->r[2][k];
+			pin += !p->r[PK_HIST][k].pinned;
+			p->r[PK_HIST][j++] = p->r[PK_HIST][k];
 		}
-	p->n[2] = j;
+	p->n[PK_HIST] = j;
 	hrec_free(h, nh);
 	/* the other hosts' (#115), as their host last answered: per host the
 	** first PK_HIST_MAX names, each its newest record (the host's order),
 	** never pinned here; host:file the row, host:name its name */
-	for (k = 0; p->r[2] && k < nrh; k++)
+	for (k = 0; p->r[PK_HIST] && k < nrh; k++)
 	{
 		const struct dch_rrec *x = &rh[k];
-		char e[sizeof p->r[2]->title - DCH_RHOST_MAX];
-		struct pkrow *w = &p->r[2][p->n[2]];
+		char e[sizeof p->r[PK_HIST]->title - DCH_RHOST_MAX];
+		struct pkrow *w = &p->r[PK_HIST][p->n[PK_HIST]];
 
 		if (!k || strcmp(x->host, rh[k - 1].host))
 		{
-			base = p->n[2];
+			base = p->n[PK_HIST];
 			cnt = 0;
 		}
 		memset(w, 0, sizeof *w);	/* a slot the cap left over */
 		snprintf(w->sname, sizeof w->sname, "%s:%s", x->host, x->name);
-		for (j = base; j < p->n[2] && strcmp(p->r[2][j].sname, w->sname);
-		     j++)
+		for (j = base; j < p->n[PK_HIST] &&
+		     strcmp(p->r[PK_HIST][j].sname, w->sname); j++)
 			;
-		if (j < p->n[2] || cnt >= PK_HIST_MAX)
+		if (j < p->n[PK_HIST] || cnt >= PK_HIST_MAX)
 			continue;
 		cnt++;
-		p->n[2]++;
+		p->n[PK_HIST]++;
 		snprintf(w->name, sizeof w->name, "%s:%s", x->host, x->file);
 		dch_remote_esc(e, sizeof e, x->alias[0] ? x->alias : x->aname[0]
 		               ? x->aname : x->name);
@@ -10214,10 +10320,14 @@ pk_start(struct pk *p, struct pkact *a)
 {
 	FILE *f;
 	pid_t pid;
+	int t;
 
-	/* gone since it was asked about: say so, run nothing */
-	if (a->target[0] && pk_find(p, a->tab, a->target) < 0 &&
-	    (a->tab == 2 || pk_find(p, !a->tab, a->target) < 0))
+	/* gone since it was asked about: say so, run nothing; a live one may
+	** be on Sessions or another group's tab by now */
+	for (t = 0; a->target[0] && t < PK_HIST && (a->tab == PK_HIST ||
+	     pk_find(p, t, a->target) < 0); t++)
+		;
+	if (a->target[0] && t == PK_HIST && pk_find(p, a->tab, a->target) < 0)
 	{
 		snprintf(p->status, sizeof p->status, "%s: no longer there",
 		         a->target);
@@ -10364,7 +10474,7 @@ pk_rename(struct pk *p, int fd, const struct pkrow *w)
 }
 
 /* Write config key k (s NULL: back to its default) and apply it at once:
-** the sort, and a reload for the sidekick split. */
+** the sort, and a reload for the group split. */
 static void
 pk_cfset(struct pk *p, int k, const char *s)
 {
@@ -10466,9 +10576,10 @@ pk_free_name(const struct pk *p, const char *name, char *as, size_t asz)
 	for (k = 2; k < 1000; k++)
 	{
 		snprintf(as, asz, "%s-%d", name, k);
-		for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname, as); j++)
+		for (j = 0; j < p->n[PK_HIST] &&
+		     strcmp(p->r[PK_HIST][j].sname, as); j++)
 			;
-		if (j == p->n[2] && !name_live(as))
+		if (j == p->n[PK_HIST] && !name_live(as))
 			return;
 	}
 }
@@ -10500,7 +10611,7 @@ pk_rrevive(struct pk *p, const struct pkrow *w, int c)
 		return;
 	snprintf(rf, sizeof rf, "%s.json", f + 1);
 	snprintf(d, sizeof d, "resuming %s", w->title);
-	pk_act(a, 2, w->name, d, "--revive", rf, "--json", NULL);
+	pk_act(a, PK_HIST, w->name, d, "--revive", rf, "--json", NULL);
 	snprintf(a->host, sizeof a->host, "%.*s", (int)(f - w->name), w->name);
 	if (pk_arg(a, "--host") < 0 || pk_arg(a, a->host) < 0 ||
 	    (hl && (pk_arg(a, "--hosts") < 0 || pk_arg(a, hl) < 0)) ||
@@ -10524,7 +10635,7 @@ static int pk_xray(struct pk *p, int fd, const char *name, int record,
 int
 pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 {
-	int t = p->tab, *sel = &p->sel[t], k;
+	int t = p->tab, *sel = &p->sel[t], k, hist = t == PK_HIST;
 	const struct pkrow *w = *sel < p->n[t] ? &p->r[t][*sel] : NULL;
 	char d[800], f[620], as[600];
 	const char *nm;
@@ -10549,8 +10660,8 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	/* Shift+Enter: Enter; in History, o, only where the pick is attached:
 	** -k and -d would kill or detach what it revived */
 	if (c == PK_SENTER)
-		c = t < 2 ? '\r' : 'o';
-	if (c == 'o' && t == 2 && !p->opens)
+		c = hist ? 'o' : '\r';
+	if (c == 'o' && hist && !p->opens)
 	{
 		snprintf(p->status, sizeof p->status, "o opens a session: from "
 		         "dch -l or the switch");
@@ -10563,9 +10674,9 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		p->status[0] = '\0';
 		return 0;
 	case 's':
-		if (t < 2)
+		if (!hist)
 		{
-			char names[3][600];
+			char names[PK_TABS][600];
 
 			pk_selnames(p, names);
 			p->byname = !p->byname;
@@ -10583,7 +10694,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		snprintf(p->status, sizeof p->status, "busy, one at a time");
 		return 0;
 	}
-	if (t < 2 && (c == 'b' || c == 'B'))
+	if (!hist && (c == 'b' || c == 'B'))
 	{
 		pk_act(&p->ask, t, "", c == 'b' ? "restarting stale agents"
 		       : "restarting all agents", "--restart", "--all",
@@ -10593,7 +10704,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		       "pauses for up to minutes.%s", "");
 		return 0;
 	}
-	if (t == 2 && c == 'I')
+	if (hist && c == 'I')
 	{
 		if (!p->interrupted)
 			snprintf(p->status, sizeof p->status, "nothing "
@@ -10601,7 +10712,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		else
 		{
 			snprintf(d, sizeof d, "%d", p->interrupted);
-			pk_act(&p->ask, 2, "", "resuming interrupted",
+			pk_act(&p->ask, PK_HIST, "", "resuming interrupted",
 			       "--revive", "--all", NULL);
 			pk_ask(p, "Resume interrupted (%s)?", d);
 		}
@@ -10612,10 +10723,10 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	/* dch would read a name that starts with '-' as a flag: Enter, X, p
 	** and d pass it after `--` or need no flag; no such name is made or
 	** resumed (#162) */
-	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'X' ||
+	if (w->name[0] == '-' && !(hist ? c == 'p' || c == 'd' : c == 'X' ||
 	                           c == '\r' || c == '\n'))
 	{
-		if (t == 2)
+		if (hist)
 			snprintf(p->status, sizeof p->status, "%s: a name "
 			         "starting with '-' can't be resumed; p pins, d "
 			         "removes", w->name);
@@ -10631,24 +10742,24 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		/* the X-ray view (#175): a live session by name, a History row
 		** by its record, a running one's (#254) by the session; a remote
 		** one's on its host (#188) */
-		return pk_xray(p, fd, t == 2 && w->live ? w->sname : w->name,
-		               t == 2 && !w->live, w->remote, out, outsz);
+		return pk_xray(p, fd, hist && w->live ? w->sname : w->name,
+		               hist && !w->live, w->remote, out, outsz);
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
 	** the rest need ops-gated frames and the same confirmation (#087).
 	** A remote History row (#115) only resumes, there: Enter, m, o. */
 	if (w->remote)
 	{
-		if (t < 2 && (c == '\r' || c == '\n') &&
+		if (!hist && (c == '\r' || c == '\n') &&
 		    (size_t)snprintf(out, outsz, "%s", w->name) < outsz)
 		{
 			attach_route = 1;	/* a local host:name too (#210) */
 			return 1;
 		}
-		if (t == 2 && (c == '\r' || c == '\n' || c == 'm' || c == 'o'))
+		if (hist && (c == '\r' || c == '\n' || c == 'm' || c == 'o'))
 			pk_rrevive(p, w, c);
 		else
-			snprintf(p->status, sizeof p->status, t == 2 ? "%s: on "
+			snprintf(p->status, sizeof p->status, hist ? "%s: on "
 			         "another host; Enter resumes it there, p and d "
 			         "are for this host's" : "%s: a remote session; "
 			         "Enter attaches and x opens its X-ray, nothing "
@@ -10657,7 +10768,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	}
 	/* a running name's History row (#254): Enter and o attach the
 	** session, as its Sessions row does; nothing resumes or removes it */
-	if (t == 2 && w->live && c > 0 && c < 256 && strchr("\r\nomd", c))
+	if (hist && w->live && c > 0 && c < 256 && strchr("\r\nomd", c))
 	{
 		int go = c != 'm' && c != 'd' && p->opens;
 
@@ -10683,7 +10794,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			         "it from dch -l or the switch");
 		return 0;
 	}
-	if (t < 2)
+	if (!hist)
 		switch (c)
 		{
 		case '\r': case '\n':
@@ -10770,7 +10881,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			       NULL);
 			return 0;
 		}
-	if (t < 2)
+	if (!hist)
 		return 0;
 	snprintf(f, sizeof f, "%s.json", w->name);	/* this one record */
 	switch (c)
@@ -10780,10 +10891,10 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		nm = c == 'm' ? "--no-message" : NULL;
 		snprintf(d, sizeof d, "resuming %s", w->title);
 		if (as[0])
-			pk_act(&p->ask, 2, w->name, d, "--revive", f, "--as", as,
+			pk_act(&p->ask, PK_HIST, w->name, d, "--revive", f, "--as", as,
 			       "--json", nm, NULL);
 		else
-			pk_act(&p->ask, 2, w->name, d, "--revive", f, "--json", nm,
+			pk_act(&p->ask, PK_HIST, w->name, d, "--revive", f, "--json", nm,
 			       NULL);
 		p->ask.revive = 1;
 		p->ask.nomsg = c == 'm';
@@ -10793,7 +10904,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	case 'p':
 		snprintf(d, sizeof d, "%s %s", w->pinned ? "unpinning"
 		         : "pinning", w->title);
-		pk_act(&p->ask, 2, w->name, d, w->pinned ? "--unpin" : "--pin",
+		pk_act(&p->ask, PK_HIST, w->name, d, w->pinned ? "--unpin" : "--pin",
 		       "--", pk_recs(w, f), NULL);
 		pk_start(p, &p->ask);
 		return 0;
@@ -10805,7 +10916,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			return 0;
 		}
 		snprintf(d, sizeof d, "removing %s", w->title);
-		pk_act(&p->ask, 2, w->name, d, "--forget", "--", pk_recs(w, f),
+		pk_act(&p->ask, PK_HIST, w->name, d, "--forget", "--", pk_recs(w, f),
 		       NULL);
 		/* a live session of the name: its record is not History's, and
 		** --forget <name> would fail on it; the ended records' files */
@@ -10814,7 +10925,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			struct hrec *h;
 			int nh = history_load(&h);
 
-			pk_act(&p->ask, 2, w->name, d, "--forget", "--", NULL);
+			pk_act(&p->ask, PK_HIST, w->name, d, "--forget", "--", NULL);
 			/* shortcut: as many as an action's argv holds (8); the
 			** rest stay a row for the next d */
 			for (k = 0; k < nh; k++)

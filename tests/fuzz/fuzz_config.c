@@ -1,6 +1,7 @@
 /* libFuzzer target: the config parser. dch_config_get reads $DCH_CONFIG
 ** fresh on every call, so the input is written there first; every key
-** dch --config knows is looked up, plus the bool reading. Built with
+** dch --config knows is looked up, plus the bool reading and the picker's
+** repeated group lines (#544, config_each). Built with
 ** -Dmain=dch_main so dch.c's statics are reachable. */
 #include "../../dch.c"
 #include <stdint.h>
@@ -35,7 +36,9 @@ int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
 	char out[1024], tiny[4];
+	struct pkgrps gs;
 	size_t i;
+	int g;
 	FILE *f = fopen(path, "w");
 
 	if (!f)
@@ -50,5 +53,9 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (config_keys[i].is_bool)
 			(void)dch_config_bool(config_keys[i].key);
 	}
+	pk_groups(&gs);
+	for (g = 0; g < gs.n; g++)
+		if (gs.g[g].mode == 1)
+			regfree(&gs.g[g].re);
 	return 0;
 }

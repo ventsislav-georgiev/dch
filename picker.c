@@ -3,9 +3,10 @@
 ** what is here and what the host (dch.c, win/) brings.
 **
 ** `dch -l`, `dch -k`/`-d` without a name, and the double-tap switch. Tabs:
-** Sessions; Sidekicks (n), the live sessions whose name, alias or harness
-** title matches the config's sidekick_pattern (default "-qa"), shown only when there are
-** some; History (n), the ended records, one row per name (its newest
+** Sessions; a tab per session group (#544), the live sessions whose name,
+** alias or harness title matches the group's pattern first (the config's
+** group lines, else sidekick_pattern as "Sidekicks"), shown only when there
+** are some; History (n), the ended records, one row per name (its newest
 ** record, pinned when any of the name's is), pinned first, by name, at
 ** most 50; and other hosts' as host:name (#115), at most 50 per host,
 ** never pinned here, which only resume (there). "/"
@@ -194,7 +195,7 @@ pk_vis(const struct pk *p, int t, int k)
 	const struct pkrow *w = &p->r[t][k];
 
 	return !p->filt[0] || pk_has(w->title, p->filt) ||
-	       pk_has(t == 2 ? w->sname : w->name, p->filt) ||
+	       pk_has(t == PK_HIST ? w->sname : w->name, p->filt) ||
 	       pk_has(w->cwd, p->filt);
 }
 
@@ -250,11 +251,11 @@ pk_fix(struct pk *p, int t)
 ** move; a row that went, or that the filter no longer keeps, leaves it on
 ** the nearest kept one. */
 static void
-pk_reselect(struct pk *p, char sel[3][600])
+pk_reselect(struct pk *p, char sel[PK_TABS][600])
 {
 	int t, k, r;
 
-	for (t = 0; t < 3; t++)
+	for (t = 0; t < PK_TABS; t++)
 	{
 		r = sel[t][0] == '\1';
 		for (k = 0; sel[t][r] && k < p->n[t] &&
@@ -270,11 +271,11 @@ pk_reselect(struct pk *p, char sel[3][600])
 /* Each tab's selected row for pk_reselect: its name, after a \1 when it
 ** is a remote row's. */
 void
-pk_selnames(const struct pk *p, char sel[3][600])
+pk_selnames(const struct pk *p, char sel[PK_TABS][600])
 {
 	int t;
 
-	for (t = 0; t < 3; t++)
+	for (t = 0; t < PK_TABS; t++)
 		snprintf(sel[t], 600, "%s%.598s", p->sel[t] < p->n[t] &&
 		         p->r[t][p->sel[t]].remote ? "\1" : "", p->sel[t] < p->n[t]
 		         ? p->r[t][p->sel[t]].name : "");
@@ -283,16 +284,17 @@ pk_selnames(const struct pk *p, char sel[3][600])
 /* Sort, then select the rows named in sel (pk_selnames before the rows
 ** changed). */
 void
-pk_sort(struct pk *p, char sel[3][600])
+pk_sort(struct pk *p, char sel[PK_TABS][600])
 {
 	int t;
 
 	pk_sortname = p->byname;
-	for (t = 0; t < 2; t++)
+	for (t = 0; t < PK_HIST; t++)
 		if (p->n[t] > 1)
 			qsort(p->r[t], (size_t)p->n[t], sizeof *p->r[t], pk_cmp);
-	if (p->n[2] > 1)
-		qsort(p->r[2], (size_t)p->n[2], sizeof *p->r[2], pk_hcmp);
+	if (p->n[PK_HIST] > 1)
+		qsort(p->r[PK_HIST], (size_t)p->n[PK_HIST], sizeof **p->r,
+		      pk_hcmp);
 	pk_reselect(p, sel);
 }
 
@@ -996,7 +998,7 @@ static void
 pk_cols(const struct pk *p, int k, int cnt)
 {
 	char b[1400];
-	int used, cap, w, hist = !p->settings && p->tab == 2, last = 0;
+	int used, cap, w, hist = !p->settings && p->tab == PK_HIST, last = 0;
 
 	memset(&pk_c, 0, sizeof pk_c);
 	pk_c.gap = pk_w >= 120 ? 3 : 2;
@@ -1084,7 +1086,7 @@ pk_gap(void)
 static void
 pk_heads(const struct pk *p)
 {
-	int hist = !p->settings && p->tab == 2;
+	int hist = !p->settings && p->tab == PK_HIST;
 
 	pk_line();
 	pk_set("2");
@@ -1201,12 +1203,12 @@ pk_prs(const char *s, int w)
 	pk_pad(end);
 }
 
-/* One row of Sessions, Sidekicks or History, in pk_c's columns. */
+/* One row of Sessions, a group's or History, in pk_c's columns. */
 static void
 pk_row(const struct pk *p, const struct pkrow *w, int sel)
 {
 	char b[1400], age[32];
-	int hist = p->tab == 2;
+	int hist = p->tab == PK_HIST;
 
 	if (hist)
 		pk_lead(sel, PK_P(PK_ACC), !w->pinned ? " " : pk_utf
@@ -1434,7 +1436,6 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	static const char *const spin[2] = { "|/-\\",
 		"\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9\xe2\xa0\xb8\xe2\xa0\xbc"
 		"\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7\xe2\xa0\x87\xe2\xa0\x8f" };
-	static const char *const tabn[3] = { "Sessions", "Sidekicks", "History" };
 	struct pkkey keys[24];
 	char b[96], go[16], ag_s[32] = "";
 	const char *ret;
@@ -1463,7 +1464,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	** -d pickers, the first word of their header ("kill session:") */
 	snprintf(go, sizeof go, "%s", p->opens ? "attach" : header);
 	go[strcspn(go, " ")] = '\0';
-	for (t = 0; t < 3; t++)
+	for (t = 0; t < PK_TABS; t++)
 		tabs += pk_shown(p, t);
 
 	/* the hints for this view and row: actions, the agents', the view,
@@ -1472,7 +1473,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	(keys[nk++] = (struct pkkey){ (k), (l), (v), (g), (x) })
 	if (p->filtering)
 	{
-		PK_K(0, ret, p->tab == 2 ? "resume" : go, NULL, 0);
+		PK_K(0, ret, p->tab == PK_HIST ? "resume" : go, NULL, 0);
 		PK_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "keep",
 		     NULL, 0);
 		PK_K(3, "esc", "clear", NULL, 0);
@@ -1487,7 +1488,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	else	/* remote rows (#090), which only attach */
 		PK_K(0, ret, "attach", NULL, 0);
 #else
-	else if (p->tab < 2)
+	else if (p->tab < PK_HIST)
 	{
 		PK_K(0, ret, go, NULL, 0);
 		PK_K(0, "r", "rename", NULL, 0);
@@ -1569,9 +1570,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	** tabs row when there is no title (the switch picker's, #252) */
 	/* "5/13 active · 🤖 2 · dch X": active = needs input or working,
 	** remote rows counted as the old session count did */
-	k = p->n[0] + p->n[1];
-	for (t = act = ag = 0; t < 2; t++)
-		for (i = 0; i < p->n[t]; i++)
+	for (t = act = ag = k = 0; t < PK_HIST; t++)
+		for (i = 0, k += p->n[t]; i < p->n[t]; i++)
 		{
 			act += pk_rank(p->r[t][i].state) < 2;
 			ag += p->r[t][i].agents;
@@ -1593,9 +1593,11 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	pk_line();
 	if (p->settings)
 		pk_tab("Settings", -1, 1);
-	for (t = 0; t < 3 && !p->settings; t++)
+	for (t = 0; t < PK_TABS && !p->settings; t++)
 		if (pk_shown(p, t))
-			pk_tab(tabn[t], pk_pos(p, t, p->n[t]), t == p->tab);
+			pk_tab(!t ? "Sessions" : t == PK_HIST ? "History"
+			       : p->gname[t - 1], pk_pos(p, t, p->n[t]),
+			       t == p->tab);
 	if (!*header)
 		pk_aside(b);
 	pk_eol();
@@ -1617,7 +1619,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		else if (k == 0)
 		{
 			pk_set("2");
-			pk_txt(p->filt[0] ? "    No match" : p->tab == 2
+			pk_txt(p->filt[0] ? "    No match" : p->tab == PK_HIST
 			       ? "    No history" : "    No sessions");
 		}
 		pk_eol();
@@ -1792,9 +1794,9 @@ pk_nav(struct pk *p, int c)
 		break;
 	case '\t': case 'l': case PK_RIGHT:
 	case PK_BTAB: case 'h': case PK_LEFT:
-		k = c == '\t' || c == 'l' || c == PK_RIGHT ? 1 : 2;
+		k = c == '\t' || c == 'l' || c == PK_RIGHT ? 1 : PK_TABS - 1;
 		do
-			t = (t + k) % 3;
+			t = (t + k) % PK_TABS;
 		while (!pk_shown(p, t));
 		p->tab = t;
 		return 1;
@@ -1818,7 +1820,7 @@ pk_unfilt(struct pk *p)
 
 	p->filt[0] = '\0';
 	p->filtering = 0;
-	for (t = 0; t < 3; t++)
+	for (t = 0; t < PK_TABS; t++)
 		if (p->sel[t] >= p->n[t])
 			p->sel[t] = 0;
 }
@@ -1885,7 +1887,7 @@ pk_filt(struct pk *p, int fd, int c)
 		} while (more-- > 0 && pk_more(fd) && pk_rd(fd, &b) == 0);
 		p->filt[l] = '\0';
 	}
-	for (t = 0; t < 3; t++)
+	for (t = 0; t < PK_TABS; t++)
 	{
 		p->sel[t] = 0;
 		pk_fix(p, t);
@@ -1899,7 +1901,8 @@ pk_filt(struct pk *p, int fd, int c)
 static struct
 {
 	int set, tab, byname;
-	char filt[sizeof ((struct pk *)0)->filt], sel[3][600], focus[600];
+	char filt[sizeof ((struct pk *)0)->filt], sel[PK_TABS][600];
+	char focus[600];
 	int fhist;	/* the focus is a History record's (#133) */
 } pk_mem;
 
@@ -1965,7 +1968,9 @@ pk_open(struct pk *p, int remote, int vt)
 	p->byname = pk_mem.set ? pk_mem.byname : pk_cfbyname();
 	snprintf(p->filt, sizeof p->filt, "%s", pk_mem.filt);
 	pk_load(p);
-	if (remote && !p->n[0] && !p->n[1] && !p->n[2])
+	for (t = 0; t < PK_TABS && !p->n[t]; t++)
+		;
+	if (remote && t == PK_TABS)
 	{
 		/* nothing here and nothing cached: probe once, in the box */
 		struct dch_rrow *rr;
@@ -1975,12 +1980,15 @@ pk_open(struct pk *p, int remote, int vt)
 		pk_load(p);
 	}
 	p->loaded = now_ms();
-	if (!p->n[0] && !p->n[1] && !p->n[2])
+	/* the first tab with rows */
+	for (t = 0; t < PK_TABS && !p->n[t]; t++)
+		;
+	if (t == PK_TABS)
 	{
 		fprintf(stderr, "no sessions\n");
 		return -1;
 	}
-	p->tab = p->n[0] ? 0 : p->n[1] ? 1 : 2;
+	p->tab = t;
 	if (pk_mem.set)
 	{
 		pk_reselect(p, pk_mem.sel);
@@ -1988,12 +1996,13 @@ pk_open(struct pk *p, int remote, int vt)
 			p->tab = pk_mem.tab;
 	}
 	/* a session that ended: History, its record or none (#133) */
-	if (pk_mem.fhist && pk_shown(p, 2))
-		p->tab = 2;
+	if (pk_mem.fhist && pk_shown(p, PK_HIST))
+		p->tab = PK_HIST;
 	/* the session left: on its tab, this one first */
-	for (j = 0; pk_mem.focus[0] && j < (pk_mem.fhist ? p->tab == 2 : 3); j++)
+	for (j = 0; pk_mem.focus[0] && j < (pk_mem.fhist ? p->tab == PK_HIST
+	     : PK_TABS); j++)
 	{
-		t = (p->tab + j) % 3;
+		t = (p->tab + j) % PK_TABS;
 		if (pk_shown(p, t) && (k = pk_find(p, t, pk_mem.focus)) >= 0)
 		{
 			p->tab = t;

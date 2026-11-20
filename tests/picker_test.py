@@ -51,7 +51,13 @@ and --keys types into it. Covers:
      session count and dch version at its right edge, the frame fills the
      screen; at 40 columns that text gives way, the tabs stay whole; the -k
      and -d pickers keep "kill session:" / "detach session:" with the count
-     on that row.
+     on that row;
+ 17. session groups (#544): `group = <name> = <regex>` lines make a tab
+     each, in their order, between Sessions and History, a session in the
+     first that matches; they win over sidekick_pattern; a bad line is
+     skipped, the rest still apply; a group no session matches has no tab;
+     at most 8; with none, sidekick_pattern (default -qa) is Sidekicks, and
+     `sidekick_pattern =` empties the list; dch --config keeps the lines.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -572,6 +578,120 @@ def footshells():
     dch("-k", "pkagents")
 
 
+def groups():
+    """17. session groups (#544) in one picker, the config rewritten under
+    it (read again on every reload)."""
+    def setcfg(text):
+        with open(ENV["DCH_CONFIG"], "w") as f:
+            f.write(text)
+
+    def tabs(s):
+        return re.findall(r"([A-Za-z][\w-]*) \d+",
+                          s.split("\n")[0].split(" active")[0])
+
+    dch("--spawn", "gr-api-qa", "--size", "80x24", "sh", "-c", "sleep 600")
+    dch("--spawn", "gr-web", "--size", "80x24", "sh", "-c", "sleep 600")
+    setcfg("sidekick_pattern = gr-\ngroup = API = gr-api\n"
+           "group = Empty = ^no-such-session$\ngroup  =  QA  =  -qa \n")
+    picker("pk13", "160x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pk13", lambda s: tabs(s)[1:3] == ["API", "QA"])
+    check("#544: two group lines make two tabs named by them, in their "
+          "order, between Sessions and History",
+          tabs(s) == ["Sessions", "API", "QA", "History"], s.split("\n")[0])
+    check("#544: group lines win over sidekick_pattern: no Sidekicks tab",
+          "Sidekicks" not in s, s.split("\n")[0])
+    check("#544: a group no session matches has no tab",
+          tabs(s)[1:3] == ["API", "QA"] and "Empty" not in s,
+          s.split("\n")[0])
+    n = sum(int(x) for x in re.findall(
+        r"(?:Sessions|API|QA) (\d+)", s.split("\n")[0]))
+    check("#544: the footer's count is every live session, Sessions and "
+          "every group's", re.search(r" \d+/%d active" % n, s.split("\n")[0]),
+          n, s.split("\n")[0])
+    s = to_tab("pk13", "API")
+    check("#544: a session two groups match is on the first one's tab only",
+          rows(s) == ["gr-api-qa"], s)
+    s = to_tab("pk13", "QA")
+    check("#544: the second group's tab has its own, not the first's",
+          "[QA" in s and "helper-qa" in rows(s) and
+          "gr-api-qa" not in rows(s), s)
+    dch("--keys", "pk13", "right")
+    s = wait_screen("pk13", lambda s: "[History" in s)
+    dch("--keys", "pk13", "right")
+    s = wait_screen("pk13", lambda s: "[Sessions" in s)
+    check("#544: right goes QA, History, then back to Sessions",
+          "[Sessions" in s, s.split("\n")[0])
+    dch("--keys", "pk13", "left")
+    s = wait_screen("pk13", lambda s: "[History" in s)
+    dch("--keys", "pk13", "left")
+    s = wait_screen("pk13", lambda s: "[QA" in s)
+    check("#544: left from Sessions goes History, then the last group",
+          "[QA" in s, s.split("\n")[0])
+
+    # a bad line is skipped, the later ones still count
+    setcfg("group = %s = gr-api\ngroup = Long = (gr-api|%s)\n"
+           "group = = gr-api\ngroup = NoRe =\ngroup = gr-api\n"
+           "group = Empty = ^no-such-session$\ngroup = QA = -qa\n"
+           % ("N" * 33, "x" * 250))
+    s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "QA",
+                                                  "History"])
+    check("#544: bad group lines (a name over 32 bytes, a regex over 255, "
+          "no name, no regex, no second =) are skipped, the next applies",
+          tabs(s) == ["Sessions", "QA", "History"], s.split("\n")[0])
+    s = to_tab("pk13", "QA")
+    check("#544: ... and the skipped lines' sessions go to the next match",
+          "gr-api-qa" in rows(s) and "helper-qa" in rows(s), s)
+
+    # at most 8: a ninth line is ignored; a 32-byte name is whole
+    big = "Web" + "x" * 29
+    setcfg("".join("group = g%d = ^none-%d$\n" % (k, k) for k in range(7))
+           + "group = %s = gr-web\ngroup = Nine = gr-api\n" % big)
+    s = wait_screen("pk13", lambda s: big in tabs(s))
+    check("#544: the eighth group, a 32-byte name, is a tab; the ninth "
+          "line is ignored", tabs(s) == ["Sessions", big, "History"],
+          s.split("\n")[0])
+    s = to_tab("pk13", "Sessions")
+    check("#544: ... so the ninth's session stays on Sessions",
+          "gr-api-qa" in rows(s), s)
+
+    # no group line: sidekick_pattern, default -qa, is Sidekicks
+    setcfg("group = NoRe =\npicker_sort = name\n")
+    s = wait_screen("pk13", lambda s: "Sidekicks" in tabs(s))
+    check("#544: no valid group line: the default -qa makes Sidekicks",
+          tabs(s) == ["Sessions", "Sidekicks", "History"],
+          s.split("\n")[0])
+    s = to_tab("pk13", "Sidekicks")
+    check("#544: ... listing the -qa sessions",
+          "gr-api-qa" in rows(s) and "helper-qa" in rows(s) and
+          "gr-web" not in rows(s), s)
+    setcfg("sidekick_pattern = gr-web\n")
+    s = wait_screen("pk13", lambda s: "Sidekicks 1" in s)
+    check("#544: no group line: sidekick_pattern is the Sidekicks group",
+          tabs(s) == ["Sessions", "Sidekicks", "History"] and
+          "Sidekicks 1" in s, s.split("\n")[0])
+    setcfg("sidekick_pattern =\n")
+    s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "History"])
+    check("#544: no group line and an empty sidekick_pattern: no group tab",
+          tabs(s) == ["Sessions", "History"], s.split("\n")[0])
+    dch("-k", "pk13")
+
+    # dch --config rewrites keep every group line, in order, repeats too
+    lines = ["group = API = gr-api", "group = QA = -qa", "group = API = dup"]
+    setcfg("# groups\n%s\nsidekick_pattern = -qa\n%s\n%s\n" % (
+        lines[0], lines[1], lines[2]))
+    r1 = dch("--config", "picker_sort", "name")
+    r2 = dch("--config", "sidekick_pattern", "x")
+    r3 = dch("--config", "sidekick_pattern", "--unset")
+    c = config()
+    check("#544: dch --config <key> <value> keeps every group line",
+          r1.returncode == r2.returncode == r3.returncode == 0 and
+          [l for l in c.split("\n") if l.startswith("group")] == lines and
+          c.startswith("# groups\n"), c, r1.stderr, r2.stderr, r3.stderr)
+    r = dch("--config", "group", "x")
+    check("#544: group is not a --config key: dch --config group refuses",
+          r.returncode != 0 and config() == c, r.stdout, r.stderr, config())
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL dch not executable at " + DCH)
@@ -1013,6 +1133,7 @@ def main():
     zerowidth()
     verbs()
     footshells()
+    groups()
     return 1 if failures else 0
 
 
@@ -1022,7 +1143,8 @@ if __name__ == "__main__":
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
                   "pk9", "pk10", "pk11", "pk12", "s2", "s10", "zwbom", "zwj",
-                  "zwheb", "zwdev", "zwsym", "zwfmt", "zwhf", "zwmc", "helper-qa", "a4k-2", "perm", "form", "zkbd"):
+                  "zwheb", "zwdev", "zwsym", "zwfmt", "zwhf", "zwmc", "helper-qa", "a4k-2", "perm", "form", "zkbd",
+                  "pk13", "gr-api-qa", "gr-web"):
             dch("-k", n)
         for pr in procs:
             pr.kill()
