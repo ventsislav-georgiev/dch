@@ -3980,6 +3980,8 @@ tail_fold(const char *raw, size_t n)
 	return fold;
 }
 
+static int scr_dead;	/* the last screen_tail got no answer (#556) */
+
 /* The last DET_LINES non-empty visible lines, folded (tail_fold), or NULL
 ** when there is no screen. *novt is set when the master has no terminal
 ** mirror. Caller frees. */
@@ -3994,6 +3996,7 @@ screen_tail(const char *path, int *novt)
 	if (!raw)
 		return NULL;
 	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0, NULL);
+	scr_dead = n == -1;
 	if (n <= 0)
 	{
 		*novt = n == -2;
@@ -10123,10 +10126,13 @@ pk_load(struct pk *p)
 		w = &p->r[t][p->n[t]++];
 		snprintf(w->name, sizeof w->name, "%s", sl.v[k]);
 		snprintf(w->title, sizeof w->title, "%s", slist_label(&sl, k));
+		scr_dead = 0;
 		snprintf(w->state, sizeof w->state, "%s", session_state(sl.v[k]));
 		w->when = activity_epoch(sl.v[k]);
 		w->agents = detect_agents(sl.v[k]);
-		w->shells = pk_shells(sl.v[k]);
+		/* a master that left the screen query unanswered would hold
+		** the STAT query for its full timeout too (#556) */
+		w->shells = scr_dead ? 0 : pk_shells(sl.v[k]);
 		if ((meta = session_meta(sl.v[k], &mep)))
 			(void)dch_meta_prs(meta, w->prs, sizeof w->prs, &w->merged);
 	}

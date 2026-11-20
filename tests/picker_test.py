@@ -579,6 +579,28 @@ def footshells():
     check("SHELLS column hides when no row has a shell", "SHELLS" not in s, s)
     dch("--keys", "pkf3", "q")
     dch("-k", "pkagents")
+    # #556: a stopped master holds only the screen queries, not a third
+    dch("--spawn", "pkstop", "--size", "80x24", "sh", "-c", "sleep 600")
+    wait_live("pkstop", True)
+    mp = [int(l.split()[0]) for l in subprocess.run(
+        ["/bin/ps", "-axo", "pid=,command="], capture_output=True,
+        text=True).stdout.splitlines() if "--master-of" in l and
+        "/pkstop.sock" in l and ROOT in l]
+    os.kill(mp[0], signal.SIGSTOP)
+    try:
+        t0 = time.time()
+        picker("pkf4", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+        s = wait_screen("pkf4", lambda s: " dch " in first(s), 20.0)
+        dt = time.time() - t0
+    finally:
+        os.kill(mp[0], signal.SIGCONT)
+    # 1.118 drew in 1.1 s (two 0.5 s screen queries); a third, 2 s STAT
+    # query made it 3.1 s
+    check("#556: a stopped master's session costs no shells query: the "
+          "first draw in under 2.4 s (%.1f s)" % dt,
+          len(mp) == 1 and " dch " in first(s) and dt < 2.4, s)
+    dch("--keys", "pkf4", "q")
+    dch("-k", "pkstop")
 
 
 def groups():
