@@ -561,11 +561,14 @@ def footshells():
         "time.sleep(600)\n" % (sid, os.path.join(
             ENV["CLAUDE_CONFIG_DIR"], "sessions", "%d.json"), d))
     picker("pkf3", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
-    s = wait_screen("pkf3", lambda s: "SHELLS" in s)
-    hdr = next((l for l in s.split("\n") if "SHELLS" in l), "")
-    cell = lambda l: l[hdr.find("SHELLS"):hdr.find("SHELLS") + 6].strip()
-    got = {m.group(2): cell(l) for l in body(s)
-           for m in [ROW_RE.match(l)] if m}
+    def shells(s):
+        hdr = next((l for l in s.split("\n") if "SHELLS" in l), "")
+        cell = lambda l: l[hdr.find("SHELLS"):hdr.find("SHELLS") + 6].strip()
+        return hdr, {m.group(2): cell(l) for l in body(s)
+                     for m in [ROW_RE.match(l)] if m}
+    # the column shows once the first shell is live: wait for the second
+    s = wait_screen("pkf3", lambda s: shells(s)[1].get("pkshell") == "2")
+    hdr, got = shells(s)
     check("SHELLS column shows beside AGENTS: 2 on the row with two live "
           "shells, blank on the rest (%s)" % got,
           hdr.find("AGENTS") < hdr.find("SHELLS") and
