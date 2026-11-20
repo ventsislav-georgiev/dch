@@ -513,7 +513,17 @@ def fixture_fetched():
              "e\u0301</title>"),
             (15, "https://inv.example.com/i",
              "<title>a\u200bb\ufeffc\U000e0041d\u00ade</title>"),
-            (16, "https://%s/p" % LONGHOST, "<title>Long Host</title>")]:
+            (16, "https://%s/p" % LONGHOST, "<title>Long Host</title>"),
+            (41, "https://tn1.example.com/a", "<html><head><bodyguard>"
+             "</bodyguard><title>Real</title></head>"),
+            (42, "https://tn2.example.com/a",
+             "<head><svgfoo/><title>Real</title>"),
+            (43, "https://tn3.example.com/a",
+             "<html><header>nav</header><title>Real</title>"),
+            (44, "https://ri.example.com/r", "<title>" + "a" * 116 +
+             "\U0001F1E7\U0001F1EC</title>"),
+            (45, "https://eng.example.com/e", "<title>x\U0001F3F4\U000E0067"
+             "\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F</title>")]:
         call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
                                                       "prompt": "sum"}, out)
     call("2026-11-06T11:00:00Z", 11, "Bash",
@@ -534,7 +544,29 @@ def fixture_fetched():
              "<title>Readme again</title>"),
             ("wget -qO- https://yes.example.com/a", "<title>Wget Out</title>"),
             ("sudo curl -s https://yes2.example.com/a 2>&1 | head",
-             "<title>Sudo Curl</title>")), 21):
+             "<title>Sudo Curl</title>"),
+            # #540, #542: still stdout, still the only fetch
+            ("curl -s --output-dir /tmp https://y3.example.com/a",
+             "<title>Output Dir</title>"),
+            ("curl -sL -o /dev/stdout https://y4.example.com/a",
+             "<title>Dev Stdout</title>"),
+            ("cd /tmp && curl -s https://y5.example.com/a",
+             "<title>After Cd</title>"),
+            ("(curl -s https://y6.example.com/a)",
+             "<title>Subshell</title>"),
+            ("curl -s https://y7.example.com/a && echo ok",
+             "<title>Then Echo</title>"),
+            ("curl -s https://y8.example.com/a &",
+             "<title>Background</title>"),
+            ("echo https://y9.example.com/a | xargs curl -s",
+             "<title>Xargs</title>"),
+            # #542 review: what the new forms must still refuse
+            ("curl -s https://n5.example.com/a && echo $(date)",
+             "<title>Echo Runs</title>"),
+            ("cd /tmp && curl -s -o f https://n6.example.com/a",
+             "<title>Cd To File</title>"),
+            ("curl -s https://n7.example.com/a & cat x",
+             "<title>Bg Then Cat</title>")), 21):
         call("2026-11-07T10:%02d:00Z" % k, k, "Bash", {"command": cmd}, out)
     call("2026-11-07T11:00:00Z", 20, "WebFetch",
          {"url": "https://q.example.com/x?r=/", "prompt": "sum"},
@@ -635,6 +667,11 @@ def test_fetched():
     p, ls, rv = res("https://raw.example.com/install.sh")
     check("#527 a curl'd script's \"# \" comment is no title (headings "
           "are WebFetch markdown only)", not rv, rv)
+    for n in "123":
+        t = title("https://tn%s.example.com/a" % n)
+        check("#539 a tag name ends at > / or a blank: <bodyguard>, "
+              "<svgfoo/>, </header> are not <body>, <svg>, </head (%s)" % n,
+              t == "Real", t)
     t = title("https://ent.example.com/e")
     check("#527 numeric and named entities decoded, a decoded bidi or "
           "control blanked, an out-of-range one literal",
@@ -649,6 +686,13 @@ def test_fetched():
     t = title("https://inv.example.com/i")
     check("#527 U+200B, U+FEFF, U+00AD and tag characters dropped",
           t == "abcde", repr(t))
+    t = title("https://ri.example.com/r")
+    check("#541 the 120-byte cut never leaves half a flag", t == "a" * 116,
+          repr(t))
+    t = title("https://eng.example.com/e")
+    check("#541 tag characters after U+1F3F4 stay: the England flag",
+          t == "x\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E"
+          "\U000E0067\U000E007F", repr(t))
     rv = res("https://%s/p" % LONGHOST)[2]
     sub = rv[0]["subtitle"] if rv else ""
     check("#527 a long host is capped so \" \u00b7 fetched ... in "
@@ -670,6 +714,23 @@ def test_fetched():
         p, ls, rv = res(u)
         check("#528 wget -qO- and sudo curl | head: still a fetch",
               len(rv) == 1 and rv[0]["title"] == t, rv)
+    for u, t, why in (
+            ("https://y3.example.com/a", "Output Dir", "#540 --output-dir"),
+            ("https://y4.example.com/a", "Dev Stdout", "#540 -o /dev/stdout"),
+            ("https://y5.example.com/a", "After Cd", "#542 cd /tmp && curl"),
+            ("https://y6.example.com/a", "Subshell", "#542 (curl)"),
+            ("https://y7.example.com/a", "Then Echo", "#542 curl && echo ok"),
+            ("https://y8.example.com/a", "Background", "#542 curl &"),
+            ("https://y9.example.com/a", "Xargs", "#542 echo URL | xargs curl")):
+        p, ls, rv = res(u)
+        check("%s: still a fetch, titled" % why,
+              len(rv) == 1 and rv[0]["title"] == t, rv)
+    for u, why in (("https://n5.example.com/a", "&& echo $(date)"),
+                   ("https://n6.example.com/a", "cd && curl -o f"),
+                   ("https://n7.example.com/a", "curl & cat x")):
+        p, ls, rv = res(u)
+        check("#542 %s: not the only stdout fetch, no title" % why,
+              p.returncode == 0 and not rv, rv)
     p, ls, rv = res("https://q.example.com/x?r=")
     check("#528: ?r=/ is not ?r=: no title", p.returncode == 0 and not rv, rv)
     p, ls, rv = res("https://q.example.com/x?r=/")

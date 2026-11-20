@@ -3463,6 +3463,18 @@ ci_at(const char *s, size_t n, size_t i, const char *p)
 	return n - i >= l && !strncasecmp(s + i, p, l);
 }
 
+/* s[i..n) starts with the tag name p and the name ends there: a '>', a '/'
+** or a blank follows (#539: `<bodyguard` is no `<body`) */
+static int
+ci_tag(const char *s, size_t n, size_t i, const char *p)
+{
+	size_t l = strlen(p);
+
+	return ci_at(s, n, i, p) && n - i > l &&
+	       (s[i + l] == '>' || s[i + l] == '/' || s[i + l] == ' ' ||
+	        (s[i + l] >= '\t' && s[i + l] <= '\r'));
+}
+
 /* #527: [*b, *e) the <title> of s[0..n)'s HTML head, 1; else 0. Only when
 ** s looks like HTML (a doctype, <html or <head before it, or nothing but
 ** blanks and tags), never in a comment, <script>, <style> or <svg>, nor
@@ -3484,9 +3496,10 @@ ft_html(const char *s, size_t n, size_t *b, size_t *e)
 			lead &= s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r');
 			continue;
 		}
-		for (k = 0; k < 4 && !ci_at(s, n, i, skip[k][0]); k++)
+		for (k = 0; k < 4 && !(k ? ci_tag : ci_at)(s, n, i, skip[k][0]);
+		     k++)
 			;
-		if (ci_at(s, n, i, "</head") || ci_at(s, n, i, "<body"))
+		if (ci_tag(s, n, i, "</head") || ci_tag(s, n, i, "<body"))
 			return 0;
 		if (ci_at(s, n, i, "<title>"))
 		{
@@ -3495,8 +3508,8 @@ ft_html(const char *s, size_t n, size_t *b, size_t *e)
 			*e = *b + j;
 			return (html || lead) && j != SIZE_MAX;
 		}
-		html |= ci_at(s, n, i, "<!doctype") || ci_at(s, n, i, "<html") ||
-		        ci_at(s, n, i, "<head");
+		html |= ci_at(s, n, i, "<!doctype") || ci_tag(s, n, i, "<html") ||
+		        ci_tag(s, n, i, "<head");
 		j = k < 4 ? xr_find(s + i, n - i, skip[k][1], strlen(skip[k][1])) : 0;
 		if (j == SIZE_MAX || !(p = memchr(s + i + j, '>', n - i - j)))
 			return 0;
@@ -3561,8 +3574,8 @@ ft_num(const char *s, size_t n, uint32_t *c)
 ** (ft_html), else, when s is markdown (md: a WebFetch's), its first "# "
 ** heading outside fences; numeric and common named entities decoded,
 ** controls, C1 and bidi blanked, U+200B, U+FEFF, U+00AD and tag characters
-** dropped, blanks collapsed, cut at XR_FETCH_TITLE bytes on a grapheme
-** (#418). "" for none. shortcut: "<title " with attributes is no title, a
+** dropped (but those after U+1F3F4, a subdivision flag), blanks
+** collapsed, cut at XR_FETCH_TITLE bytes on a grapheme (#418). "" for none. shortcut: "<title " with attributes is no title, a
 ** page writes it bare. */
 void
 xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
@@ -3577,7 +3590,7 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 	size_t b = 0, e = 0, i, a, o = 0, k, l;
 	char u[4];
 	int gap = 0;
-	uint32_t c;
+	uint32_t c, prev = 0;
 
 	if (!outsz)
 		return;
@@ -3599,11 +3612,13 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 			c = u8_next((const unsigned char *)s + i, e - i, &a);
 		l = u8_put(u, c);
 		if (c == 0x200b || c == 0xfeff || c == 0xad ||
-		    (c >= 0xe0000 && c <= 0xe007f))
+		    (c >= 0xe0000 && c <= 0xe007f &&
+		     prev != 0x1f3f4 && !(prev >= 0xe0000 && prev <= 0xe007f)))
 			continue;	/* invisible */
 		if (xr_ctl_at(u, l) || u_space(c))
 		{
 			gap = 1;
+			prev = 0;
 			continue;
 		}
 		if (o + (gap && o) + l > XR_FETCH_TITLE)
@@ -3620,11 +3635,16 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 				o -= 3;
 			while (o && out[o - 1] == ' ')
 				o--;
+			/* #541: no flag's first half left alone */
+			if (l == 4 && xr_ri(u) && o >= 4 && xr_ri(out + o - 4) &&
+			    !xr_ri2(out, o - 4, o))
+				o -= 4;
 			break;
 		}
 		if (gap && o)
 			out[o++] = ' ';
 		gap = 0;
+		prev = c;
 		memcpy(out + o, u, l);
 		o += l;
 	}
@@ -6924,8 +6944,8 @@ one_url(void *ctx, const struct xr_span *sp)
 }
 
 /* #515: shell words w[k..e) a fetcher's command whose output is stdout: no
-** -o, -O or --output (a file, unless the value is -); wget saves to a file
-** unless it has -O-. shortcut: a short cluster with an o or O anywhere
+** -o, -O or --output (a file, unless the value is - or /dev/stdout); wget
+** saves to a file unless it has -O-. shortcut: a short cluster with an o or O anywhere
 ** (-uBob) counts as -o, so no title; upgrade with an option parser. */
 static int
 fetch_stdout(const struct sw *w, size_t k, size_t e)
@@ -6941,7 +6961,7 @@ fetch_stdout(const struct sw *w, size_t k, size_t e)
 			continue;
 		if (a[1] == '-')
 		{
-			if (strncmp(a, "--output", 8))
+			if (strncmp(a, "--output", 8) || (a[8] && a[8] != '='))
 				continue;
 			v = strchr(a, '=');
 			v = v ? v + 1 : j + 1 < e ? SWD(w, j + 1) : "";
@@ -6954,7 +6974,7 @@ fetch_stdout(const struct sw *w, size_t k, size_t e)
 				continue;
 			v = v[1] ? v + 1 : j + 1 < e ? SWD(w, j + 1) : "";
 		}
-		out = !strcmp(v, "-");
+		out = !strcmp(v, "-") || !strcmp(v, "/dev/stdout");
 	}
 	return out;
 }
@@ -6973,26 +6993,58 @@ fetch_def(struct xr_claude *d, const struct rcall *c, const char *out,
 	struct one_url m;
 	struct remit r;
 	struct sw w;
-	const char *cd;
-	size_t k, e, j, uend = c->cl;
-	int line, ok = c->kind == RC_CARD;
+	const char *cd, *o;
+	size_t k, e, j, s, u, uend = c->cl;
+	int line, paren, ok = c->kind == RC_CARD;
 
 	if (!c->cmd || (c->kind != RC_CARD && c->kind != RC_BASH))
 		return;
 	if (!ok)
 	{
 		shell_words(c->cmd, c->cl, &w, 0);
-		for (e = 0; w.b && e < w.n && e < SW_MAX &&
-		     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
-			;
-		k = w.b && e <= SW_MAX ? cmd_head(&w, 0, e, &line, &cd) : e;
+		/* ( opens a subshell, and a leading cd prints nothing (as in
+		** read_line): the fetch is the first command after them */
+		paren = w.b && w.n && !strcmp(SWD(&w, 0), "(");
+		for (s = paren; ; s = e + 1)
+		{
+			for (e = s; w.b && e < w.n && e < SW_MAX &&
+			     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
+				;
+			k = w.b && e <= SW_MAX ? cmd_head(&w, s, e, &line, &cd) : e;
+			if (k >= e || e >= w.n || !w.op[e] ||
+			    strcmp(base(SWD(&w, k)), "cd"))
+				break;
+		}
+		u = e;
+		/* echo URL | xargs curl -s: the second command fetches */
+		if (k < e && e < w.n && !strcmp(base(SWD(&w, k)), "echo") &&
+		    !strcmp(SWD(&w, e), "|") && e + 1 < w.n &&
+		    !strcmp(base(SWD(&w, e + 1)), "xargs"))
+		{
+			for (s = e + 1, e = s; e < w.n && e < SW_MAX &&
+			     !(w.op[e] && !strpbrk(SWD(&w, e), "<>")); e++)
+				;
+			k = cmd_head(&w, s, e, &line, &cd);
+		}
 		ok = k < e && in_list(base(SWD(&w, k)), fetchers) &&
 		     fetch_stdout(&w, k, e);
 		for (j = e; ok && j < w.n; j++)	/* a list's other commands mix in */
-			ok = !w.op[j] || !strcmp(SWD(&w, j), "|") ||
-			     strpbrk(SWD(&w, j), "<>");
-		if (ok && e < w.n)
-			uend = w.rs[e];	/* the URL: before the first operator */
+		{
+			o = SWD(&w, j);
+			if (!w.op[j] || !strcmp(o, "|") || strpbrk(o, "<>") ||
+			    (j + 1 == w.n && (!strcmp(o, "&") ||
+			                      (paren && !strcmp(o, ")")))))
+				continue;
+			/* && echo ok: a short line, if it runs nothing */
+			if (strcmp(o, "&&") || j + 1 >= w.n ||
+			    strcmp(base(SWD(&w, j + 1)), "echo"))
+				ok = 0;
+			for (j += 2; ok && j < w.n && !w.op[j]; j++)
+				ok = !strpbrk(SWD(&w, j), "$`");
+			j--;
+		}
+		if (ok && u < w.n)
+			uend = w.rs[u];	/* the URL: before the first operator */
 		free(w.b);
 	}
 	memset(&m, 0, sizeof m);
