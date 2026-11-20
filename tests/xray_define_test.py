@@ -544,7 +544,12 @@ def fixture_fetched():
              "<title>Readme again</title>"),
             ("wget -qO- https://yes.example.com/a", "<title>Wget Out</title>"),
             ("sudo curl -s https://yes2.example.com/a 2>&1 | head",
-             "<title>Sudo Curl</title>")), 21):
+             "<title>Sudo Curl</title>"),
+            # #540: still stdout, still a fetch
+            ("curl -s --output-dir /tmp https://y3.example.com/a",
+             "<title>Output Dir</title>"),
+            ("curl -sL -o /dev/stdout https://y4.example.com/a",
+             "<title>Dev Stdout</title>")), 21):
         call("2026-11-07T10:%02d:00Z" % k, k, "Bash", {"command": cmd}, out)
     call("2026-11-07T11:00:00Z", 20, "WebFetch",
          {"url": "https://q.example.com/x?r=/", "prompt": "sum"},
@@ -691,6 +696,12 @@ def test_fetched():
                  ("https://yes2.example.com/a", "Sudo Curl")):
         p, ls, rv = res(u)
         check("#528 wget -qO- and sudo curl | head: still a fetch",
+              len(rv) == 1 and rv[0]["title"] == t, rv)
+    for u, t, why in (
+            ("https://y3.example.com/a", "Output Dir", "#540 --output-dir"),
+            ("https://y4.example.com/a", "Dev Stdout", "#540 -o /dev/stdout")):
+        p, ls, rv = res(u)
+        check("%s: still a fetch, titled" % why,
               len(rv) == 1 and rv[0]["title"] == t, rv)
     p, ls, rv = res("https://q.example.com/x?r=")
     check("#528: ?r=/ is not ?r=: no title", p.returncode == 0 and not rv, rv)

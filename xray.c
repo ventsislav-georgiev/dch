@@ -6944,8 +6944,8 @@ one_url(void *ctx, const struct xr_span *sp)
 }
 
 /* #515: shell words w[k..e) a fetcher's command whose output is stdout: no
-** -o, -O or --output (a file, unless the value is -); wget saves to a file
-** unless it has -O-. shortcut: a short cluster with an o or O anywhere
+** -o, -O or --output (a file, unless the value is - or /dev/stdout); wget
+** saves to a file unless it has -O-. shortcut: a short cluster with an o or O anywhere
 ** (-uBob) counts as -o, so no title; upgrade with an option parser. */
 static int
 fetch_stdout(const struct sw *w, size_t k, size_t e)
@@ -6961,7 +6961,7 @@ fetch_stdout(const struct sw *w, size_t k, size_t e)
 			continue;
 		if (a[1] == '-')
 		{
-			if (strncmp(a, "--output", 8))
+			if (strncmp(a, "--output", 8) || (a[8] && a[8] != '='))
 				continue;
 			v = strchr(a, '=');
 			v = v ? v + 1 : j + 1 < e ? SWD(w, j + 1) : "";
@@ -6974,7 +6974,7 @@ fetch_stdout(const struct sw *w, size_t k, size_t e)
 				continue;
 			v = v[1] ? v + 1 : j + 1 < e ? SWD(w, j + 1) : "";
 		}
-		out = !strcmp(v, "-");
+		out = !strcmp(v, "-") || !strcmp(v, "/dev/stdout");
 	}
 	return out;
 }
