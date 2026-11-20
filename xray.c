@@ -3574,8 +3574,8 @@ ft_num(const char *s, size_t n, uint32_t *c)
 ** (ft_html), else, when s is markdown (md: a WebFetch's), its first "# "
 ** heading outside fences; numeric and common named entities decoded,
 ** controls, C1 and bidi blanked, U+200B, U+FEFF, U+00AD and tag characters
-** dropped, blanks collapsed, cut at XR_FETCH_TITLE bytes on a grapheme
-** (#418). "" for none. shortcut: "<title " with attributes is no title, a
+** dropped (but those after U+1F3F4, a subdivision flag), blanks
+** collapsed, cut at XR_FETCH_TITLE bytes on a grapheme (#418). "" for none. shortcut: "<title " with attributes is no title, a
 ** page writes it bare. */
 void
 xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
@@ -3590,7 +3590,7 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 	size_t b = 0, e = 0, i, a, o = 0, k, l;
 	char u[4];
 	int gap = 0;
-	uint32_t c;
+	uint32_t c, prev = 0;
 
 	if (!outsz)
 		return;
@@ -3612,11 +3612,13 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 			c = u8_next((const unsigned char *)s + i, e - i, &a);
 		l = u8_put(u, c);
 		if (c == 0x200b || c == 0xfeff || c == 0xad ||
-		    (c >= 0xe0000 && c <= 0xe007f))
+		    (c >= 0xe0000 && c <= 0xe007f &&
+		     prev != 0x1f3f4 && !(prev >= 0xe0000 && prev <= 0xe007f)))
 			continue;	/* invisible */
 		if (xr_ctl_at(u, l) || u_space(c))
 		{
 			gap = 1;
+			prev = 0;
 			continue;
 		}
 		if (o + (gap && o) + l > XR_FETCH_TITLE)
@@ -3633,11 +3635,16 @@ xr_fetch_title(const char *s, size_t n, int md, char *out, size_t outsz)
 				o -= 3;
 			while (o && out[o - 1] == ' ')
 				o--;
+			/* #541: no flag's first half left alone */
+			if (l == 4 && xr_ri(u) && o >= 4 && xr_ri(out + o - 4) &&
+			    !xr_ri2(out, o - 4, o))
+				o -= 4;
 			break;
 		}
 		if (gap && o)
 			out[o++] = ' ';
 		gap = 0;
+		prev = c;
 		memcpy(out + o, u, l);
 		o += l;
 	}

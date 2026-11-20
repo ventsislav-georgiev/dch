@@ -519,7 +519,11 @@ def fixture_fetched():
             (42, "https://tn2.example.com/a",
              "<head><svgfoo/><title>Real</title>"),
             (43, "https://tn3.example.com/a",
-             "<html><header>nav</header><title>Real</title>")]:
+             "<html><header>nav</header><title>Real</title>"),
+            (44, "https://ri.example.com/r", "<title>" + "a" * 116 +
+             "\U0001F1E7\U0001F1EC</title>"),
+            (45, "https://eng.example.com/e", "<title>x\U0001F3F4\U000E0067"
+             "\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F</title>")]:
         call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
                                                       "prompt": "sum"}, out)
     call("2026-11-06T11:00:00Z", 11, "Bash",
@@ -660,6 +664,13 @@ def test_fetched():
     t = title("https://inv.example.com/i")
     check("#527 U+200B, U+FEFF, U+00AD and tag characters dropped",
           t == "abcde", repr(t))
+    t = title("https://ri.example.com/r")
+    check("#541 the 120-byte cut never leaves half a flag", t == "a" * 116,
+          repr(t))
+    t = title("https://eng.example.com/e")
+    check("#541 tag characters after U+1F3F4 stay: the England flag",
+          t == "x\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E"
+          "\U000E0067\U000E007F", repr(t))
     rv = res("https://%s/p" % LONGHOST)[2]
     sub = rv[0]["subtitle"] if rv else ""
     check("#527 a long host is capped so \" \u00b7 fetched ... in "
