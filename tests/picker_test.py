@@ -619,6 +619,20 @@ def footshells():
     check("SHELLS column hides when no row has a shell", "SHELLS" not in s, s)
     dch("--keys", "pkf3", "q")
     dch("-k", "pkagents")
+    # #558: agents on a group tab count in the footer, as Sessions' do
+    with open(ENV["DCH_CONFIG"], "w") as f:
+        f.write("group = QA = -qa\n")
+    dch("--spawn", "pkag-qa", "--size", "80x24", "sh", "-c",
+        "printf '\\342\\217\\272 main\\n\\342\\227\\257 general-purpose  a\\n"
+        "\\342\\227\\257 general-purpose  b\\n'; sleep 600")
+    wait_live("pkag-qa", True)
+    picker("pkf5", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pkf5", lambda s: "\U0001f916 2" in first(s))
+    check("#558: a group tab's 2 agents are in the footer's "
+          "robot count", "QA" in first(s) and
+          "\U0001f916 2" in first(s), first(s))
+    dch("--keys", "pkf5", "q")
+    dch("-k", "pkag-qa")
 
 
 def groups():
