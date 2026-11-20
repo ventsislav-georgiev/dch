@@ -543,23 +543,35 @@ def footshells():
           r"\d+/\d+ active - 2 agents - dch " + re.escape(ver) + "$",
           first(s)), first(s))
     dch("--keys", "pkf2", "q")
-    # a Claude with two background shells, as transcript_test fakes one
-    sid = "53353353-3533-4533-8533-533533533533"
-    d = os.path.join(ROOT, "claude-%d" % os.getuid(), "-p", sid, "tasks")
-    os.makedirs(d)
-    dch("--spawn", "pkshell", "--size", "80x24", sys.executable, "-c",
-        "import json,os,subprocess as sp,time\n"
-        "p=os.getpid()\n"
-        "st=sp.run(['/bin/ps','-o','lstart=','-p',str(p)],capture_output=True,"
-        "text=True,env={'LC_ALL':'C','TZ':'UTC'}).stdout.strip()\n"
-        "json.dump({'pid':p,'sessionId':%r,'cwd':'/','procStart':st,"
-        "'version':'2.1.0','kind':'interactive','status':'idle',"
-        "'statusUpdatedAt':1},open(%r%%p,'w'))\n"
-        "for k in ('b1','b2'):\n"
-        "    sp.Popen(['sleep','600'],stdout=open(%r+'/'+k+'.output','ab'),"
-        "stdin=sp.DEVNULL)\n"
-        "time.sleep(600)\n" % (sid, os.path.join(
-            ENV["CLAUDE_CONFIG_DIR"], "sessions", "%d.json"), d))
+    # a Claude with two background shells, as transcript_test fakes one: the
+    # transcript's result line is what marks a shell background (#557)
+    def fake_claude(name, sid, shs, bg):
+        d = os.path.join(ROOT, "claude-%d" % os.getuid(), "-p", sid, "tasks")
+        os.makedirs(d)
+        pd = os.path.join(ENV["CLAUDE_CONFIG_DIR"], "projects", "-p")
+        os.makedirs(pd, exist_ok=True)
+        with open(os.path.join(pd, sid + ".jsonl"), "w") as f:
+            for k in bg:
+                f.write('{"type":"user","toolUseResult":{"backgroundTaskId":'
+                        '"%s"}}\n' % k)
+        dch("--spawn", name, "--size", "80x24", sys.executable, "-c",
+            "import json,os,subprocess as sp,time\n"
+            "p=os.getpid()\n"
+            "st=sp.run(['/bin/ps','-o','lstart=','-p',str(p)],"
+            "capture_output=True,text=True,"
+            "env={'LC_ALL':'C','TZ':'UTC'}).stdout.strip()\n"
+            "json.dump({'pid':p,'sessionId':%r,'cwd':'/','procStart':st,"
+            "'version':'2.1.0','kind':'interactive','status':'idle',"
+            "'statusUpdatedAt':1},open(%r%%p,'w'))\n"
+            "for k in %r:\n"
+            "    sp.Popen(['sleep','600'],stdout=open(%r+'/'+k+'.output','ab'),"
+            "stdin=sp.DEVNULL)\n"
+            "time.sleep(600)\n" % (sid, os.path.join(
+                ENV["CLAUDE_CONFIG_DIR"], "sessions", "%d.json"), shs, d))
+    fake_claude("pkshell", "53353353-3533-4533-8533-533533533533",
+                ("b1", "b2"), ("b1", "b2"))
+    fake_claude("pkfg", "53353353-3533-4533-8533-533533533534",
+                ("f1", "b3"), ("b3",))
     picker("pkf3", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
     def shells(s):
         hdr = next((l for l in s.split("\n") if "SHELLS" in l), "")
@@ -573,12 +585,54 @@ def footshells():
           "shells, blank on the rest (%s)" % got,
           hdr.find("AGENTS") < hdr.find("SHELLS") and
           got.get("pkshell") == "2" and
-          [k for k, v in got.items() if v] == ["pkshell"], hdr, s)
+          set(k for k, v in got.items() if v) <= {"pkshell", "pkfg"},
+          hdr, s)
+    s = wait_screen("pkf3", lambda s: shells(s)[1].get("pkfg") == "1")
+    check("#557: SHELLS counts background shells only: 1 for a foreground "
+          "and a background shell (%s)" % shells(s)[1],
+          shells(s)[1].get("pkfg") == "1", s)
     dch("-k", "pkshell")
+    dch("-k", "pkfg")
+    # #556: a stopped master holds only the screen queries, not a third
+    dch("--spawn", "pkstop", "--size", "80x24", "sh", "-c", "sleep 600")
+    wait_live("pkstop", True)
+    mp = [int(l.split()[0]) for l in subprocess.run(
+        ["/bin/ps", "-axo", "pid=,command="], capture_output=True,
+        text=True).stdout.splitlines() if "--master-of" in l and
+        "/pkstop.sock" in l and ROOT in l]
+    os.kill(mp[0], signal.SIGSTOP)
+    try:
+        t0 = time.time()
+        picker("pkf4", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+        s = wait_screen("pkf4", lambda s: " dch " in first(s), 20.0)
+        dt = time.time() - t0
+    finally:
+        os.kill(mp[0], signal.SIGCONT)
+    # 1.118 drew in 1.1 s (two 0.5 s screen queries); a third, 2 s STAT
+    # query made it 3.1 s
+    check("#556: a stopped master's session costs no shells query: the "
+          "first draw in under 2.4 s (%.1f s)" % dt,
+          len(mp) == 1 and " dch " in first(s) and dt < 2.4, s)
+    dch("--keys", "pkf4", "q")
+    dch("-k", "pkstop")
     s = wait_screen("pkf3", lambda s: "SHELLS" not in s, 15.0)
     check("SHELLS column hides when no row has a shell", "SHELLS" not in s, s)
     dch("--keys", "pkf3", "q")
     dch("-k", "pkagents")
+    # #558: agents on a group tab count in the footer, as Sessions' do
+    with open(ENV["DCH_CONFIG"], "w") as f:
+        f.write("group = QA = -qa\n")
+    dch("--spawn", "pkag-qa", "--size", "80x24", "sh", "-c",
+        "printf '\\342\\217\\272 main\\n\\342\\227\\257 general-purpose  a\\n"
+        "\\342\\227\\257 general-purpose  b\\n'; sleep 600")
+    wait_live("pkag-qa", True)
+    picker("pkf5", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pkf5", lambda s: "\U0001f916 2" in first(s))
+    check("#558: a group tab's 2 agents are in the footer's "
+          "robot count", "QA" in first(s) and
+          "\U0001f916 2" in first(s), first(s))
+    dch("--keys", "pkf5", "q")
+    dch("-k", "pkag-qa")
 
 
 def groups():

@@ -3980,6 +3980,8 @@ tail_fold(const char *raw, size_t n)
 	return fold;
 }
 
+static int scr_dead;	/* the last screen_tail got no answer (#556) */
+
 /* The last DET_LINES non-empty visible lines, folded (tail_fold), or NULL
 ** when there is no screen. *novt is set when the master has no terminal
 ** mirror. Caller frees. */
@@ -3994,6 +3996,7 @@ screen_tail(const char *path, int *novt)
 	if (!raw)
 		return NULL;
 	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0, NULL);
+	scr_dead = n == -1;
 	if (n <= 0)
 	{
 		*novt = n == -2;
@@ -7073,9 +7076,36 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 			sh[j] = sh[j - 1];
 		sh[j] = x;
 	}
-	if (!show)
-		return ns;	/* the picker's SHELLS count */
 	tmin = ns ? sh[ns - 1].t : 0;	/* newest first: the last is oldest */
+	if (!show)	/* the picker's SHELLS count: the background ones (#557) */
+	{
+		/* a shell's background flag never changes: kept per id, oldest
+		** out; an unknown owner is asked again after 10 s */
+		static struct { char id[64]; time_t t, at; int own; } bc[128];
+		static int bn, bnext;
+		time_t now = time(NULL);
+		int h;
+
+		for (i = j = 0; tp && i < ns; i++)
+		{
+			for (h = 0; h < bn && (strcmp(bc[h].id, sh[i].id) ||
+			     bc[h].t != sh[i].t); h++)
+				;
+			if (h == bn || (!bc[h].own && now - bc[h].at >= 10))
+			{
+				if (h == bn)
+					h = bn < 128 ? bn++ : bnext++ % 128;
+				snprintf(bc[h].id, sizeof bc[h].id, "%s", sh[i].id);
+				bc[h].t = sh[i].t;
+				bc[h].at = now;
+				bc[h].own = shell_owner(tp, sh[i].id, sh[i].t, tmin,
+				                        sv, &nsv, agent, adesc,
+				                        sizeof adesc, desc, sizeof desc);
+			}
+			j += bc[h].own != 0;
+		}
+		return j;
+	}
 	fputs(",\"shells\":[", stdout);
 	for (i = 0; i < ns; i++)
 	{
@@ -10058,14 +10088,15 @@ pk_shells(const char *name)
 {
 	struct cmd_info ci;
 	struct crec c;
-	char sp[1100];
+	char sp[1100], tp[2000];
 	int n = 0;
 
 	session_sock_path(name, sp, sizeof sp);
 	if (cmd_query_f(sp, &ci, DCH_CMD_F_STAT) != 0)
 		return 0;
 	if (xr_live_claude(&ci, &c))
-		n = put_shells(c.pid, c.sid, NULL, 0);
+		n = put_shells(c.pid, c.sid, claude_transcript(&c, tp, sizeof tp)
+		               ? NULL : tp, 0);
 	cmd_info_free(&ci);
 	return n;
 }
@@ -10086,6 +10117,7 @@ pk_load(struct pk *p)
 	int k, j, t, g, nh, pin, nr, nrh, base = 0, cnt = 0, ok;
 
 	pk_selnames(p, sel);
+	sub_read = 0;	/* shell_owner's budget is per reload, not per picker */
 	for (t = 0; t < PK_TABS; t++)
 	{
 		free(p->r[t]);
@@ -10123,10 +10155,13 @@ pk_load(struct pk *p)
 		w = &p->r[t][p->n[t]++];
 		snprintf(w->name, sizeof w->name, "%s", sl.v[k]);
 		snprintf(w->title, sizeof w->title, "%s", slist_label(&sl, k));
+		scr_dead = 0;
 		snprintf(w->state, sizeof w->state, "%s", session_state(sl.v[k]));
 		w->when = activity_epoch(sl.v[k]);
 		w->agents = detect_agents(sl.v[k]);
-		w->shells = pk_shells(sl.v[k]);
+		/* a master that left the screen query unanswered would hold
+		** the STAT query for its full timeout too (#556) */
+		w->shells = scr_dead ? 0 : pk_shells(sl.v[k]);
 		if ((meta = session_meta(sl.v[k], &mep)))
 			(void)dch_meta_prs(meta, w->prs, sizeof w->prs, &w->merged);
 	}
