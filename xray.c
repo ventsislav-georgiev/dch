@@ -3827,9 +3827,9 @@ one_ref(void *ctx, const struct xr_span *sp)
 	return x->n > 1;
 }
 
-/* #534: line [ls, le) a lead-in: at most 120 bytes, naming one ref (*sp,
-** offsets in s) and ending in ':' (blanks, '*' and '_' after it count as
-** the end); the ':''s offset, else 0. */
+/* #534: line [ls, le) a lead-in: at most 120 bytes, naming one ref (not an
+** issue or pull, #560: *sp, offsets in s) and ending in ':' (blanks, '*' and
+** '_' after it count as the end); the ':''s offset, else 0. */
 static size_t
 lead_in(const char *s, size_t ls, size_t le, const char *cwd,
         struct xr_span *sp)
@@ -3844,8 +3844,8 @@ lead_in(const char *s, size_t ls, size_t le, const char *cwd,
 		return 0;
 	x.n = 0;
 	(void)grammar(s + ls, le - 1 - ls, XR_PLAIN, R_ANCHOR, cwd, one_ref, &x);
-	if (x.n != 1)
-		return 0;
+	if (x.n != 1 || x.sp.shape == XR_ISSUE || x.sp.shape == XR_PULL)
+		return 0;	/* #560: those have real titles (resolve) */
 	*sp = x.sp;
 	sp->s += ls;
 	sp->e += ls;

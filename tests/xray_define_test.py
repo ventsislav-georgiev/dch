@@ -930,7 +930,8 @@ REPLIES = [("assistant", "Decision for you (OQ-185):\n- a) ship it\n- b) wait"
             "\n- c) drop it\n\nTell me which."),
            ("user", "Re OQ-193:\nplease look"),
            ("assistant", "Status of OQ-187:\nthe reply's body\n\n"
-            "**OQ-194 next:**\nits reply body")]
+            "**OQ-194 next:**\nits reply body"),
+           ("assistant", "Changes in #93:\n- fixed a\n- fixed b")]
 
 
 def test_lead_in():
@@ -954,7 +955,7 @@ def test_lead_in():
                                        "tool_use_id": "l%d" % k,
                                        "content": out}]}})
     for k, (who, text) in enumerate(REPLIES, 6):
-        lines.append({"type": who, "timestamp": "2026-11-01T10:0%d:00Z" % k,
+        lines.append({"type": who, "timestamp": "2026-11-01T10:%02d:00Z" % k,
                       "message": {"content": [{"type": "text",
                                                "text": text}]}})
     with open(os.path.join(pdir, LSID + ".jsonl"), "w") as f:
@@ -1024,6 +1025,11 @@ def test_lead_in():
           "fence does)", not d and
           [(x["rule"], x["passage"]) for x in e] == [("D5", "after it")],
           (d, e, out))
+    d, out = defs("#93")
+    check("#560 \"Changes in #93:\" with a body gives no D5 (an issue has "
+          "its own title); OQ-194's lead-in still does",
+          not [x for x in d if x["rule"] == "D5"] and
+          [x["rule"] for x in defs("OQ-194")[0]] == ["D5"], (d, out))
 
 
 def test_lead_cmd():
