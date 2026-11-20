@@ -13885,7 +13885,9 @@ sr_trim(struct xr_search *s)
 
 	/* the hit past the cap is not kept: a transcript's oldest word-only
 	** one, the next sr_add would replace (LOW-UQ2), else the oldest. Its
-	** turn is cut when a kept hit is under it too, but for a phrase's turn */
+	** turn is cut when a kept hit is under it too, but for a phrase's turn:
+	** that stays, its own word-only hits going first, oldest first (a
+	** phrase's turn can lose all of them, not one) */
 	if (s->n == SR_SLOTS)
 	{
 		struct sr_hit *x;
