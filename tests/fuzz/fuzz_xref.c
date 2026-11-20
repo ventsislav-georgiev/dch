@@ -30,7 +30,8 @@
 ** object printed, every delta line one schema-1 chapter or ref object, and a
 ** second diff of the last moment empty.
 ** Paths 1 and 5 with byte 0's bit 5 set read the bytes as a Codex rollout
-** instead (#160, 7.4): mentions only, so no hit may carry a definition.
+** instead (#160, 7.4): mentions only, so no hit may carry a definition
+** but a fetch's (#515) or a reply's lead-in (D5, #562).
 ** Path 1 also reads the transcript as a file through light --ref's windows,
 ** newest first, with its prefilter on and off (#293): the same lines, first
 ** and progress aside, or abort. Windows of 16 bytes (bit 6) or 509; bit 7 a
@@ -152,10 +153,12 @@ tee_hit(void *ctx, const struct xr_hit *h)
 	if (!h->sp || h->sp->s >= h->sp->e || h->sp->e > h->ll || !h->line)
 		abort();
 	check_key(h->sp);
-	if (cx && (h->passage || (h->rule && strcmp(h->rule, "fetch")) ||
-	           (h->title && !h->rule)))
+	if (cx && ((h->passage && (!h->rule || strcmp(h->rule, "D5"))) ||
+	           (h->rule && strcmp(h->rule, "fetch") &&
+	            strcmp(h->rule, "D5")) || (h->title && !h->rule)))
 		abort();	/* a Codex corpus defines nothing (7.4) but a
-				** fetched page's URL (#515) */
+				** fetched page's URL (#515) and a reply's
+				** lead-in (#562) */
 	if (h->rule && !strcmp(h->rule, "fetch") &&
 	    (h->sp->shape != XR_URL || !h->title[0] ||
 	     strlen(h->title) > XR_FETCH_TITLE))

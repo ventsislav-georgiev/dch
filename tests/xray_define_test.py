@@ -931,7 +931,11 @@ REPLIES = [("assistant", "Decision for you (OQ-185):\n- a) ship it\n- b) wait"
            ("user", "Re OQ-193:\nplease look"),
            ("assistant", "Status of OQ-187:\nthe reply's body\n\n"
             "**OQ-194 next:**\nits reply body"),
-           ("assistant", "Changes in #93:\n- fixed a\n- fixed b")]
+           ("assistant", "Changes in #93:\n- fixed a\n- fixed b"),
+           ("assistant", "> Quoted (OQ-317):\n> quoted body"),
+           ("assistant", "1. Step (OQ-318):\n   indented body"),
+           ("assistant", "2) Next (OQ-319):\nbody"),
+           ("assistant", "- Bullet (OQ-320):\nbody")]
 
 
 def test_lead_in():
@@ -1030,6 +1034,13 @@ def test_lead_in():
           "its own title); OQ-194's lead-in still does",
           not [x for x in d if x["rule"] == "D5"] and
           [x["rule"] for x in defs("OQ-194")[0]] == ["D5"], (d, out))
+
+
+    check("#562 a leading quote, ordered-list or bullet marker is not the "
+          "title", [[x["title"] for x in defs(r)[0]] for r in
+                    ("OQ-317", "OQ-318", "OQ-319", "OQ-320")] ==
+          [["Quoted (OQ-317)"], ["Step (OQ-318)"], ["Next (OQ-319)"],
+           ["Bullet (OQ-320)"]], defs("OQ-317"))
 
 
 def test_lead_cmd():

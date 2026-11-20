@@ -267,6 +267,21 @@ def test_live():
               ls[0]["first"]["scope"] == "project" and
               [x["tally"]["session"] for x in ls if "tally" in x] == [n] and
               ls[-1].get("done") is True, r.stdout + r.stderr)
+        # #562: an agent reply's lead-in defines its ref, as a Claude reply's
+        rollout(TID, proj, BODY + line(5, "response_item", {
+            "type": "message", "role": "assistant", "content": [{
+                "type": "output_text",
+                "text": "Decision for you (OQ-390):\n- a) yes\n- b) no"}]}))
+        r = dch("--xray", n, "--ref", "OQ-390", "--scope", "session",
+                "--json")
+        d = [json.loads(x)["definition"] for x in r.stdout.splitlines()
+             if '"definition"' in x]
+        check("#562 a Codex agent reply's \"Decision for you (OQ-390):\" "
+              "defines OQ-390: rule D5, the lines after it the passage",
+              [(x["rule"], x["title"], x["passage"]) for x in d] ==
+              [("D5", "Decision for you (OQ-390)", "- a) yes\n- b) no")],
+              r.stdout[-500:] + r.stderr)
+        rollout(TID, proj, BODY)
         # --chapter (#169): the rollout's chapter reader, one seam open
         open(trace, "w").close()
         r = dch("--xray", n, "--chapter", o["chapters"][0]["anchor"],

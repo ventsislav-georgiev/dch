@@ -3891,6 +3891,17 @@ d5(const char *s, const struct olines *o, size_t k, const char *cwd,
 		return 0;	/* a ':' line with no body after it */
 	while (t < c && s[t] && strchr(" \t*_", s[t]))
 		t++;
+	/* #562: a quote or list marker is not the title ("> ", "- ", "1. ") */
+	if (t + 1 < c && (s[t] == '>' || s[t] == '-') && s[t + 1] == ' ')
+		t += 2;
+	else
+	{
+		for (h = t; h < c && A_DIG(s[h]); h++)
+			;
+		if (h > t && h - t < 10 && h + 1 < c &&
+		    (s[h] == '.' || s[h] == ')') && s[h + 1] == ' ')
+			t = h + 2;
+	}
 	title_of(s + t, c - t, d->title);
 	if (!d->title[0])
 		return 0;
@@ -8366,6 +8377,7 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 					resp_set(d, s, n);
 					refs_text(d, s, n, XR_REFS_CAP,
 				          XR_MD | XR_TERMS);
+					lead_text(d, s, n);
 					if (ent_here(d, NULL))
 						ent_prose(d->want, "assistant", s, n);
 				}
