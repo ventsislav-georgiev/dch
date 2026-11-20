@@ -631,12 +631,13 @@ def groups():
     # a bad line is skipped, the later ones still count
     setcfg("group = %s = gr-api\ngroup = Long = (gr-api|%s)\n"
            "group = = gr-api\ngroup = NoRe =\ngroup = gr-api\n"
+           "group = E\x1b[31m = gr-api\n"
            "group = Empty = ^no-such-session$\ngroup = QA = -qa\n"
            % ("N" * 33, "x" * 250))
     s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "QA",
                                                   "History"])
     check("#544: bad group lines (a name over 32 bytes, a regex over 255, "
-          "no name, no regex, no second =) are skipped, the next applies",
+          "no name, no regex, no second =, a control character in the name) are skipped, the next applies",
           tabs(s) == ["Sessions", "QA", "History"], s.split("\n")[0])
     s = to_tab("pk13", "QA")
     check("#544: ... and the skipped lines' sessions go to the next match",

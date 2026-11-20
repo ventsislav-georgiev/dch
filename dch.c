@@ -9958,7 +9958,7 @@ pk_group(void *arg, const char *v)
 {
 	struct pkgrps *gs = arg;
 	const char *eq = v ? strchr(v, '=') : NULL, *r;
-	size_t nl;
+	size_t nl, k;
 
 	if (!eq || gs->n >= PK_GMAX)
 		return;
@@ -9970,6 +9970,9 @@ pk_group(void *arg, const char *v)
 	if (!nl || nl >= sizeof gs->g->name || !*r ||
 	    strlen(r) >= sizeof gs->g->pat)
 		return;
+	for (k = 0; k < nl; k++)	/* the tab bar prints it raw */
+		if ((unsigned char)v[k] < 0x20 || v[k] == 0x7f)
+			return;
 	memcpy(gs->g[gs->n].name, v, nl);
 	gs->g[gs->n].name[nl] = '\0';
 	snprintf(gs->g[gs->n++].pat, sizeof gs->g->pat, "%s", r);
