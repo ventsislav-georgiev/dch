@@ -299,7 +299,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.125.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.126.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -2481,8 +2481,15 @@ which a client can use as its version probe.
   - `{"memory":{…}}`: a memory's or instruction file's whole row, keyed by
     `id`, when it changes or is new; `{"memory":{"id":…,"gone":true}}`
     when it is gone.
+  - its `done` line, after its rows' lines, when it changes (its `count`,
+    `dropped` or `warn`).
   - a whole block again when its header changes (its `source` or
-    `partial`).
+    `partial`), or when row lines could not give its rows: rows it kept
+    in another order, a new row not last, or an `id` it lists twice, now
+    or before (the one-shot lists both rows).
+  A client keeps a whole block's rows as listed, then replaces a row by
+  its `id` in place, adds a new one last and removes a gone one; that
+  gives the one-shot's rows in its order.
 - Tasks and the memory rows' `session` and `chapter` come from the
   follow's own read of the transcript. The memory directory is watched
   (kqueue, inotify) and listed again when it changes and once more 1 s after (a file's
@@ -2495,7 +2502,8 @@ which a client can use as its version probe.
   after each run up to 30 s, back to 5 s on a changed answer or a
   transcript batch. A changed answer is sent as the row deltas above
   (a changed or new row's line, a gone line for a row it no longer
-  lists), or as a whole block when its header changes. Every run
+  lists, its done line when it changed), or whole in the cases above
+  (a changed header, rows in a new order, an `id` twice). Every run
   goes on beside the stream (one of each at a time): a slow or hung command
   never holds back the transcript's lines. So the block after a snapshot
   is the command's last answer, or the built-in block (`source: "none"`

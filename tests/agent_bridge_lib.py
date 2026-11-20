@@ -94,6 +94,13 @@ def wait_until(predicate, timeout=5):
     return None
 
 
+def first_log_line(path):
+    # Poll for a complete first line: the file can exist before its write lands.
+    return wait_until(
+        lambda: path.exists() and "\n" in path.read_text() and path.read_text().splitlines()[0]
+    )
+
+
 def published_name(record_path):
     # The sidecar unlinks and recreates its record on a rename, so a read can
     # land in the gap between the two.
@@ -584,8 +591,7 @@ signal.pause()
             check("normal --spawn starts the Codex session", spawned.returncode == 0)
             check(
                 "Codex child argv stays unchanged",
-                wait_until(child_log.exists)
-                and json.loads(child_log.read_text().splitlines()[0])["argv"] == [],
+                json.loads(first_log_line(child_log) or "{}").get("argv") == [],
             )
             snapshot = (
                 Path(env["CODEX_HOME"]) / "shell_snapshots" / (THREAD + ".100.sh")
@@ -693,11 +699,7 @@ signal.pause()
                 token,
                 dict(base, priority="future", peerFeatures=["future"]),
             )
-            args = (
-                json.loads(log.read_text().splitlines()[0])
-                if wait_until(log.exists)
-                else []
-            )
+            args = json.loads(first_log_line(log) or "[]")
             check(
                 "authenticated unknown fields deliver exact original content",
                 no_receipt(reply, "native-1", bridge_path)
@@ -829,7 +831,7 @@ signal.pause()
                     message={"role": "user", "content": "new unique thread"},
                 ),
             )
-            new_thread_queued = wait_until(lambda: "new unique thread" in log.read_text())
+            new_thread_queued = wait_until(lambda: log.exists() and "new unique thread" in log.read_text())
             queue_calls = [json.loads(line) for line in log.read_text().splitlines()]
             check(
                 "pending UUID stays pinned when a different UUID becomes unique",
