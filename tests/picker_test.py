@@ -591,6 +591,22 @@ def footshells():
     check("#557: SHELLS counts background shells only: 1 for a foreground "
           "and a background shell (%s)" % shells(s)[1],
           shells(s)[1].get("pkfg") == "1", s)
+    # a shell with no result line yet is unknown, not foreground: asked again
+    # after 10 s, so a line landing after the first draw still counts
+    fake_claude("pkrl", "53353353-3533-4533-8533-533533533535",
+                ("l1",), ())
+    s = wait_screen("pkf3", lambda s: "pkrl" in shells(s)[1])
+    first_draw = shells(s)[1].get("pkrl")
+    with open(os.path.join(ENV["CLAUDE_CONFIG_DIR"], "projects", "-p",
+              "53353353-3533-4533-8533-533533533535.jsonl"), "a") as f:
+        f.write('{"type":"user","toolUseResult":{"backgroundTaskId":'
+                '"l1"}}\n')
+    s = wait_screen("pkf3", lambda s: shells(s)[1].get("pkrl") == "1", 12.0)
+    check("#557: a shell whose result line lands after the first draw is "
+          "counted within 12 s (first draw %r, then %s)" %
+          (first_draw, shells(s)[1]), not first_draw and
+          shells(s)[1].get("pkrl") == "1", s)
+    dch("-k", "pkrl")
     dch("-k", "pkshell")
     dch("-k", "pkfg")
     # #556: a stopped master holds only the screen queries, not a third
