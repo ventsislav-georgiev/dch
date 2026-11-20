@@ -3607,6 +3607,50 @@ def test_since():
           rc == 0 and o["partial"] is False and o2 and
           o2["partial"] is False and titles(o2) == ["big 59"],
           (r.returncode, r.stdout[:300], r.stderr))
+    # #543 (QA 1.116.0 NIT-UU5): rows for the mutants the probes kill. A 4.5
+    # MB file, 1 + 4 MB read, a 5 MB cap: nothing left for a third round,
+    # though the 4.5 MB it would read fits the cap alone (mdone)
+    since_put("xs-g", "51600000-2222-4333-8444-555555555507",
+              [r for k in range(45) for r in
+               (("user", t0 + 60 * k, "big %d" % k),
+                ("assistant", t0 + 60 * k + 1, "see #%d %s" % (1000 + k, pad)))])
+    r = dch("--xray", "xs-g", "--since", "0", "--json",
+            env=dict(ENV, DCH_XRAY_CAPS="0:5000000"))
+    o = json.loads(r.stdout) if r.returncode == 0 else None
+    check("since: a 5 MB byte cap on a 4.5 MB file stops after the 1 + 4 MB "
+          "rounds, partial (mdone)",
+          o and o["partial"] is True and o["more"] is True and
+          titles(o) == ["big %d" % k for k in range(44, 24, -1)],
+          (r.returncode, r.stdout[:300], r.stderr))
+    # 60 MB: the third round is the whole file (~0.4 s), the 200 ms cap
+    # falls inside it, after the 1 + 4 MB rounds; the cap stops it mid-read
+    # (mtick) and the round before it stands (mstand): partial, not a
+    # window half read (partial false) or a round read whole (partial false)
+    since_put("xs-h", "51600000-2222-4333-8444-555555555508", [])
+    with open(os.path.join(HOME, ".claude", "projects",
+                           key("/home/demo/proj"),
+                           "51600000-2222-4333-8444-555555555508.jsonl"),
+              "w") as f:
+        for k in range(600):
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t0 + k))
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                "timestamp": ts, "message": {
+                                    "content": "tall %d" % k}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "timestamp": ts,
+                                "message": {"content": [{
+                                    "type": "text", "text": "see #%d %s" % (
+                                        2000 + k, pad)}]}}) + "\n")
+    r = dch("--xray", "xs-h", "--since", "0", "--json",
+            env=dict(ENV, DCH_XRAY_CAPS="0:400000000:200"))
+    o = json.loads(r.stdout) if r.returncode == 0 else None
+    check("since: a 200 ms time cap falls inside a 60 MB file's last round: "
+          "partial, the round before it stands (mtick, mstand)",
+          o and o["partial"] is True and o["more"] is True and
+          titles(o) == ["tall %d" % k for k in range(599, 579, -1)],
+          (r.returncode, r.stdout[:300], r.stderr))
+    os.unlink(os.path.join(HOME, ".claude", "projects",
+                           key("/home/demo/proj"),
+                           "51600000-2222-4333-8444-555555555508.jsonl"))
     rc, o, raw = got("xs-a", "2100-02-29T00:00:00Z")
     check("since: 2100-02-29 is refused, 2100 is no leap year (mleap)",
           rc == 2 and o is None, raw)

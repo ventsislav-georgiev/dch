@@ -522,6 +522,10 @@ def fixture_fetched():
              "<html><header>nav</header><title>Real</title>"),
             (44, "https://ri.example.com/r", "<title>" + "a" * 116 +
              "\U0001F1E7\U0001F1EC</title>"),
+            (46, "https://late.example.com/l", "<html><head><meta></head>"
+             "<body><h1>Page</h1><title>Late</title></body></html>"),
+            (47, "https://sur.example.com/s", "<title>a&#xD800;b&#xDFFF;c"
+             "</title>"),
             (45, "https://eng.example.com/e", "<title>x\U0001F3F4\U000E0067"
              "\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F</title>")]:
         call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
@@ -560,6 +564,11 @@ def fixture_fetched():
              "<title>Background</title>"),
             ("echo https://y9.example.com/a | xargs curl -s",
              "<title>Xargs</title>"),
+            # #543: plain wget saves to a file; a URL after the pipe is
+            # another command's
+            ("wget https://nf7.example.com/a", "<title>Wget File</title>"),
+            ("curl -s localhost:8080/p | grep https://nf8.example.com/a",
+             "<title>Grep Url</title>"),
             # #542 review: what the new forms must still refuse
             ("curl -s https://n5.example.com/a && echo $(date)",
              "<title>Echo Runs</title>"),
@@ -672,6 +681,11 @@ def test_fetched():
         check("#539 a tag name ends at > / or a blank: <bodyguard>, "
               "<svgfoo/>, </header> are not <body>, <svg>, </head (%s)" % n,
               t == "Real", t)
+    p, ls, rv = res("https://late.example.com/l")
+    check("#543 a <title> after <body> is no page title (mbody)", not rv, rv)
+    t = title("https://sur.example.com/s")
+    check("#543 a surrogate entity is left literal, not decoded to U+FFFD "
+          "(msurr)", t == "a&#xD800;b&#xDFFF;c", repr(t))
     t = title("https://ent.example.com/e")
     check("#527 numeric and named entities decoded, a decoded bidi or "
           "control blanked, an out-of-range one literal",
@@ -704,7 +718,9 @@ def test_fetched():
                    ("https://nf3.example.com/a", "two URLs"),
                    ("https://nf4.example.com/a", "wget -O file"),
                    ("https://nf5.example.com/a", "curl -sLo file"),
-                   ("https://nf6.example.com/a", "curl URL; cat README.md")):
+                   ("https://nf6.example.com/a", "curl URL; cat README.md"),
+                   ("https://nf7.example.com/a", "plain wget to a file (#543)"),
+                   ("https://nf8.example.com/a", "a URL after the pipe (#543)")):
         p, ls, rv = res(u)
         check("#528 %s: not a fetch, no title" % why,
               p.returncode == 0 and not rv and ls and
