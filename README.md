@@ -131,7 +131,8 @@ a POSIX extended one, case-insensitive; an invalid one, or one that matches
 every name, is matched as plain text. A live session goes to the first group
 whose regex matches its name, alias or harness title (the Claude or Codex
 name the row shows), else to Sessions. A line with an empty name or regex, or
-one over its cap, is skipped and the others still apply; at most 8 groups,
+one over its cap, a name of Sessions or History (any case) or one an earlier
+group has, is skipped and the others still apply; at most 8 groups,
 the lines after the 8th ignored. With no valid group line, `sidekick_pattern`
 (default `-qa`) is the one group, **Sidekicks**, as before; any group line
 replaces it, and no group line with `sidekick_pattern =` (empty) means no
