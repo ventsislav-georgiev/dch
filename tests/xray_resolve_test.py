@@ -1092,6 +1092,22 @@ def test_github(m):
                   "O_EXCL lock%s)" % label, runs == 1 and
                   not [f for f in os.listdir(ghd) if ".lock" in f],
                   (runs, os.listdir(ghd)))
+        # ---- #549: a fill sweeps the crashed takeovers' .stale litter
+        shutil.rmtree(cache, ignore_errors=True)
+        os.makedirs(ghd)
+        dp = subprocess.Popen(["true"])
+        dp.wait()
+        sd = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % dp.pid)
+        sl = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % os.getpid())
+        for f in (sd, sl):
+            open(f, "w").close()
+        os.utime(sd, (time.time() - 61,) * 2)
+        r, ls, rv, lg = q("acme/widgets#705", full=False, keep=True)
+        wait_for(idle, 10)
+        check("#549 light: a fill removes an old .stale file of a dead pid",
+              not os.path.exists(sd), os.listdir(ghd))
+        check("#549 light: a fresh .stale file of a live pid is kept",
+              os.path.exists(sl), os.listdir(ghd))
         pg = pids + ".pgid"
         r, ls, rv, lg = q("acme/widgets#704", full=False)
         wait_for(lambda: os.path.exists(pg) and idle(), 10)

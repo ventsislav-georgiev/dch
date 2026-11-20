@@ -12161,6 +12161,46 @@ res_gh_ask(char *const av[], char *const env[], long long until,
 	return k;
 }
 
+/* #549: a takeover that died between its rename and unlink left
+** "<lock>.<pid>.stale". Sweep those: the pid is dead, or older than the
+** lock's own 60 s. A live pid's fresh one is a takeover under way: kept. */
+static void
+res_sweep(const char *lock)
+{
+	char dir[PATH_MAX + 8], f[PATH_MAX + 300];
+	const char *b = strrchr(lock, '/');
+	struct dirent *e;
+	struct stat st;
+	size_t n, l;
+	char *end;
+	long pid;
+	DIR *d;
+
+	if (!b || (size_t)(b - lock) >= sizeof dir)
+		return;
+	snprintf(dir, sizeof dir, "%.*s", (int)(b - lock), lock);
+	n = strlen(++b);
+	if (!(d = opendir(dir)))
+		return;
+	while ((e = readdir(d)))
+	{
+		l = strlen(e->d_name);
+		if (l < n + 8 || strncmp(e->d_name, b, n) != 0 ||
+		    e->d_name[n] != '.' || strcmp(e->d_name + l - 6, ".stale") != 0)
+			continue;
+		pid = strtol(e->d_name + n + 1, &end, 10);
+		if (end == e->d_name + n + 1 || strcmp(end, ".stale") != 0)
+			continue;
+		snprintf(f, sizeof f, "%s/%s", dir, e->d_name);
+		if (lstat(f, &st) != 0)
+			continue;
+		if ((pid > 0 && kill((pid_t)pid, 0) != 0 && errno == ESRCH) ||
+		    time(NULL) - st.st_mtime > 60)
+			(void)unlink(f);
+	}
+	closedir(d);
+}
+
 /* #522: a real gh takes about 0.9 s, so light never waits for it: a
 ** detached grandchild (its own session, no tty, stdio on /dev/null, no fd
 ** of ours) asks under the full deadline and fills the cache for the next
@@ -12198,6 +12238,7 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 	if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
 		return errno == EEXIST;
 	close(fd);
+	res_sweep(lock);	/* once per fill started, not per ref */
 	if ((pid = fork()) < 0)
 	{
 		(void)unlink(lock);
