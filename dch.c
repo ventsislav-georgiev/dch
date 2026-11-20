@@ -7076,9 +7076,15 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 			sh[j] = sh[j - 1];
 		sh[j] = x;
 	}
-	if (!show)
-		return ns;	/* the picker's SHELLS count */
 	tmin = ns ? sh[ns - 1].t : 0;	/* newest first: the last is oldest */
+	if (!show)	/* the picker's SHELLS count: the background ones (#557) */
+	{
+		for (i = j = 0; tp && i < ns; i++)
+			j += shell_owner(tp, sh[i].id, sh[i].t, tmin, sv, &nsv,
+			                 agent, adesc, sizeof adesc, desc,
+			                 sizeof desc) != 0;
+		return j;
+	}
 	fputs(",\"shells\":[", stdout);
 	for (i = 0; i < ns; i++)
 	{
@@ -10061,14 +10067,15 @@ pk_shells(const char *name)
 {
 	struct cmd_info ci;
 	struct crec c;
-	char sp[1100];
+	char sp[1100], tp[2000];
 	int n = 0;
 
 	session_sock_path(name, sp, sizeof sp);
 	if (cmd_query_f(sp, &ci, DCH_CMD_F_STAT) != 0)
 		return 0;
 	if (xr_live_claude(&ci, &c))
-		n = put_shells(c.pid, c.sid, NULL, 0);
+		n = put_shells(c.pid, c.sid, claude_transcript(&c, tp, sizeof tp)
+		               ? NULL : tp, 0);
 	cmd_info_free(&ci);
 	return n;
 }
@@ -10089,6 +10096,7 @@ pk_load(struct pk *p)
 	int k, j, t, g, nh, pin, nr, nrh, base = 0, cnt = 0, ok;
 
 	pk_selnames(p, sel);
+	sub_read = 0;	/* shell_owner's budget is per reload, not per picker */
 	for (t = 0; t < PK_TABS; t++)
 	{
 		free(p->r[t]);
