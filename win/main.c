@@ -108,7 +108,7 @@ void
 pk_load(struct pk *p)
 {
 	struct dch_rrow *rr;
-	char sel[3][600];
+	char sel[PK_TABS][600];
 	int n = dch_remote_rows(&rr, 0), k;
 
 	pk_selnames(p, sel);

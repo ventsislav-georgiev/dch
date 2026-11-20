@@ -38,10 +38,18 @@ struct pkact
 	char host[DCH_RHOST_MAX];	/* a revive on this host (#115) */
 };
 
+/* The tabs (#544): Sessions, one per session group (the config's group
+** lines, PK_GMAX at most, in their order), History. A group's tab is its
+** index + 1 whether or not it is drawn. */
+#define PK_GMAX 8
+#define PK_HIST (PK_GMAX + 1)
+#define PK_TABS (PK_GMAX + 2)
+
 struct pk
 {
-	struct pkrow *r[3];	/* Sessions, Sidekicks, History */
-	int n[3], sel[3], top[3];
+	struct pkrow *r[PK_TABS];
+	int n[PK_TABS], sel[PK_TABS], top[PK_TABS];
+	char gname[PK_GMAX][33];	/* the groups' names, "" past them */
 	int tab, byname, color, interrupted, win, status_row, asking;
 	int settings, cfsel, cftop;	/* the settings view (#082) */
 	int askcfg;		/* asking about config key askcfg - 1 */
@@ -66,8 +74,8 @@ extern size_t pk_pn;	/* 0: the next frame is written whole */
 unsigned ap_cp(const char *p, int *len);
 int ap_cells(unsigned u);
 int pk_find(const struct pk *p, int t, const char *name);
-void pk_selnames(const struct pk *p, char sel[3][600]);
-void pk_sort(struct pk *p, char sel[3][600]);
+void pk_selnames(const struct pk *p, char sel[PK_TABS][600]);
+void pk_sort(struct pk *p, char sel[PK_TABS][600]);
 void pk_rrow(struct pkrow *w, const struct dch_rrow *r);
 int pk_cfbyname(void);
 int pk_nav(struct pk *p, int c);

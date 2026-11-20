@@ -1,0 +1,16 @@
+# session groups (#544)
+sidekick_pattern = -qa
+group = API = gr-api
+group  =  QA  =  -qa 
+group = NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN = x
+group = = x
+group = NoRe =
+group = noeq
+group = Bad = (
+group = All = .*
+group = a = b = c
+group = g5 = 5
+group = g6 = 6
+group = g7 = 7
+group = g8 = 8
+group = g9 = 9

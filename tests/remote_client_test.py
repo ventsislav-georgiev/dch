@@ -88,7 +88,8 @@ def read_clock_at(want, got, secs):
     time(NULL)), so a run a second later says a second later. got's mention
     "at" takes want's where it is later by 0 to secs (the seconds between
     the runs), never earlier; every other byte still has to match. A
-    --search object's hits (#297) each take want's "at" the same way."""
+    --search object's hits (#297) and its first/latest each take want's "at"
+    the same way."""
     if len(want) != len(got):
         return got
     out = []
@@ -105,12 +106,20 @@ def read_clock_at(want, got, secs):
             for x, y in reversed(list(zip(hw, hg))):
                 if 0 <= int(y[1]) - int(x[1]) <= secs:
                     g = g[:y.start(1)] + x[1] + g[y.end(1):]
+        for p in (FIRST_AT[b], LATEST_AT[b]):
+            x, y = p.search(w), p.search(g)
+            if x and y and 0 <= int(y[1]) - int(x[1]) <= secs:
+                g = g[:y.start(1)] + x[1] + g[y.end(1):]
         out.append(g)
     return out
 
 
 MENTION_AT = {False: re.compile(r'("mention":\{.*?"at":)(\d+)'),
               True: re.compile(rb'("mention":\{.*?"at":)(\d+)')}
+FIRST_AT = {False: re.compile(r'"first":\{[^{}]*?"at":(\d+)'),
+            True: re.compile(rb'"first":\{[^{}]*?"at":(\d+)')}
+LATEST_AT = {False: re.compile(r'"latest":\{[^{}]*?"at":(\d+)'),
+             True: re.compile(rb'"latest":\{[^{}]*?"at":(\d+)')}
 HIT_AT = {False: re.compile(r'"at":(\d+),"who"'),
           True: re.compile(rb'"at":(\d+),"who"')}
 
@@ -1123,9 +1132,9 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     same(2, ["--ref", "#831", "--scope", "session", "--json"], mask=True)
     same(3, ["--json", "--full", "--ref", "o/r#7", "--budget-ms", "50",
              "--scope", "session"], mask=True)
-    same(4, ["--search", "831", "--json"])
+    same(4, ["--search", "831", "--json"], mask=True)
     same(5, ["--json"])
-    same(6, ["--search", "o/r", "--scope", "project", "--json"])
+    same(6, ["--search", "o/r", "--scope", "project", "--json"], mask=True)
     same(7, ["--chapter", "s1", "--json"])
     same(8, ["--clear", "--json"])
     check("requests: each ran one ctl, all on the one warm connection",

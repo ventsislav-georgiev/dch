@@ -1037,7 +1037,14 @@ READS = [("cat > out.md <<'EOF'\nsrc/engine.c:1\nEOF", None),
          ("sed -n 1,5p NOTES", "sed"), ("sed --quiet 1,5p NOTES", "sed"),
          ("sed --silent 1,5p NOTES", "sed"),
          ("bash -lc 'cat NOTES'", "cat"), ("rg -n engine", "rg"),
-         ("grep -n engine", None)]
+         ("grep -n engine", None),
+         ("cat NOTES | python3 run.py", None),
+         ("cat NOTES | psql -f -", None), ("cat NOTES | node x.js", None),
+         ("cat NOTES | grep x | sort", "cat"),
+         ("cat NOTES; cat NOTES", "cat"), ("cat NOTES\ncat NOTES", "cat"),
+         ("set -e; cat NOTES", "cat"), ("true && cat NOTES", "cat"),
+         ("source x && cat NOTES", "cat"), (". x; export A=1; cat NOTES", "cat"),
+         ("cat NOTES; make", None), ("cat NOTES; cat a > b", None)]
 
 
 def test_read_shell():
