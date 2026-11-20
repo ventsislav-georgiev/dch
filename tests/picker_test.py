@@ -591,6 +591,22 @@ def footshells():
     check("#557: SHELLS counts background shells only: 1 for a foreground "
           "and a background shell (%s)" % shells(s)[1],
           shells(s)[1].get("pkfg") == "1", s)
+    # a shell with no result line yet is unknown, not foreground: asked again
+    # after 10 s, so a line landing after the first draw still counts (20 s:\n    # room for a loaded runner; mretry never asks again)
+    fake_claude("pkrl", "53353353-3533-4533-8533-533533533535",
+                ("l1",), ())
+    s = wait_screen("pkf3", lambda s: "pkrl" in shells(s)[1])
+    first_draw = shells(s)[1].get("pkrl")
+    with open(os.path.join(ENV["CLAUDE_CONFIG_DIR"], "projects", "-p",
+              "53353353-3533-4533-8533-533533533535.jsonl"), "a") as f:
+        f.write('{"type":"user","toolUseResult":{"backgroundTaskId":'
+                '"l1"}}\n')
+    s = wait_screen("pkf3", lambda s: shells(s)[1].get("pkrl") == "1", 20.0)
+    check("#557: a shell whose result line lands after the first draw is "
+          "counted within 20 s (first draw %r, then %s)" %
+          (first_draw, shells(s)[1]), not first_draw and
+          shells(s)[1].get("pkrl") == "1", s)
+    dch("-k", "pkrl")
     dch("-k", "pkshell")
     dch("-k", "pkfg")
     # #556: a stopped master holds only the screen queries, not a third
@@ -715,6 +731,16 @@ def groups():
     s = to_tab("pk13", "Dup")
     check("#568: ... the first Dup line is the group's pattern",
           rows(s) == ["gr-api-qa"], s)
+
+    # a repeat is compared ignoring case: the first spelling wins (#572)
+    setcfg("group = Dup = gr-api\ngroup = dup = gr-web\n")
+    s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "Dup",
+                                                  "History"])
+    check("#572: group = Dup and group = dup (any case) give one Dup tab",
+          tabs(s) == ["Sessions", "Dup", "History"], s.split("\n")[0])
+    s = to_tab("pk13", "Sessions")
+    check("#572: ... the lowercase repeat matches nothing: gr-web stays on "
+          "Sessions", "gr-web" in rows(s), s)
 
     # a regex every name matches is plain text: it takes no session (#569)
     setcfg("group = All = .*\n")

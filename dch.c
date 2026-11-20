@@ -10091,7 +10091,8 @@ pk_group(void *arg, const char *v)
 	    (nl == 7 && !strncasecmp(v, "History", nl)))
 		return;
 	for (k = 0; k < (size_t)gs->n; k++)
-		if (strlen(gs->g[k].name) == nl && !memcmp(gs->g[k].name, v, nl))
+		if (strlen(gs->g[k].name) == nl &&
+		    !strncasecmp(gs->g[k].name, v, nl))
 			return;
 	memcpy(gs->g[gs->n].name, v, nl);
 	gs->g[gs->n].name[nl] = '\0';

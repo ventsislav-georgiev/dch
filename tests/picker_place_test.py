@@ -160,8 +160,17 @@ def switch(name):
     dch("--send", name, "\x1c")
     time.sleep(0.1)
     dch("--send", name, "\x1c")
-    return wait_screen(name, lambda s: "Sessions " in s and
-                       s != before and rows(s), 15)
+    s = wait_screen(name, lambda s: "Sessions " in s and
+                    s != before and rows(s), 15)
+    # the whole frame: rows can show before the footer is drawn (#574)
+    end = time.time() + 3
+    while time.time() < end:
+        time.sleep(0.2)
+        t = screen(name)
+        if t == s:
+            break
+        s = t
+    return s
 
 
 def main():

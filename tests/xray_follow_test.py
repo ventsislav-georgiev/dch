@@ -687,12 +687,13 @@ def test_follow_tasks_memory():
               got[:1] == [{"task": applied()[1][-1]}] and
               len(got) <= 2 and all("done" in o for o in got[1:]),
               (len(got), got[:3]))
-        converges(big[::-1], "tasks+memory: the command's rows in reverse "
+        big = big[::-1]
+        converges(big, "tasks+memory: the command's rows in reverse "
                   "order converge with --tasks (#551)")
-        converges(big[:1] + [{"id": "m000", "title": "Inserted"}] + big[1:],
-                  "tasks+memory: a row the command inserts second "
-                  "converges with --tasks (#551)")
+        # from the order last sent, so only the new row can force the block
         big.insert(1, {"id": "m000", "title": "Inserted"})
+        converges(big, "tasks+memory: a row the command inserts second "
+                  "converges with --tasks (#551)")
         k9 = len(cf.got)
         put_rows(big)
         time.sleep(2)
