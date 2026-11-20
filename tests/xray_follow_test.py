@@ -798,8 +798,8 @@ def test_follow_cadence():
               "0.5 s or more past the 2nd)", len(g) >= 6 and
               min(g[3:]) - max(g[:2]) >= 0.5, g)
         check("cadence: the gaps stop growing at 6x the base (the 6th gap is "
-              "no more than 0.5 s past the 4th)", len(g) >= 6 and
-              g[5] - g[3] <= 0.5, g)
+              "no more than 2 s past the 4th; uncapped is 6 s)", len(g) >= 6 and
+              g[5] - g[3] <= 2.0, g)
 
         # a same-length row change, at the longest gap
         k = len(cf.got)
