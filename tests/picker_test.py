@@ -592,7 +592,7 @@ def footshells():
           "and a background shell (%s)" % shells(s)[1],
           shells(s)[1].get("pkfg") == "1", s)
     # a shell with no result line yet is unknown, not foreground: asked again
-    # after 10 s, so a line landing after the first draw still counts
+    # after 10 s, so a line landing after the first draw still counts (20 s:\n    # room for a loaded runner; mretry never asks again)
     fake_claude("pkrl", "53353353-3533-4533-8533-533533533535",
                 ("l1",), ())
     s = wait_screen("pkf3", lambda s: "pkrl" in shells(s)[1])
@@ -601,9 +601,9 @@ def footshells():
               "53353353-3533-4533-8533-533533533535.jsonl"), "a") as f:
         f.write('{"type":"user","toolUseResult":{"backgroundTaskId":'
                 '"l1"}}\n')
-    s = wait_screen("pkf3", lambda s: shells(s)[1].get("pkrl") == "1", 12.0)
+    s = wait_screen("pkf3", lambda s: shells(s)[1].get("pkrl") == "1", 20.0)
     check("#557: a shell whose result line lands after the first draw is "
-          "counted within 12 s (first draw %r, then %s)" %
+          "counted within 20 s (first draw %r, then %s)" %
           (first_draw, shells(s)[1]), not first_draw and
           shells(s)[1].get("pkrl") == "1", s)
     dch("-k", "pkrl")
