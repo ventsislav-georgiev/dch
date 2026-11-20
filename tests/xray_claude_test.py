@@ -1356,7 +1356,7 @@ def test_search_words():
           "its 5 word-only hits (the oldest goes first) (NIT-UT2)",
           rc == 0 and snips[:1] == ["kiwi pear exact"] and
           sum(t.startswith("pear old kiwi") for t in snips) == 4 and
-          "pear old kiwi 0" not in snips and o["more"] is True,
+          "pear old kiwi 1" not in snips and o["more"] is True,
           (rc, len(snips), snips[:2], snips[-6:], err))
     # #512 look mode across read windows (NIT-UQ5): the same shape, each
     # turn padded with a 400 KB reply, so the phrase turn is many 1 MB reads
