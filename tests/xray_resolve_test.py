@@ -1099,13 +1099,22 @@ def test_github(m):
         dp.wait()
         sd = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % dp.pid)
         sl = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % os.getpid())
-        for f in (sd, sl):
+        dp2 = subprocess.Popen(["true"])
+        dp2.wait()
+        sf = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % dp2.pid)
+        so = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % os.getppid())
+        for f in (sd, sl, sf, so):
             open(f, "w").close()
         os.utime(sd, (time.time() - 61,) * 2)
+        os.utime(so, (time.time() - 61,) * 2)
         r, ls, rv, lg = q("acme/widgets#705", full=False, keep=True)
         wait_for(idle, 10)
         check("#549 light: a fill removes an old .stale file of a dead pid",
               not os.path.exists(sd), os.listdir(ghd))
+        check("#549 light: a fresh .stale file of a dead pid is removed",
+              not os.path.exists(sf), os.listdir(ghd))
+        check("#549 light: a .stale file over 60 s old of a live pid is "
+              "removed", not os.path.exists(so), os.listdir(ghd))
         check("#549 light: a fresh .stale file of a live pid is kept",
               os.path.exists(sl), os.listdir(ghd))
         pg = pids + ".pgid"

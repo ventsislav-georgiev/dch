@@ -716,6 +716,23 @@ def groups():
     check("#568: ... the first Dup line is the group's pattern",
           rows(s) == ["gr-api-qa"], s)
 
+    # a regex every name matches is plain text: it takes no session (#569)
+    setcfg("group = All = .*\n")
+    s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "History"])
+    s = to_tab("pk13", "Sessions")
+    check("#544: group = All = .* takes no session: no All tab, Sessions "
+          "keeps them", tabs(s) == ["Sessions", "History"] and
+          "gr-web" in rows(s), s.split("\n")[0])
+
+    # every session in a group: the picker opens on it, not on empty Sessions
+    setcfg("group = Everyone = .\n")
+    picker("pk19", "160x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pk19", lambda s: "Everyone" in s)
+    check("#544: every session in a group: the picker opens on that "
+          "group's tab", "[Everyone" in s and "[Sessions" not in s,
+          s.split("\n")[0])
+    dch("-k", "pk19")
+
     # at most 8: a ninth line is ignored; a 32-byte name is whole
     big = "Web" + "x" * 29
     setcfg("".join("group = g%d = ^none-%d$\n" % (k, k) for k in range(7))
