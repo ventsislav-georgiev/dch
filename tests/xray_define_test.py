@@ -1044,7 +1044,16 @@ READS = [("cat > out.md <<'EOF'\nsrc/engine.c:1\nEOF", None),
          ("cat NOTES; cat NOTES", "cat"), ("cat NOTES\ncat NOTES", "cat"),
          ("set -e; cat NOTES", "cat"), ("true && cat NOTES", "cat"),
          ("source x && cat NOTES", "cat"), (". x; export A=1; cat NOTES", "cat"),
-         ("cat NOTES; make", None), ("cat NOTES; cat a > b", None)]
+         ("cat NOTES; make", None), ("cat NOTES; cat a > b", None),
+         # NIT-UV3: stdin-only readers, a redirect's target, a second command
+         ("head -n 5", None), ("sed -n --in-place=.bak 1p NOTES", None),
+         ("grep TODO 2>&1", None), ("grep TODO 2>/dev/null", None),
+         ("cat <<EOF\nx\nEOF", None), ("cat < NOTES", None),
+         ("make; cat NOTES", None),
+         ("cat NOTES 1>out", None), ("cat NOTES &>log", None),
+         ("cat NOTES >| out", None), ("sed -n 1p NOTES > out", None),
+         ("bash -c 'cat NOTES' > out", None), ("bash -c 'cat NOTES > g'", None),
+         ("cat NOTES 2>/dev/null", "cat")]
 
 
 def test_read_shell():
