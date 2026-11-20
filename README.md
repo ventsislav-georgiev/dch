@@ -2482,7 +2482,10 @@ which a client can use as its version probe.
     `id`, when it changes or is new; `{"memory":{"id":…,"gone":true}}`
     when it is gone.
   - a whole block again when its header changes (its `source` or
-    `partial`).
+    `partial`), or when its rows' order would not follow from the row
+    lines: rows it kept in another order, or a new row not last.
+  A client replaces a row by its `id` in place, adds a new one last and
+  removes a gone one; that gives the one-shot's rows in its order.
 - Tasks and the memory rows' `session` and `chapter` come from the
   follow's own read of the transcript. The memory directory is watched
   (kqueue, inotify) and listed again when it changes and once more 1 s after (a file's
@@ -2495,7 +2498,8 @@ which a client can use as its version probe.
   after each run up to 30 s, back to 5 s on a changed answer or a
   transcript batch. A changed answer is sent as the row deltas above
   (a changed or new row's line, a gone line for a row it no longer
-  lists), or as a whole block when its header changes. Every run
+  lists), or whole in the cases above (a changed header, rows in a new
+  order). Every run
   goes on beside the stream (one of each at a time): a slow or hung command
   never holds back the transcript's lines. So the block after a snapshot
   is the command's last answer, or the built-in block (`source: "none"`

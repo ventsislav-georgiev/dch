@@ -638,6 +638,50 @@ def test_follow_tasks_memory():
               "gone line only (#532)", cf.objs(k7c) ==
               [{"task": {"id": "r499", "gone": True}}],
               (len(cf.objs(k7c)), cf.objs(k7c)[:3]))
+
+        def applied():
+            """the follow's tasks block as a client keeps it: a header
+            starts it again, a row replaces its id's in place or is added
+            last, a gone line removes it"""
+            v = []
+            for o in cf.objs():
+                t = o.get("task")
+                ids = [r["id"] for r in v]
+                if "source" in o and "session" in o:
+                    v = []
+                elif t and t.get("gone"):
+                    v = [r for r in v if r["id"] != t["id"]]
+                elif t and t["id"] in ids:
+                    v[ids.index(t["id"])] = t
+                elif t:
+                    v.append(t)
+            return v
+
+        def converges(v, label):
+            k = len(cf.got)
+            put_rows(v)
+            wait_for(lambda: [(r["id"], r["title"]) for r in applied()] ==
+                     [(r["id"], r["title"]) for r in v], 9)
+            time.sleep(1)
+            _, one, _ = lines(n, "--tasks", "--json", env=cenv)
+            got = applied()
+            check(label, got == [o["task"] for o in one if "task" in o],
+                  ([r["id"] for r in got][:6],
+                   [o["task"]["id"] for o in one if "task" in o][:6]))
+            return cf.objs(k)
+
+        big = big[:-1] + [{"id": "s000", "title": "Appended"}]
+        got = converges(big, "tasks+memory: a row the command appends last "
+                        "converges with --tasks (#551)")
+        check("tasks+memory: a row the command appends last is sent as its "
+              "row line, not the whole block (#551)",
+              [o for o in got if "task" in o] == [{"task": applied()[-1]}],
+              (len(got), got[:3]))
+        converges(big[::-1], "tasks+memory: the command's rows in reverse "
+                  "order converge with --tasks (#551)")
+        converges(big[:1] + [{"id": "m000", "title": "Inserted"}] + big[1:],
+                  "tasks+memory: a row the command inserts second "
+                  "converges with --tasks (#551)")
     finally:
         for x in (fl, cf):
             if x:

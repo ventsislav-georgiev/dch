@@ -15479,19 +15479,31 @@ xf_rows(const char *text, size_t pre, struct xf_row **sorted, size_t *n)
 
 /* Block b's rows that moved from old to now: a new or changed row's line
 ** in now's order, then {"<kind>":{"id":…,"gone":true}} for each row left
-** out. -1 out of memory. */
+** out. 1, nothing written, when deltas applied by id cannot give now's
+** order: the rows both hold moved, a new row is not last (#551). -1 out
+** of memory. */
 static int
 xf_row_deltas(const char *old, const char *now, int b)
 {
-	const char *kind = b ? "memory" : "task";
+	const char *kind = b ? "memory" : "task", *at = NULL;
 	size_t pre = strlen(kind) + 10, no, nn, k;	/* {"kind":{"id": */
 	struct xf_row *ov, *os, *nv, *ns, *h;
-	int rc = -1;
+	int rc = -1, added = 0;
 
 	if (!(ov = xf_rows(old, pre, &os, &no)))
 		return -1;
 	if (!(nv = xf_rows(now, pre, &ns, &nn)))
 		goto out;
+	rc = 1;
+	for (k = 0; k < nn; k++)	/* a kept row's line in old: in order */
+		if (!nv[k].klen ||
+		    !(h = bsearch(&nv[k], os, no, sizeof *os, xf_row_cmp)))
+			added = 1;
+		else if (added || (at && h->line < at))
+			goto moved;
+		else
+			at = h->line;
+	rc = 0;
 	for (k = 0; k < nn; k++)
 		if (!nv[k].klen ||
 		    !(h = bsearch(&nv[k], os, no, sizeof *os, xf_row_cmp)) ||
@@ -15501,7 +15513,7 @@ xf_row_deltas(const char *old, const char *now, int b)
 		if (os[k].klen && !bsearch(&os[k], ns, nn, sizeof *ns, xf_row_cmp))
 			printf("{\"%s\":{\"id\":%.*s,\"gone\":true}}\n", kind,
 			       (int)os[k].klen, os[k].key);
-	rc = 0;
+moved:
 	free(nv);
 	free(ns);
 out:
@@ -15518,6 +15530,7 @@ xf_blk(struct xf *f, int b, int all)
 {
 	char *now = xf_blk_text(f, b), *old = f->blk[b];
 	size_t h;
+	int d = 0;
 
 	if (!now)
 	{
@@ -15530,9 +15543,10 @@ xf_blk(struct xf *f, int b, int all)
 		return 0;
 	}
 	h = strcspn(now, "\n");
-	if (all || !old || strncmp(old, now, h + 1))
+	if (all || !old || strncmp(old, now, h + 1) ||
+	    (d = xf_row_deltas(old, now, b)) > 0)
 		fputs(now, stdout);
-	else if (xf_row_deltas(old, now, b) != 0)
+	else if (d < 0)
 	{
 		free(now);
 		f->rc = xr_failed();
