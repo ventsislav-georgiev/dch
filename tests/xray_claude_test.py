@@ -1336,6 +1336,28 @@ def test_search_words():
           snips[3] == "pear then kiwi 60.9" and
           sorted(set(sizes.values())) == [3, 10] and o["more"] is True,
           (rc, len(snips), sizes, snips[:4] + snips[-2:], err))
+    # NIT-UT2: 501 hits, the phrase turn holding 5 word-only ones: the cap
+    # takes the oldest word-only hit, the phrase turn's own first (4/5 stay)
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for i in range(51):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/wproj",
+                                "timestamp": ts(i),
+                                "message": {"content": "ask %d" % i}}) + "\n")
+            for j in range(6 if i == 0 else 10 if i < 50 else 5):
+                t = ("kiwi pear exact" if i == 0 and j == 0 else
+                     "pear old kiwi %d" % j if i == 0 else
+                     "pear then kiwi %d.%d" % (i, j))
+                f.write(json.dumps({"type": "assistant", "timestamp": ts(i),
+                                    "message": {"content": [
+                                        {"type": "text", "text": t}]}}) + "\n")
+    rc, o, err = search("xr-sw", "kiwi pear")
+    snips = [h["snippet"] for h in (o or {}).get("hits", [])]
+    check("search words: at 501 hits the phrase turn stays, first, with 4 of "
+          "its 5 word-only hits (the oldest goes first) (NIT-UT2)",
+          rc == 0 and snips[:1] == ["kiwi pear exact"] and
+          sum(t.startswith("pear old kiwi") for t in snips) == 4 and
+          "pear old kiwi 1" not in snips and o["more"] is True,
+          (rc, len(snips), snips[:2], snips[-6:], err))
     # #512 look mode across read windows (NIT-UQ5): the same shape, each
     # turn padded with a 400 KB reply, so the phrase turn is many 1 MB reads
     # back from the 60 newer word-only ones (no read-window knob exists)

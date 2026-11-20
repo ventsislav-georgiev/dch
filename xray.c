@@ -11030,8 +11030,10 @@ res_under(const char *p, const char *root)
 }
 
 /* lnk is a dangling symlink: its target, read textually, lies in the real
-** root rr (#525, QA 1.112.0 UQ3). A ".." part, or a target whose own nearest
-** parent is not a plain in-root dir (another link), says no: outside. */
+** root rr (#525, QA 1.112.0 UQ3). A ".." part, or a target that exists (a
+** loop, a chain of links), says no; else the target's nearest existing
+** parent decides: in the root (a missing path or one through an in-root
+** link) says yes, anything out of it, a link out too, says no. */
 static int
 res_dangle_in(const char *lnk, const char *rr)
 {
@@ -11807,8 +11809,8 @@ res_commit(const char *sha, const char *cwd, int live, int light,
 	}
 	if (rc == 1)
 	{
-		res_set(r, "timeout", light ? "git timed out after 300 ms"
-		                               : "git timed out after 3 s");
+		/* light never shows it (res_scan drops a timeout): one text */
+		res_set(r, "timeout", "git timed out after 3 s");
 		return 1;
 	}
 	if (!foreign)
@@ -13885,7 +13887,9 @@ sr_trim(struct xr_search *s)
 
 	/* the hit past the cap is not kept: a transcript's oldest word-only
 	** one, the next sr_add would replace (LOW-UQ2), else the oldest. Its
-	** turn is cut when a kept hit is under it too, but for a phrase's turn */
+	** turn is cut when a kept hit is under it too, but for a phrase's turn:
+	** that stays, its own word-only hits going first, oldest first (a
+	** phrase's turn can lose all of them, not one) */
 	if (s->n == SR_SLOTS)
 	{
 		struct sr_hit *x;

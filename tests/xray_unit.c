@@ -4304,8 +4304,8 @@ t_res_git(void)
 		if (x)
 			xr_scan_light(x, &lsp, "abcdef1234", cwd, 1);
 		t0 = xr_now_ms() - t0;
-		CHECK("git #UQ1: a slow rev-parse: light is back in under 1.5 s "
-		      "(one 300 ms deadline for every git call)", x && t0 < 1500);
+		CHECK("git #UQ1: a slow rev-parse: light is back in under 1 s "
+		      "(one 300 ms deadline for every git call)", x && t0 < 1000);
 		xr_scan_free(x);
 		if (of)
 			fclose(of);
