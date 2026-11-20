@@ -112,8 +112,9 @@ jobs:
       - name: Build, smoke-test and package (Linux, glibc 2.28)
         if: runner.os == 'Linux'
         run: |
+          # dnf retried: a mirror flake cost v1.125.0 its linux-aarch64 assets (#570)
           docker run --rm -e TAG -e SOURCE_DATE_EPOCH -v "$PWD:/src" -w /src "$IMAGE" sh -c \
-            'dnf -y -q install gcc make && scripts/build-release.sh "$0"' \
+            'for i in 1 2 3; do dnf -y -q install gcc make && break; [ $i = 3 ] && exit 1; sleep 30; done; scripts/build-release.sh "$0"' \
             ${{ matrix.variant }}
           # The same binary on the runner's newer glibc.
           ./dch --version
