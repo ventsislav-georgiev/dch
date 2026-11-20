@@ -716,6 +716,16 @@ def groups():
     check("#568: ... the first Dup line is the group's pattern",
           rows(s) == ["gr-api-qa"], s)
 
+    # a repeat is compared ignoring case: the first spelling wins (#572)
+    setcfg("group = Dup = gr-api\ngroup = dup = gr-web\n")
+    s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "Dup",
+                                                  "History"])
+    check("#572: group = Dup and group = dup (any case) give one Dup tab",
+          tabs(s) == ["Sessions", "Dup", "History"], s.split("\n")[0])
+    s = to_tab("pk13", "Sessions")
+    check("#572: ... the lowercase repeat matches nothing: gr-web stays on "
+          "Sessions", "gr-web" in rows(s), s)
+
     # a regex every name matches is plain text: it takes no session (#569)
     setcfg("group = All = .*\n")
     s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "History"])
