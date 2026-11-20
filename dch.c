@@ -7079,10 +7079,31 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 	tmin = ns ? sh[ns - 1].t : 0;	/* newest first: the last is oldest */
 	if (!show)	/* the picker's SHELLS count: the background ones (#557) */
 	{
+		/* a shell's background flag never changes: kept per id, oldest
+		** out; an unknown owner is asked again after 10 s */
+		static struct { char id[64]; time_t t, at; int own; } bc[128];
+		static int bn, bnext;
+		time_t now = time(NULL);
+		int h;
+
 		for (i = j = 0; tp && i < ns; i++)
-			j += shell_owner(tp, sh[i].id, sh[i].t, tmin, sv, &nsv,
-			                 agent, adesc, sizeof adesc, desc,
-			                 sizeof desc) != 0;
+		{
+			for (h = 0; h < bn && (strcmp(bc[h].id, sh[i].id) ||
+			     bc[h].t != sh[i].t); h++)
+				;
+			if (h == bn || (!bc[h].own && now - bc[h].at >= 10))
+			{
+				if (h == bn)
+					h = bn < 128 ? bn++ : bnext++ % 128;
+				snprintf(bc[h].id, sizeof bc[h].id, "%s", sh[i].id);
+				bc[h].t = sh[i].t;
+				bc[h].at = now;
+				bc[h].own = shell_owner(tp, sh[i].id, sh[i].t, tmin,
+				                        sv, &nsv, agent, adesc,
+				                        sizeof adesc, desc, sizeof desc);
+			}
+			j += bc[h].own != 0;
+		}
 		return j;
 	}
 	fputs(",\"shells\":[", stdout);
