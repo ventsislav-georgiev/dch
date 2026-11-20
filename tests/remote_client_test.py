@@ -1132,9 +1132,9 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     same(2, ["--ref", "#831", "--scope", "session", "--json"], mask=True)
     same(3, ["--json", "--full", "--ref", "o/r#7", "--budget-ms", "50",
              "--scope", "session"], mask=True)
-    same(4, ["--search", "831", "--json"])
+    same(4, ["--search", "831", "--json"], mask=True)
     same(5, ["--json"])
-    same(6, ["--search", "o/r", "--scope", "project", "--json"])
+    same(6, ["--search", "o/r", "--scope", "project", "--json"], mask=True)
     same(7, ["--chapter", "s1", "--json"])
     same(8, ["--clear", "--json"])
     check("requests: each ran one ctl, all on the one warm connection",
