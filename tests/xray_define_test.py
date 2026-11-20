@@ -559,7 +559,14 @@ def fixture_fetched():
             ("curl -s https://y8.example.com/a &",
              "<title>Background</title>"),
             ("echo https://y9.example.com/a | xargs curl -s",
-             "<title>Xargs</title>")), 21):
+             "<title>Xargs</title>"),
+            # #542 review: what the new forms must still refuse
+            ("curl -s https://n5.example.com/a && echo $(date)",
+             "<title>Echo Runs</title>"),
+            ("cd /tmp && curl -s -o f https://n6.example.com/a",
+             "<title>Cd To File</title>"),
+            ("curl -s https://n7.example.com/a & cat x",
+             "<title>Bg Then Cat</title>")), 21):
         call("2026-11-07T10:%02d:00Z" % k, k, "Bash", {"command": cmd}, out)
     call("2026-11-07T11:00:00Z", 20, "WebFetch",
          {"url": "https://q.example.com/x?r=/", "prompt": "sum"},
@@ -718,6 +725,12 @@ def test_fetched():
         p, ls, rv = res(u)
         check("%s: still a fetch, titled" % why,
               len(rv) == 1 and rv[0]["title"] == t, rv)
+    for u, why in (("https://n5.example.com/a", "&& echo $(date)"),
+                   ("https://n6.example.com/a", "cd && curl -o f"),
+                   ("https://n7.example.com/a", "curl & cat x")):
+        p, ls, rv = res(u)
+        check("#542 %s: not the only stdout fetch, no title" % why,
+              p.returncode == 0 and not rv, rv)
     p, ls, rv = res("https://q.example.com/x?r=")
     check("#528: ?r=/ is not ?r=: no title", p.returncode == 0 and not rv, rv)
     p, ls, rv = res("https://q.example.com/x?r=/")
