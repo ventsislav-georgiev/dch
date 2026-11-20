@@ -527,7 +527,14 @@ def fixture_fetched():
             (47, "https://sur.example.com/s", "<title>a&#xD800;b&#xDFFF;c"
              "</title>"),
             (45, "https://eng.example.com/e", "<title>x\U0001F3F4\U000E0067"
-             "\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F</title>")]:
+             "\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F</title>"),
+            (48, "https://cut.example.com/c", "<title>" + "a" * 100 +
+             "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067"
+             "\U000E007F</title>"),
+            (49, "https://strayt.example.com/s", "<title>Go \U0001F3F4"
+             "\U000E0067\U000E0062\U000E007F\U000E0041\U000E0042 AB</title>"),
+            (50, "https://svgself.example.com/s",
+             "<head><svg/><title>AfterSvg</title>")]:
         call("2026-11-06T11:00:00Z", k, "WebFetch", {"url": url,
                                                       "prompt": "sum"}, out)
     call("2026-11-06T11:00:00Z", 11, "Bash",
@@ -575,7 +582,12 @@ def fixture_fetched():
             ("cd /tmp && curl -s -o f https://n6.example.com/a",
              "<title>Cd To File</title>"),
             ("curl -s https://n7.example.com/a & cat x",
-             "<title>Bg Then Cat</title>")), 21):
+             "<title>Bg Then Cat</title>"),
+            # #565: an echo's text is in the output: no tag, no expansion
+            ("curl -s https://n8.example.com/a && echo $HOME",
+             "<title>Echo Home</title>"),
+            ("curl -s https://n9.example.com/a && echo '<title>X</title>'",
+             "<html><title>Echo Fake</title>")), 21):
         call("2026-11-07T10:%02d:00Z" % k, k, "Bash", {"command": cmd}, out)
     call("2026-11-07T11:00:00Z", 20, "WebFetch",
          {"url": "https://q.example.com/x?r=/", "prompt": "sum"},
@@ -707,6 +719,15 @@ def test_fetched():
     check("#541 tag characters after U+1F3F4 stay: the England flag",
           t == "x\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E"
           "\U000E0067\U000E007F", repr(t))
+    t = title("https://cut.example.com/c")
+    check("#564 the 120-byte cut drops a flag's tag run with no cancel tag, "
+          "and its U+1F3F4", t == "a" * 100, repr(t))
+    t = title("https://strayt.example.com/s")
+    check("#564 tag characters after a cancel tag are dropped",
+          t == "Go \U0001F3F4\U000E0067\U000E0062\U000E007F AB", repr(t))
+    t = title("https://svgself.example.com/s")
+    check("#564 a self-closing <svg/> in the head is closed: the title "
+          "after it", t == "AfterSvg", t)
     rv = res("https://%s/p" % LONGHOST)[2]
     sub = rv[0]["subtitle"] if rv else ""
     check("#527 a long host is capped so \" \u00b7 fetched ... in "
@@ -743,7 +764,10 @@ def test_fetched():
               len(rv) == 1 and rv[0]["title"] == t, rv)
     for u, why in (("https://n5.example.com/a", "&& echo $(date)"),
                    ("https://n6.example.com/a", "cd && curl -o f"),
-                   ("https://n7.example.com/a", "curl & cat x")):
+                   ("https://n7.example.com/a", "curl & cat x"),
+                   ("https://n8.example.com/a", "&& echo $HOME (#565)"),
+                   ("https://n9.example.com/a", "&& echo '<title>X</title>' "
+                    "(#565)")):
         p, ls, rv = res(u)
         check("#542 %s: not the only stdout fetch, no title" % why,
               p.returncode == 0 and not rv, rv)
@@ -924,6 +948,8 @@ LEADS = ["Decision for you (OQ-184):  \nShip the lead-in rule?\n- a) yes\n"
          "\nthe lead's body\n\n__Also OQ-190:__ \nits own body",
          "```\nDecision (OQ-188):\nin a fence\n```\nOutside (OQ-191):\n"
          "after it",
+         "# OQ-306 Strong First\nstrong body",
+         "Lead (OQ-302):\nweak body", "# OQ-302 Real Title\nreal body",
          "Next on OQ-187:\nanother result's body"]
 # the operator's shape (Prosper #1641): in the agent's own reply
 REPLIES = [("assistant", "Decision for you (OQ-185):\n- a) ship it\n- b) wait"
@@ -935,7 +961,19 @@ REPLIES = [("assistant", "Decision for you (OQ-185):\n- a) ship it\n- b) wait"
            ("assistant", "> Quoted (OQ-317):\n> quoted body"),
            ("assistant", "1. Step (OQ-318):\n   indented body"),
            ("assistant", "2) Next (OQ-319):\nbody"),
-           ("assistant", "- Bullet (OQ-320):\nbody")]
+           ("assistant", "- Bullet (OQ-320):\nbody"),
+           ("assistant", "Decision A (OQ-301):\nbody one"),
+           ("assistant", "Decision B (OQ-301):\nbody two"),
+           ("assistant", "Later lead (OQ-306):\nweak body"),
+           ("assistant", "Two refs OQ-307 and OQ-308:\nbody"),
+           ("assistant", "x" * 100 + " (OQ-310):\nbody"),
+           ("assistant", "y" * 120 + " (OQ-311):\nbody"),
+           ("assistant", "Eight lines (OQ-312):\n" +
+            "\n".join("l%d" % i for i in range(8))),
+           ("assistant", "Head stop (OQ-313):\nkept\n## Next\nnot kept"),
+           ("assistant", "First (OQ-330):\nbody a\nSecond (OQ-331):\nbody b"),
+           ("assistant", "Fenced (OQ-332):\nbefore\n```\ncode line\n```\n"
+            "after")]
 
 
 def test_lead_in():
@@ -958,10 +996,12 @@ def test_lead_in():
                           "content": [{"type": "tool_result",
                                        "tool_use_id": "l%d" % k,
                                        "content": out}]}})
-    for k, (who, text) in enumerate(REPLIES, 6):
+    for k, (who, text) in enumerate(REPLIES, 10):
         lines.append({"type": who, "timestamp": "2026-11-01T10:%02d:00Z" % k,
                       "message": {"content": [{"type": "text",
                                                "text": text}]}})
+    lines.append({"type": "assistant", "timestamp": "2026-11-01T10:40:00Z",
+                  "message": {"content": "Str form (OQ-333):\nstring body"}})
     with open(os.path.join(pdir, LSID + ".jsonl"), "w") as f:
         f.write("".join(json.dumps(o) + "\n" for o in lines))
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
@@ -1041,6 +1081,53 @@ def test_lead_in():
                     ("OQ-317", "OQ-318", "OQ-319", "OQ-320")] ==
           [["Quoted (OQ-317)"], ["Step (OQ-318)"], ["Next (OQ-319)"],
            ["Bullet (OQ-320)"]], defs("OQ-317"))
+
+    d, out = defs("OQ-301")
+    check("#563 two lead-ins for one ref: the card keeps the first one",
+          [(x["rule"], x["title"]) for x in d] ==
+          [("D5", "Decision A (OQ-301)")], (d, out))
+    d, out = defs("OQ-307")
+    e, _ = defs("OQ-308")
+    check("#563 a line naming two refs does not define either",
+          not [x for x in d + e if x["rule"] == "D5"], (d, e, out))
+    d, out = defs("OQ-310")
+    e, _ = defs("OQ-311")
+    check("#563 a 112-byte lead-in line defines, a 132-byte one does not",
+          [x["rule"] for x in d] == ["D5"] and
+          not [x for x in e if x["rule"] == "D5"], (d, e, out))
+    d, out = defs("OQ-312")
+    check("#563 the passage stops at 6 lines",
+          [x["passage"] for x in d] == ["l0\nl1\nl2\nl3\nl4\nl5"], (d, out))
+    d, out = defs("OQ-313")
+    check("#563 the passage stops at a heading",
+          [x["passage"] for x in d] == ["kept"], (d, out))
+    d, out = defs("OQ-330")
+    e, _ = defs("OQ-331")
+    check("#563 the passage stops at the next lead-in, which defines its "
+          "own ref", [(x["rule"], x["passage"]) for x in d] ==
+          [("D5", "body a")] and
+          [(x["rule"], x["passage"]) for x in e] == [("D5", "body b")],
+          (d, e, out))
+    d, out = defs("OQ-332")
+    check("#563 fence lines are skipped in the passage",
+          [x["passage"] for x in d] == ["before\nafter"], (d, out))
+    d, out = defs("OQ-333")
+    check("#563 a reply whose content is a string defines",
+          [(x["rule"], x["title"]) for x in d] ==
+          [("D5", "Str form (OQ-333)")], (d, out))
+    p = dch("--xray", "xv-ld", "--json")
+    try:
+        rs = {r["key"].split(":", 1)[-1]: r for r in
+              json.loads(p.stdout.splitlines()[0])["refs"]}
+    except (ValueError, KeyError, IndexError):
+        rs = {}
+    t = {k: ((rs.get(k) or {}).get("title"),
+             (rs.get(k) or {}).get("definitions")) for k in
+         ("OQ-302", "OQ-306")}
+    check("#563 refs: a lead-in and a D1 heading for one ref, in either "
+          "order, give one definition, D1's",
+          t == {"OQ-302": ("Real Title", 1), "OQ-306": ("Strong First", 1)},
+          (t, p.stdout[:600]))
 
 
 def test_lead_cmd():
