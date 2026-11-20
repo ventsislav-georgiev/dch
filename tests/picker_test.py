@@ -750,6 +750,49 @@ def groups():
           r.returncode != 0 and config() == c, r.stdout, r.stderr, config())
 
 
+def groupscroll():
+    """18. the tab bar keeps the selected tab in view (QA 1.124.0 LOW-VA1):
+    8 groups of 14-byte names, Tab through every tab at narrow widths."""
+    names = ["LongGroupName%d" % k for k in range(8)]
+    with open(ENV["DCH_CONFIG"], "w") as f:
+        f.write("".join("group = %s = ^nw%d$\n" % (n, k)
+                        for k, n in enumerate(names)))
+    for k in range(8):
+        dch("--spawn", "nw%d" % k, "--size", "80x24", "sh", "-c",
+            "sleep 600")
+    for w in (40, 60, 80, 200):
+        picker("pk18", "%dx14" % w, "NO_COLOR=1", "TERM=xterm-256color")
+        s = wait_screen("pk18", lambda s: "[Sessions" in s)
+        bad, hist, mk = [], False, []
+        for tab in ["Sessions"] + names + ["History"]:
+            s = wait_screen("pk18", lambda s: "[" + tab in s.split("\n")[0])
+            l = s.split("\n")[0]
+            if "[" + tab not in l:
+                bad.append((tab, l))
+            hist = hist or "[History" in l
+            mk.append((tab, "\u2039" in l, "\u203a" in l))
+            dch("--keys", "pk18", "tab")
+        check("#567: %d cols: every tab, selected in turn, is on the tab "
+              "line and bracketed" % w, not bad, bad)
+        check("#567: %d cols: History is reachable and visible" % w, hist)
+        if w == 200:
+            s = wait_screen("pk18", lambda s: "[Sessions" in s)
+            check("#567: 200 cols: all tabs fit, no markers, the line "
+                  "unchanged", not any(a or b for _, a, b in mk) and
+                  s.split("\n")[0].startswith("[Sessions ") and
+                  "  LongGroupName0 1   LongGroupName1 1   LongGroupName2"
+                  in s and "LongGroupName7 1   History " in s,
+                  s.split("\n")[0])
+        else:
+            check("#567: %d cols: \u2039 only once tabs are cut on the "
+                  "left, \u203a only while some are cut on the right" % w,
+                  mk[0] == ("Sessions", False, True) and
+                  mk[-1] == ("History", True, False), mk)
+        dch("-k", "pk18")
+    for k in range(8):
+        dch("-k", "nw%d" % k)
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL dch not executable at " + DCH)
@@ -1192,6 +1235,7 @@ def main():
     verbs()
     footshells()
     groups()
+    groupscroll()
     return 1 if failures else 0
 
 

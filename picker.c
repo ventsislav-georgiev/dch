@@ -1430,6 +1430,73 @@ pk_aside(const char *s)
 	}
 }
 
+/* The tab t's name. */
+static const char *
+pk_tname(const struct pk *p, int t)
+{
+	return !t ? "Sessions" : t == PK_HIST ? "History" : p->gname[t - 1];
+}
+
+/* Cells of tab t drawn at column col: " name N " with the gap before it. */
+static int
+pk_tabw(const struct pk *p, int t, int col)
+{
+	char b[24];
+
+	return (col > 0) + 2 + pk_cps(pk_tname(p, t)) +
+	       snprintf(b, sizeof b, " %d", pk_pos(p, t, p->n[t]));
+}
+
+/* The tab bar. When every tab fits it is just the tabs; when not, it
+** starts at the smallest tab from which everything through the selected
+** one fits, a marker at each end that has tabs cut off (QA 1.124.0
+** LOW-VA1). A selected tab wider than the line is cut at its edge. */
+static void
+pk_tabs(const struct pk *p)
+{
+	int t, f, e, w, tot = 0, last = -1, first = -1, col = pk_col;
+
+	for (t = 0; t < PK_TABS; t++)
+		if (pk_shown(p, t))
+		{
+			tot += pk_tabw(p, t, tot + col);
+			last = t;
+			first = first < 0 ? t : first;
+		}
+	if (col + tot <= pk_w)
+		f = first;
+	else
+		for (f = first; f < p->tab; f++)
+		{
+			for (w = (f > first), t = f; t <= p->tab; t++)
+				if (pk_shown(p, t))
+					w += pk_tabw(p, t, w + col);
+			if (col + w + (p->tab < last) <= pk_w)
+				break;
+		}
+	if (f > first)
+	{
+		pk_set("2");
+		pk_txt(pk_utf ? "\xe2\x80\xb9" : "<");
+	}
+	for (t = f, e = 0; t < PK_TABS; t++)
+		if (pk_shown(p, t))
+		{
+			/* the room left, after the right marker's if one is due */
+			if (t != p->tab && pk_col + pk_tabw(p, t, pk_col) +
+			    (t < last) > pk_w)
+				break;
+			pk_tab(pk_tname(p, t), pk_pos(p, t, p->n[t]),
+			       t == p->tab);
+			e = t;
+		}
+	if (e < last)
+	{
+		pk_set("2");
+		pk_txt(pk_utf ? "\xe2\x80\xba" : ">");
+	}
+}
+
 static void
 pk_draw(struct pk *p, int fd, const char *header, int force)
 {
@@ -1593,11 +1660,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	pk_line();
 	if (p->settings)
 		pk_tab("Settings", -1, 1);
-	for (t = 0; t < PK_TABS && !p->settings; t++)
-		if (pk_shown(p, t))
-			pk_tab(!t ? "Sessions" : t == PK_HIST ? "History"
-			       : p->gname[t - 1], pk_pos(p, t, p->n[t]),
-			       t == p->tab);
+	if (!p->settings)
+		pk_tabs(p);
 	if (!*header)
 		pk_aside(b);
 	pk_eol();
