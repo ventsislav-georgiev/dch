@@ -810,7 +810,8 @@ def test_follow_cadence():
         check("cadence: a row changed to another of the same length is sent "
               "(b to Z)", sent, cf.objs(k))
         wait_for(lambda: any(w == "Z" for _, w in ran()), 12)
-        c = next(i for i, (_, w) in enumerate(ran()) if w == "Z")
+        c = next((i for i, (_, w) in enumerate(ran()) if w == "Z"),
+                 len(ran()))  # no Z run: the row below fails, the file goes on
         wait_for(lambda: len(ran()) > c + 1, 12)
         ts = [t for t, _ in ran()]
         check("cadence: a changed answer brings its next run in at the base "
