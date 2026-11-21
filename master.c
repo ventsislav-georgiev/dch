@@ -50,6 +50,10 @@ struct pty
 	struct winsize ws;
 };
 
+/* A passive client's held run of ESC [ (#599): bytes, a whole number of
+** them */
+#define FOCUS_CAR	16
+
 /* A connected client */
 struct client
 {
@@ -142,7 +146,7 @@ struct client
 	unsigned long long in_from;
 	/* #578: a passive client's trailing ESC [ held for a focus report
 	** split across two pushes, since fcar_at */
-	unsigned char fcar[2], fcar_n;
+	unsigned char fcar[FOCUS_CAR], fcar_n;
 	struct timespec fcar_at;
 };
 
@@ -257,6 +261,10 @@ static int cur_argv_owned, dch_argv_owned;
 ** respawn keeps when it rewrites the inner command for the next live
 ** restart. 0 = could not tell, so a restart reverts to the launch argv. */
 static int argv_prefix;
+/* #598: one count over every input source (any client's MSG_PUSH, so
+** passive, -E and dch --send/--run too, and MSG_KEYS): a switch goes to
+** a keyed active client only while its in_at is still the newest */
+static unsigned long long in_seq;
 static int respawn_live(void);
 static int pty_input(const void *buf, size_t len);
 static long ms_since(const struct timespec *t);
@@ -2017,9 +2025,12 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 
 /* A passive client's focus reports (#578): ESC [ I and ESC [ O are session
 ** state like its size, so they never reach the program. Puts the carry and
-** b's n bytes in o (room for n + 2), takes the reports out (one the removal
-** closes up too, so none is left), holds a trailing ESC [ of a passive
-** client, and returns the length of what goes in.
+** b's n bytes in o (room for n + FOCUS_CAR), takes the reports out (one the
+** removal closes up too, so none is left), holds a passive client's trailing
+** run of ESC [ whole (#599: the next push's I or O closes each of them up in
+** turn, so none may have gone in already), and returns the length of what
+** goes in. Past FOCUS_CAR the run's older ESC [ are dropped: each is cut off
+** by the next ESC, no sequence to the program.
 ** shortcut: a lone trailing ESC goes straight in, so a report split as
 ** ESC | [I reaches the program, unless the client rejoins it as attach.c
 ** does; hold it too if a client without that hold turns up. */
@@ -2027,7 +2038,7 @@ static size_t
 focus_drop(struct client *p, unsigned char *o, const unsigned char *b,
            size_t n)
 {
-	size_t i, k = 0;
+	size_t i, k = 0, c;
 
 	memcpy(o, p->fcar, p->fcar_n);
 	memcpy(o + p->fcar_n, b, n);
@@ -2042,15 +2053,15 @@ focus_drop(struct client *p, unsigned char *o, const unsigned char *b,
 		    (o[k - 1] == 'I' || o[k - 1] == 'O'))
 			k -= 3;
 	}
-	if (k >= 2 && o[k - 2] == '\033' && o[k - 1] == '[')
-		p->fcar_n = 2;
-	if (p->fcar_n)
+	for (c = k; c >= 2 && o[c - 2] == '\033' && o[c - 1] == '['; c -= 2)
+		;
+	if (c < k)
 	{
-		k -= p->fcar_n;
-		memcpy(p->fcar, o + k, p->fcar_n);
+		p->fcar_n = k - c < FOCUS_CAR ? (unsigned char)(k - c) : FOCUS_CAR;
+		memcpy(p->fcar, o + k - p->fcar_n, p->fcar_n);
 		clock_gettime(CLOCK_MONOTONIC, &p->fcar_at);
 	}
-	return k;
+	return c;
 }
 
 /* One pty output buffer: track modes, queue to attached clients, feed the
@@ -3132,6 +3143,7 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 		dch_vt_buf_free(bytes);
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
 	}
+	in_seq++;	/* #598: a --keys pick is no active client's */
 	/* Held (no child): dropped, like any other input. */
 	if (the_pty.fd >= 0)
 	{
@@ -4185,13 +4197,11 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Push out data to the program. */
 	if (type == MSG_PUSH)
 	{
-		static unsigned long long in_seq;
-
 		p->in_at = ++in_seq;
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
-			unsigned char o[PKT_MAX + 2];
+			unsigned char o[PKT_MAX + FOCUS_CAR];
 			size_t n = focus_drop(p, o, payload, len);
 
 			if (n)
@@ -4460,7 +4470,8 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* #591: a picker inside the session chose another. On an attached
 	** connection the client registers its secret. On a control one the
 	** keyed active client that typed last (#595: the picker's Enter, not
-	** another terminal on the session) gets the name behind its secret as
+	** another terminal on the session; #598: and no other source typed
+	** since, or none does) gets the name behind its secret as
 	** its last output and stops getting the pty's (so nothing the program
 	** prints can follow it); the main loop's flush then closes it. */
 	else if (type == MSG_SWITCH)
@@ -4494,7 +4505,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		{
 			if (c->role == ROLE_ATTACHED && c->attached &&
 			    !c->viewing && !c->passive && c->swkey[0] &&
-			    c->in_at && (!to || c->in_at > to->in_at))
+			    c->in_at && c->in_at == in_seq)
 				to = c;
 		}
 		n = to ? snprintf(osc, sizeof osc, DCH_SWITCH_OSC "%s;%.*s\a",

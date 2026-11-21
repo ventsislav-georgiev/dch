@@ -310,7 +310,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.141.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.142.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -462,7 +462,9 @@ A History row's `Shift-Enter` / `o` resumes the session and then switches the
 same way. Only a pick switches: `dch -a <name>`, `dch -n <name>`, `dch --`
 and `dch <command>` inside a session never move your terminal; they are
 refused as before. Only the terminal that typed last (the one that made the
-pick) switches; another terminal attached to the session stays. Nothing switches, and dch says `dch: already inside session '<n>';
+pick) switches; another terminal attached to the session stays. When the pick's
+last key came from a terminal that cannot switch (a passive or `-E` client) or
+from `dch --keys`/`--send`/`--run`, nothing switches and dch refuses as below. Nothing switches, and dch says `dch: already inside session '<n>';
 nesting disabled` (exit 1), when no switchable client is attached there: a
 headless session, a picker run with `--run`/`--spawn`, only a passive client
 (`--passive`) or a `-E` one (dch serve's, Prosper's), a session you are

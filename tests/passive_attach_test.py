@@ -11,7 +11,8 @@ that active client attached, plain dch advances to -2; --active restores the
 size and the busy rule; --passive at runtime marks it again; an unknown pid,
 no session and an old master (DCH_ST_UNSUP) exit 1 with a reason.
 #578: with the program's focus reporting (1004) on, a passive client's
-ESC[I / ESC[O never reach it, split across two pushes neither, while an
+ESC[I / ESC[O never reach it, split across two pushes neither (#599: nor a
+nested one split after ESC[ ESC[), while an
 active client's do, after --active its own do again, and a runtime
 --passive stops them; its other input,
 a lone Esc too, still goes in.
@@ -215,6 +216,11 @@ def focus_rows():
         check(got == b"",
               "a passive client's focus-out split across two pushes never"
               " reaches the program: %r" % (got,))
+        # #599: a nested report split after ESC[ ESC[ (nightly fuzz_frames)
+        got = fed(q, [b"[I\033[\033[", b"II\0["], b"Q", 0.02)
+        check(got == b"[I\0[",
+              "a passive client's nested focus-in split after ESC[ ESC["
+              " never reaches the program: %r" % (got,))
         got = fed(p, [b"x\033[Iy"], b"P")
         check(got == b"xy",
               "a passive client's other input still reaches the program"
@@ -224,14 +230,34 @@ def focus_rows():
         check(got == b"\033" and time.time() - t0 < 2,
               "a passive client's lone Esc still goes in: %r" % (got,))
 
-        # #585: no second hold on top of attach.c's own
-        got = fed(p, [b"\033", b"j"], b"P", 0.03)  # inside the 50 ms hold
-        with open(log + ".reads", "rb") as f:
-            rd = f.read().split()
-        check(got == b"\033j" and b"1b" in rd
+        # #585: no second hold on top of attach.c's own (50 ms). The Esc
+        # must reach the program before j exists, so a slow reader cannot
+        # merge them. Its latency is timed against an active client's Esc
+        # on the same reader, so load cancels: a master hold adds ~50 ms to
+        # the passive one only. Any of 5 tries may pass.
+        def reads():
+            with open(log + ".reads", "rb") as f:
+                return f.read().split()
+
+        def esc_ms(c, mark):
+            n0 = len(reads())
+            t0 = time.time()
+            os.write(c.fd, b"\033")
+            while time.time() < t0 + DUE and reads()[n0:] != [b"1b"]:
+                time.sleep(0.001)
+            lat = (time.time() - t0) * 1000
+            return lat, fed(c, [b"j"], mark), reads()[n0:]
+
+        for _ in range(5):
+            am, _g, _r = esc_ms(a, b"A")
+            pm, got, rd = esc_ms(p, b"P")
+            if pm <= am + 30 and got == b"\033j" and rd[:1] == [b"1b"]:
+                break
+        check(pm <= am + 30 and got == b"\033j" and rd[:1] == [b"1b"]
               and not any(x.startswith(b"1b6a") for x in rd),
-              "a passive client's Esc then j 30 ms apart are two reads, not"
-              " Meta-j: %r" % (rd[-4:],))
+              "a passive client's lone Esc reaches the program on its own,"
+              " not held: passive %.0f ms vs active %.0f ms %r"
+              % (pm, am, rd))
         fed(p, [], b"P")
 
         r = dch("--active", name, "--pid", str(p.pid))
