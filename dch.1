@@ -831,6 +831,8 @@ exits 0. Only a pick switches:
 .BR "dch \-n" ,
 .B dch \-\-
 and a command inside a session are refused as before.
+Only the client that typed last, the one that made the pick, switches; another
+client attached to the session stays.
 With no switchable client attached (a headless session, a passive or
 .B \-E
 client only, an attach from another host through

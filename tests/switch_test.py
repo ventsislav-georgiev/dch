@@ -21,7 +21,8 @@ Covers, in order:
      back at the prompt; the session's own output cannot trigger that, a
      passive client is never switched, and with no active client the
      nesting refusal stays; -a, -n, -- inside it are refused, never a
-     switch (#594).
+     switch (#594); a second active client (-f) that did not type the
+     Enter stays on the session (#595).
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -309,8 +310,11 @@ def main():
                         os.listdir(SOCKDIR))
         # (b) a passive client on D rides along, never switched
         ppid, pfd = spawn_client(["-a", D, "--passive"])
+        # #595: a second active client, which never types the Enter
+        spid, sfd = spawn_client(["-f", "-a", D])
         try:
             drain(pfd, 3.0, b"DDD> ")
+            drain(sfd, 3.0, b"DDD> ")
             # a --restart carries the client's secret (the release flow)
             rs = dch("--restart", D)
             if rs.returncode:
@@ -341,6 +345,15 @@ def main():
             pout = drain(pfd, 1.0)
             if reap(ppid, pfd, 0.2) is not None or "BBB_BRAVO" in pout:
                 return fail("#591: the passive client was switched", pout)
+            # #595: the other active client is still on D, getting its output
+            os.write(sfd, b"echo SECOND_$DCH_SESSION\r")
+            sout = drain(sfd, 5.0, ("SECOND_" + D).encode())
+            if reap(spid, sfd, 0.2) is not None or "BBB_BRAVO" in sout or \
+                    "SECOND_" + D not in sout:
+                return fail("#595: the active client that did not pick was "
+                            "switched too", sout)
+            kill_client(spid, sfd)
+            spid = None
             # its own switch loop goes on: double tap opens the picker
             os.write(fd, DETACH)
             time.sleep(0.05)
@@ -362,6 +375,7 @@ def main():
                             "refusal", out)
         finally:
             kill_client(ppid, pfd)
+            kill_client(spid, sfd)
 
         print("PASS: double tap switches sessions, single tap detaches; "
               "detach_key = switch swaps them; the picker inside a "
