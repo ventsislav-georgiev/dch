@@ -3887,7 +3887,8 @@ d5(const char *s, const struct olines *o, size_t k, const char *cwd,
 			continue;
 		for (h = 0; h < l && h < 7 && ln[h] == '#'; h++)
 			;
-		if (blank(ln, l) || (h && h < 7 && h < l && ln[h] == ' ') ||
+		if (blank(ln, l) || (l == 1 && ln[0] == '>') ||
+		    (h && h < 7 && h < l && ln[h] == ' ') ||
 		    lead_in(s, o->ls[j], o->le[j], cwd, &sp))
 			break;
 		if (l > 1 && ln[0] == '>' && ln[1] == ' ')
@@ -3905,7 +3906,7 @@ d5(const char *s, const struct olines *o, size_t k, const char *cwd,
 	}
 	if (!got)
 		return 0;	/* a ':' line with no body after it */
-	while (t < c && s[t] && strchr(" \t*_", s[t]))
+	while (t < c && s[t] && strchr(" \t", s[t]))
 		t++;
 	/* #562: a quote or list marker is not the title ("> ", "- ", "1. ") */
 	if (t + 1 < c && (s[t] == '>' || s[t] == '-') && s[t + 1] == ' ')
@@ -3918,9 +3919,45 @@ d5(const char *s, const struct olines *o, size_t k, const char *cwd,
 		    (s[h] == '.' || s[h] == ')') && s[h + 1] == ' ')
 			t = h + 2;
 	}
-	while (t < c && s[t] && strchr(" \t*", s[t]))
+	while (t < c && s[t] && (s[t] == ' ' || s[t] == '\t' ||
+	       (s[t] == '*' && t + 1 < c && s[t + 1] == ' ')))
 		t++;		/* a "* " marker after a quote or list one */
-	title_of(s + t, c - t, d->title);
+	/* #586: a leading run of '*' or '_' is emphasis only with its closing
+	** run, the same length, on the line (the colon may sit inside it);
+	** the pair goes, else the text stays as written */
+	{
+		char tb[XR_TITLE_MAX * 4 + 8];
+		size_t n, e, le = o->le[k], m = c - t;
+
+		for (h = t; h < c && (s[h] == '*' || s[h] == '_') &&
+		     s[h] == s[t]; h++)
+			;
+		n = h - t;
+		for (e = h; n && h < c && s[h] != ' ' && e < le; e = j)
+		{
+			while (e < le && s[e] != s[t])
+				e++;
+			for (j = e; j < le && s[j] == s[t]; j++)
+				;
+			if (e >= le || j - e == n)
+				break;
+		}
+		if (n && h < c && s[h] != ' ' && e < le)
+		{
+			m = (e < c ? e : c) - h;
+			if (m > sizeof tb)
+				m = sizeof tb;
+			memcpy(tb, s + h, m);
+			if (e < c && c - e - n <= sizeof tb - m)
+			{
+				memcpy(tb + m, s + e + n, c - e - n);
+				m += c - e - n;
+			}
+			title_of(tb, m, d->title);
+		}
+		else
+			title_of(s + t, m, d->title);
+	}
 	if (!d->title[0])
 		return 0;
 	pl = u8_cut(pb, pl);
