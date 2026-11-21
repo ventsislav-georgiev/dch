@@ -491,6 +491,7 @@ extern volatile sig_atomic_t tty_conts;
 #include "remote.h"
 void client_pidfile_unlink(void);
 int master_main(char **argv, int waitattach, int dontfork);
+int focus_hold_ms(void);
 int push_main(void);
 
 #ifdef sun
