@@ -718,7 +718,7 @@ def groups():
           "gr-api-qa" in rows(s) and "helper-qa" in rows(s), s)
 
     # a group named like a built-in tab, or like an earlier group, is skipped
-    setcfg("group = History = gr-api\ngroup = sessions = gr-web\n"
+    setcfg("group = HISTORY = gr-api\ngroup = sessions = gr-web\n"
            "group = Dup = gr-api\ngroup = Dup = gr-web\n"
            "group = Other = -qa\n")
     s = wait_screen("pk13", lambda s: "Dup" in tabs(s))
@@ -742,6 +742,14 @@ def groups():
     s = to_tab("pk13", "Sessions")
     check("#572: ... the lowercase repeat matches nothing: gr-web stays on "
           "Sessions", "gr-web" in rows(s), s)
+
+    # only a whole-name repeat is skipped: a prefix or an extension keeps its tab
+    setcfg("group = Dog = gr-api\ngroup = Do = gr-web\ngroup = Dogs = -qa\n")
+    s = wait_screen("pk13", lambda s: "Dogs" in tabs(s))
+    check("#572: group = Do and group = Dogs after group = Dog keep their "
+          "own tabs (a prefix is not a repeat)",
+          tabs(s) == ["Sessions", "Dog", "Do", "Dogs", "History"],
+          s.split("\n")[0])
 
     # a regex every name matches is plain text: it takes no session (#569)
     setcfg("group = All = .*\n")
