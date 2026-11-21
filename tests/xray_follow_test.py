@@ -1190,8 +1190,8 @@ def test_follow_slow_cmd():
         check("slow command (#468): the new answer comes later as its row "
               "deltas", r6 and j > i + 1 and
               (hdr_of(ob[j - 1]) == "task" and "done" in ob[j + 1]
-               if pre[-1] == "r2" else
-               ob[j + 1] == {"task": {"id": "r1", "gone": True}}),
+               if pre[-1:] == ["r2"] else
+               ob[j + 1:j + 2] == [{"task": {"id": "r1", "gone": True}}]),
               ob[j - 1:j + 2])
         fl.stop()
 
