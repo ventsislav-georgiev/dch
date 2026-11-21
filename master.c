@@ -131,6 +131,10 @@ struct client
 	/* #328: bytes of its input queued, from pty_in_total == in_from on */
 	size_t queued;
 	unsigned long long in_from;
+	/* #578: a passive client's trailing ESC / ESC [ held for a focus
+	** report split across two pushes, since fcar_at */
+	unsigned char fcar[2], fcar_n;
+	struct timespec fcar_at;
 };
 
 /* ponytail: 4 MB per-client output backlog before we give up on a slow
@@ -1994,6 +1998,51 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 	}
 	p->in_drop = 1;
 	p->dropped += n;
+}
+
+/* ponytail: how long a passive client's trailing ESC / ESC [ waits for the
+** rest of a focus report; attach.c's FOCUS_HOLD_MS, same trade. Only a
+** passive client's pushes that END in one wait. */
+#define FOCUS_HOLD_MS	50
+
+/* A passive client's focus reports (#578): ESC [ I and ESC [ O are session
+** state like its size, so they never reach the program. Puts the carry and
+** b's n bytes in o (room for n + 2), takes the reports out (one the removal
+** closes up too, so none is left), holds a trailing ESC or ESC [ of a
+** passive client, and returns the length of what goes in.
+** shortcut: a held ESC goes in with the key after it, which the program may
+** read as Meta-key; attach.c's delay line if a passive client types Esc + key
+** within FOCUS_HOLD_MS. */
+static size_t
+focus_drop(struct client *p, unsigned char *o, const unsigned char *b,
+           size_t n)
+{
+	size_t i, k = 0;
+
+	memcpy(o, p->fcar, p->fcar_n);
+	memcpy(o + p->fcar_n, b, n);
+	n += p->fcar_n;
+	p->fcar_n = 0;
+	if (!p->passive)
+		return n;
+	for (i = 0; i < n; i++)
+	{
+		o[k++] = o[i];
+		if (k >= 3 && o[k - 3] == '\033' && o[k - 2] == '[' &&
+		    (o[k - 1] == 'I' || o[k - 1] == 'O'))
+			k -= 3;
+	}
+	if (k && o[k - 1] == '\033')
+		p->fcar_n = 1;
+	else if (k >= 2 && o[k - 2] == '\033' && o[k - 1] == '[')
+		p->fcar_n = 2;
+	if (p->fcar_n)
+	{
+		k -= p->fcar_n;
+		memcpy(p->fcar, o + k, p->fcar_n);
+		clock_gettime(CLOCK_MONOTONIC, &p->fcar_at);
+	}
+	return k;
 }
 
 /* One pty output buffer: track modes, queue to attached clients, feed the
@@ -4114,8 +4163,14 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
-			push_input(p, payload, len);
-			dch_vt_input_seen(payload, len);	/* §11.5, #302 */
+			unsigned char o[PKT_MAX + 2];
+			size_t n = focus_drop(p, o, payload, len);
+
+			if (n)
+			{
+				push_input(p, o, n);
+				dch_vt_input_seen(o, n);	/* §11.5, #302 */
+			}
 		}
 	}
 	/* the end of a dch --send (#307): did all of it go in */
@@ -4853,6 +4908,20 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			auto_allow();
 		if (aa_due() < wait_ms)
 			wait_ms = aa_due() < 0 ? 0 : aa_due();
+		/* A passive client's held ESC nothing completed goes in (#578). */
+		for (p = clients; p; p = p->next)
+			if (p->fcar_n && ms_since(&p->fcar_at) >= FOCUS_HOLD_MS)
+			{
+				if (the_pty.fd >= 0)
+				{
+					push_input(p, p->fcar, p->fcar_n);
+					dch_vt_input_seen(p->fcar, p->fcar_n);
+				}
+				p->fcar_n = 0;
+			}
+			else if (p->fcar_n &&
+			         FOCUS_HOLD_MS - ms_since(&p->fcar_at) < wait_ms)
+				wait_ms = FOCUS_HOLD_MS - ms_since(&p->fcar_at);
 		if (the_pty.fd >= 0 && respawn_live())
 		{
 			int st;
