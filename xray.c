@@ -3854,7 +3854,8 @@ lead_in(const char *s, size_t ls, size_t le, const char *cwd,
 		return 0;
 	x.n = 0;
 	(void)grammar(s + ls, le - 1 - ls, XR_PLAIN, R_ANCHOR, cwd, one_ref, &x);
-	if (x.n != 1 || x.sp.shape == XR_ISSUE || x.sp.shape == XR_PULL)
+	if (x.n != 1 || x.sp.shape == XR_ISSUE || x.sp.shape == XR_PULL ||
+	    x.sp.shape == XR_COMMIT)	/* R_ANCHOR finds none today (#576) */
 		return 0;	/* #560: those have real titles (resolve) */
 	*sp = x.sp;
 	sp->s += ls;
