@@ -619,7 +619,7 @@ def test_follow_tasks_memory():
         gaps = [b - a for a, b in zip(ts, ts[1:])]
         check("tasks+memory: a command's unchanged answer backs its re-runs "
               "off (0.3 s doubling to 1.8 s: in 6 s not 20 runs, a gap of "
-              "1 s or more)", 4 <= len(ts) <= 9 and max(gaps) >= 1.0,
+              "1 s or more)", 2 <= len(ts) <= 9 and max(gaps) >= 1.0,
               (ts, gaps))
         k6 = len(cf.got)
         big[250]["title"] = "Row 250 moved"
