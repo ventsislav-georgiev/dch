@@ -103,6 +103,7 @@ struct xv_def
 	char *session, *title, *passage, *rule;
 	char *url, *status;	/* a define_command's (#405) */
 	int cmd;		/* "source":"command" */
+	int lead;		/* #575: a "lead" line, until a definition comes */
 	long long at;
 };
 
@@ -951,19 +952,23 @@ xv_fline(struct xv *v, const struct json_parser *p)
 /* ---- the card (--ref, spec 3.4) ------------------------------------- */
 
 static void
+xv_def_free(struct xv_def *d)
+{
+	xv_sfree(d->session);
+	xv_sfree(d->title);
+	xv_sfree(d->passage);
+	xv_sfree(d->rule);
+	xv_sfree(d->url);
+	xv_sfree(d->status);
+}
+
+static void
 xv_card_free(struct xv *v)
 {
 	int k;
 
 	for (k = 0; k < v->nd; k++)
-	{
-		xv_sfree(v->d[k].session);
-		xv_sfree(v->d[k].title);
-		xv_sfree(v->d[k].passage);
-		xv_sfree(v->d[k].rule);
-		xv_sfree(v->d[k].url);
-		xv_sfree(v->d[k].status);
-	}
+		xv_def_free(&v->d[k]);
 	for (k = 0; k < v->nm; k++)
 	{
 		xv_sfree(v->m[k].session);
@@ -1017,12 +1022,18 @@ static void
 xv_cline(struct xv *v, const struct json_parser *p)
 {
 	char *s;
-	int o;
+	int o, lead = 0;
 
-	if ((o = xv_obj(p, 0, "definition", JSON_OBJECT)) >= 0)
+	if ((o = xv_obj(p, 0, "definition", JSON_OBJECT)) >= 0 ||
+	    (lead = (o = xv_obj(p, 0, "lead", JSON_OBJECT)) >= 0))
 	{
 		struct xv_def d;
 
+		/* #575: the lead-in shown while define_command runs; the first
+		** definition after it (the command's, else the lead-in's) replaces
+		** it */
+		if (v->nd && v->d[v->nd - 1].lead)
+			xv_def_free(&v->d[--v->nd]);
 		if (xv_grow(&v->d, &v->ad, v->nd, sizeof d) < 0)
 			return;
 		d.session = xv_str(p, o, "session");
@@ -1032,6 +1043,7 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		d.at = xv_num(p, o, "at", -1);
 		d.url = xv_str(p, o, "url");
 		d.status = xv_str(p, o, "status");
+		d.lead = lead;
 		d.cmd = !strcmp((s = xv_str(p, o, "source")), "command");
 		xv_sfree(s);
 		/* a define_command's body is no transcript line: always shown */

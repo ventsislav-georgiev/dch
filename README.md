@@ -302,7 +302,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.133.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.134.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1720,7 +1720,9 @@ to a place it cannot follow (`cd`, `cd $X`, `cd ~/x`, `pushd +1`).
 `dch --xray <n> --ref <ref> --json` streams one ref's
 lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
-`progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
+`progress` at most every 250 ms, a `lead` line (a lone lead-in shown
+while [`define_command`](#your-own-definitions-define_command) runs, #575),
+and `done` last (`partial`, `why`, `counts`,
 `files`, `bytes`, `lines_too_long`, and `define_warn` when a
 [`define_command`](#your-own-definitions-define_command) gave none). A Claude `mention` line carries `who` (`user`, `assistant` or `tool`) and `tool` (the tool's name for a call's own text, else `null`), as Search hits do, a Claude mention only. Every `mention` line also carries `session_id` right after `session`: the session's own id (a Claude session's `session_id`, a Codex thread's id, a shell's ring id; `null` when none), stable when the session is renamed, so a client groups by it. `chapter` is `null` on another project's session's line (`<n>`'s and its project's other sessions' lines carry theirs; `dch --xray <session_id> --chapter <chapter>` reads another session's, while it runs by its name). Every `mention` line also carries, right after `line`: `turn`, the prompt number of its chapter in its own session (the `i` of that chapter in that session's `--json` `chapters`, the pN the view shows), `null` when unknown: a null `chapter`, another project's session's line, a shell's ring, or a light scan's window that starts past the file's start (`--full` fills it in); on a line of another session of `<n>`'s project `turn` is followed by `turn_title` (that chapter's title, `null` with a `null` turn) and `last_active` (that session's last activity, epoch seconds, as `--ls-json` and History hold it, `null` when unknown), the two the card's headers show; `sentence`, the sentence holding the ref, taken from the mention's text line: from past the last `. `, `? ` or `! ` before the ref to the first one after it, the line's ends and a list item's `- `/`* `/`+ ` marker as bounds, trimmed, at most 400 bytes; cut, it is cut on a word (on a UTF-8 character when the word would drop more than half of that side's room: CJK text with no spaces, a long hash) with `… ` leading and/or ` …` ending it, and the ref itself is never cut; controls show as spaces (and an invalid byte as `?`), one byte each; and `span`, `[start, end]`, the UTF-8 byte offsets of the ref inside `sentence` (0 <= start <= end <= its byte length, on character boundaries, never inside a `…` mark), so `sentence` bytes `[start, end)` are the ref exactly as written. `span` is `null` only for a ref longer than 400 bytes (a relative path whose absolute spelling is in the text can be; the sentence is then cut from its start); a ref of 393 to 400 bytes in a longer sentence comes alone with the marks that fit. The card groups the mentions by turn, newest first, mentions with no turn last: a header per turn (pN, its title, its time), then its mentions, each as You, Reply or the tool and the sentence with the ref standing out as a Search match does; `Enter` on a mention reads that place, on a header the turn. With no definition the card shows the first mention's line as `First said (prompt N, <title>): ...`, and a light card says `this project: f scans` where `f` has not counted it, never `0 in 0 sessions`. `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
@@ -2363,7 +2365,15 @@ define_command = ~/bin/my-define
 - **When.** `dch --xray <n> --ref <ref>` (and the card, Enter on a ref) runs
   it after the transcripts are read, only when they gave no definition, so
   a transcript definition never waits for it; the card shows "searching"
-  meanwhile and never blocks. The Refs list runs nothing.
+  meanwhile and never blocks. A lead-in (`D5`) does not count as a
+  definition here, but it does not wait either (#575): when it is the only
+  one, `--ref` writes it first as a `lead` line (the `definition` object
+  under the key `lead`) just before the command runs, and the card shows
+  it at once. The first `definition` line after it replaces it: the
+  command's answer, or with none the lead-in's own `definition` line just
+  before `done`, as without a command. `--ref`'s `definition` lines stay
+  final, so a reader that wants the settled answer reads them and skips
+  `lead`. The Refs list runs nothing.
 - **Run.** As `tasks_command`'s (no shell, the session's folder else your
   home, its own process group, the same environment, your own config only,
   through `dch serve` the host's), with the ref as written (`OQ-97`,

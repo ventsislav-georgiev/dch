@@ -285,6 +285,9 @@ int xr_scan_done(struct xr_scan *x);
 int xr_scan_defs(const struct xr_scan *x);
 int xr_scan_cmd_def(struct xr_scan *x, const char *row);
 void xr_scan_define_warn(struct xr_scan *x, const char *warn);
+/* #575: a held lone D5 at once, as a "lead" line (its definition line
+** still comes before done when no other one does) */
+void xr_scan_lead(struct xr_scan *x);
 /* 1 for --full (a file read oldest first), 0 light (newest first, #262) */
 int xr_scan_full(const struct xr_scan *x);
 /* a write failed (3.4's cancel: no more lines, no done): 1 EPIPE, the

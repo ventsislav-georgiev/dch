@@ -5667,6 +5667,21 @@ xr_scan_done(struct xr_scan *x)
 	return sc_flush(x);
 }
 
+void
+xr_scan_lead(struct xr_scan *x)
+{
+	const char *d = x->lead && !x->defs ? strchr(x->lead + 1, '{') : NULL;
+	char *b;
+	size_t bl;
+	FILE *m;
+
+	if (!d || !(m = ln_open(&b, &bl)))
+		return;
+	fprintf(m, "{\"schema\":1,\"lead\":%s", d);	/* the definition's object */
+	ln_send(x, m, &b, &bl);
+	(void)sc_flush(x);
+}
+
 int
 xr_scan_defs(const struct xr_scan *x)
 {

@@ -1181,6 +1181,63 @@ def test_lead_cmd():
     check("#559 Refs row's card: no answer from the command, the lead-in "
           "stays", re.search(r"Definition\n D5 Decision for you \(OQ-400\)",
                              s) and "your define_command" not in s, s)
+
+    def slow():
+        """The card under a 2 s define_command: the screen once the
+        lead-in shows (or after 1 s), how long that took, the end screen"""
+        v = Pty([DCH, "--xray", "xv-lc"], 30, 100)
+        v.wait(b"Refs 1")
+        v.pump(0.3)
+        v.key(b"\033[Z\033[Z", 1.0)
+        mark = len(v.out)
+        t0 = time.time()
+        v.key(b"\r", 0)
+        until(lambda: (v.pump(0.05), "D5 Decision for you (OQ-400)" in
+                       screen(v, mark))[1], 1.0)
+        dt, s0 = time.time() - t0, screen(v, mark)
+        until(lambda: (v.pump(0.1), "searching" not in screen(v, mark))[1],
+              10)
+        v.pump(0.3)
+        s = screen(v, mark)
+        v.key(b"q")
+        v.close()
+        return dt, s0, s
+
+    config(script("lead_slow.py", "import json, sys, time\ntime.sleep(2)\n"
+                  "print(json.dumps({'title': 'Slow answer ' + "
+                  "sys.argv[-1]}))\n"))
+    dt, s0, s = slow()
+    check("#575 Refs row's card: a slow define_command, the lone lead-in "
+          "shows at once", dt < 1.0 and
+          re.search(r"Definition\n D5 Decision for you \(OQ-400\)", s0),
+          (dt, s0))
+    check("#575 Refs row's card: the slow command's answer then replaces "
+          "the lead-in", re.search(r"Definition\n Slow answer OQ-400 (·|-) "
+                                   r"your define_command\n", s) and
+          "D5 Decision for you" not in s, s)
+    p = dch("--xray", "xv-lc", "--ref", "OQ-400", "--json")
+    ls = [json.loads(l) for l in p.stdout.splitlines()]
+    check("#575 --ref: a lone lead-in goes out first as a lead line, the "
+          "slow command's answer stays the only definition",
+          [k for l in ls for k in l if k in ("lead", "definition")] ==
+          ["lead", "definition"] and
+          [l["lead"]["rule"] for l in ls if "lead" in l] == ["D5"] and
+          [l["definition"]["rule"] for l in ls if "definition" in l] ==
+          ["command"], p.stdout[-600:])
+    config(script("lead_slow_none.py", "import time\ntime.sleep(2)\n"))
+    dt, s0, s = slow()
+    check("#575 Refs row's card: a slow command that answers nothing, the "
+          "lead-in shows at once and stays", dt < 1.0 and
+          re.search(r"Definition\n D5 Decision for you \(OQ-400\)", s) and
+          "your define_command" not in s and "2 definitions" not in s,
+          (dt, s))
+    t0 = time.time()
+    p = dch("--xray", "xv-ld", "--ref", "OQ-302", "--json")
+    dt = time.time() - t0
+    check("#575 --ref: a ref with a D1 is unchanged under a slow command: "
+          "no lead line, no wait", dt < 1.0 and '"lead"' not in p.stdout and
+          [json.loads(l)["definition"]["rule"] for l in p.stdout.splitlines()
+           if '"definition"' in l] == ["D1"], (dt, p.stdout[-600:]))
     config(None)
 
 

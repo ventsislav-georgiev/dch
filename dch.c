@@ -13555,7 +13555,8 @@ xr_since_one(const char *path, const struct stat *st, int codex,
 ** as DCH_REF_KEY; never for a ref starting with '-' (xcmd_rows); each
 ** answer a definition of <n>'s, "source":"command", after a clean exit
 ** only (#412: xcmd_rows holds them); no answer, done's define_warn. After the files, before done: it runs only when they found
-** none (a lone D5 is none, #559), so a card's transcript definition never waits on it. */
+** none (a lone D5 is none, #559), so a card's transcript definition never waits on it;
+** a lone D5 goes out first as a "lead" line, so the card shows it meanwhile (#575). */
 static int
 xr_cmd_def(const char *line, void *arg)
 {
@@ -13588,10 +13589,13 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 	if ((set = dch_config_get("define_command", cmd, sizeof cmd)) < 0)
 		snprintf(warn, sizeof warn, "define_command: not a command line "
 		         "(the config line is over 1023 bytes)");
-	else if (set > 0 && cmd[0] &&
-	         xcmd_rows(XCMD_DEFINE, &c, xr_cmd_def, sc, &res) == 0)
-		snprintf(warn, sizeof warn, "%s", res.warn[0] ? res.warn
-		         : "define_command: no definition printed");
+	else if (set > 0 && cmd[0])
+	{
+		xr_scan_lead(sc);
+		if (xcmd_rows(XCMD_DEFINE, &c, xr_cmd_def, sc, &res) == 0)
+			snprintf(warn, sizeof warn, "%s", res.warn[0] ? res.warn
+			         : "define_command: no definition printed");
+	}
 	if (warn[0])
 		xr_scan_define_warn(sc, warn);
 builtin:
