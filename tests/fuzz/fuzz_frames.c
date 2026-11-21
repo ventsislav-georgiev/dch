@@ -4,7 +4,7 @@
 ** handle_packet hands it to (the RESPAWN argv, the WAIT pattern scan, the
 ** READ request incl. --follow's meta/since flags and X-ray's primary flag,
 ** ATTACH's scrollback, the PUSH stream's bracketed-paste state checked
-** against a plain search, #307) plus the resume blob's hex decoder; the
+** against a plain search, #307, and a passive client's focus_drop, #578) plus the resume blob's hex decoder; the
 ** same bytes as pty output go through track_decmode. Linked with the rest of dch minus
 ** master.o, and dch.c built with -Dmain=dch_main. */
 #include "../../master.c"
@@ -22,10 +22,20 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	size_t off = 0, linelen, pushed = 0, i;
 	unsigned char pm = 0, paste = 0, last = 0;
 	unsigned char *push = malloc(n + 1);	/* the pushes, end to end */
+	unsigned char *fd_out = malloc(n + 3);	/* what focus_drop let in */
+	unsigned char fo[PKT_MAX + 2];
+	struct client fc;
+	size_t fd_n = 0;
 	long fs;
 
-	if (!push)
+	if (!push || !fd_out)
+	{
+		free(push);
+		free(fd_out);
 		return 0;
+	}
+	memset(&fc, 0, sizeof fc);
+	fc.passive = 1;
 
 	/* the other direction: the child's pty output, scanned for DEC modes */
 	track_decmode(d, n);
@@ -56,6 +66,12 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 					last = push[i + 4] == '0';
 			if (paste != last || pm > 6)
 				abort();
+			/* #578: a passive client's pushes, held carry and all */
+			i = focus_drop(&fc, fo, payload, len);
+			if (fc.fcar_n > 2)
+				abort();
+			memcpy(fd_out + fd_n, fo, i);
+			fd_n += i;
 		}
 		else if (type == MSG_READ)
 		{
@@ -100,6 +116,14 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		}
 		off += (size_t)fs;
 	}
+	/* ...and its stream, carry included, never has a focus report */
+	memcpy(fd_out + fd_n, fc.fcar, fc.fcar_n);
+	fd_n += fc.fcar_n;
+	for (i = 0; i + 3 <= fd_n; i++)
+		if (fd_out[i] == '\033' && fd_out[i + 1] == '[' &&
+		    (fd_out[i + 2] == 'I' || fd_out[i + 2] == 'O'))
+			abort();
+	free(fd_out);
 	free(push);
 	return 0;
 }
