@@ -22,14 +22,16 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	size_t off = 0, linelen, pushed = 0, i;
 	unsigned char pm = 0, paste = 0, last = 0;
 	unsigned char *push = malloc(n + 1);	/* the pushes, end to end */
+	unsigned char *fd_cut = calloc(n + 3, 1);
 	unsigned char *fd_out = malloc(n + 3);	/* what focus_drop let in */
 	unsigned char fo[PKT_MAX + 2];
 	struct client fc;
 	size_t fd_n = 0;
 	long fs;
 
-	if (!push || !fd_out)
+	if (!push || !fd_out || !fd_cut)
 	{
+		free(fd_cut);
 		free(push);
 		free(fd_out);
 		return 0;
@@ -72,6 +74,10 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 				abort();
 			memcpy(fd_out + fd_n, fo, i);
 			fd_n += i;
+			/* a push's lone trailing ESC goes straight in (#585): a
+			** report split right there is not the master's to drop */
+			if (i && fo[i - 1] == '\033')
+				fd_cut[fd_n - 1] = 1;
 		}
 		else if (type == MSG_READ)
 		{
@@ -116,13 +122,15 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		}
 		off += (size_t)fs;
 	}
-	/* ...and its stream, carry included, never has a focus report */
+	/* ...and its stream, carry included, never has a focus report (bar a
+	** split at a lone ESC) */
 	memcpy(fd_out + fd_n, fc.fcar, fc.fcar_n);
 	fd_n += fc.fcar_n;
 	for (i = 0; i + 3 <= fd_n; i++)
 		if (fd_out[i] == '\033' && fd_out[i + 1] == '[' &&
-		    (fd_out[i + 2] == 'I' || fd_out[i + 2] == 'O'))
+		    (fd_out[i + 2] == 'I' || fd_out[i + 2] == 'O') && !fd_cut[i])
 			abort();
+	free(fd_cut);
 	free(fd_out);
 	free(push);
 	return 0;

@@ -131,8 +131,8 @@ struct client
 	/* #328: bytes of its input queued, from pty_in_total == in_from on */
 	size_t queued;
 	unsigned long long in_from;
-	/* #578: a passive client's trailing ESC / ESC [ held for a focus
-	** report split across two pushes, since fcar_at */
+	/* #578: a passive client's trailing ESC [ held for a focus report
+	** split across two pushes, since fcar_at */
 	unsigned char fcar[2], fcar_n;
 	struct timespec fcar_at;
 };
@@ -2000,19 +2000,20 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 	p->dropped += n;
 }
 
-/* ponytail: how long a passive client's trailing ESC / ESC [ waits for the
-** rest of a focus report; attach.c's FOCUS_HOLD_MS, same trade. Only a
-** passive client's pushes that END in one wait. */
+/* ponytail: how long a passive client's trailing ESC [ waits for the rest
+** of a focus report; attach.c's FOCUS_HOLD_MS, same trade. Only a passive
+** client's pushes that END in one wait. A lone ESC does not: attach.c holds
+** it already, so a hold here would stack on that (Esc + key read as Meta). */
 #define FOCUS_HOLD_MS	50
 
 /* A passive client's focus reports (#578): ESC [ I and ESC [ O are session
 ** state like its size, so they never reach the program. Puts the carry and
 ** b's n bytes in o (room for n + 2), takes the reports out (one the removal
-** closes up too, so none is left), holds a trailing ESC or ESC [ of a
-** passive client, and returns the length of what goes in.
-** shortcut: a held ESC goes in with the key after it, which the program may
-** read as Meta-key; attach.c's delay line if a passive client types Esc + key
-** within FOCUS_HOLD_MS. */
+** closes up too, so none is left), holds a trailing ESC [ of a passive
+** client, and returns the length of what goes in.
+** shortcut: a lone trailing ESC goes straight in, so a report split as
+** ESC | [I reaches the program, unless the client rejoins it as attach.c
+** does; hold it too if a client without that hold turns up. */
 static size_t
 focus_drop(struct client *p, unsigned char *o, const unsigned char *b,
            size_t n)
@@ -2032,9 +2033,7 @@ focus_drop(struct client *p, unsigned char *o, const unsigned char *b,
 		    (o[k - 1] == 'I' || o[k - 1] == 'O'))
 			k -= 3;
 	}
-	if (k && o[k - 1] == '\033')
-		p->fcar_n = 1;
-	else if (k >= 2 && o[k - 2] == '\033' && o[k - 1] == '[')
+	if (k >= 2 && o[k - 2] == '\033' && o[k - 1] == '[')
 		p->fcar_n = 2;
 	if (p->fcar_n)
 	{

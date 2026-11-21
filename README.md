@@ -3194,8 +3194,8 @@ takes the size at its next focus-in or window resize, not at once.
 A passive client's focus reports (`ESC [ I`, `ESC [ O`) never reach the
 program either: the master drops them, so a hidden view gaining or losing
 focus cannot tell a program with focus reporting on (Claude Code) that the
-user came or left. Its other input goes in as usual; a lone Esc at most 50 ms
-late (the master waits that long for a report's `[`). A client marked
+user came or left. Its other input goes in as usual; a lone Esc is not delayed
+(the master holds only a trailing `Esc [`, up to 50 ms). A client marked
 `--active` again does not replay a focus-in it sent while passive: send one
 after `--active` returns 0 if the view has focus.
 
