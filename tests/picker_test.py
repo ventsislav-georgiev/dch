@@ -592,7 +592,8 @@ def footshells():
           "and a background shell (%s)" % shells(s)[1],
           shells(s)[1].get("pkfg") == "1", s)
     # a shell with no result line yet is unknown, not foreground: asked again
-    # after 10 s, so a line landing after the first draw still counts (20 s:\n    # room for a loaded runner; mretry never asks again)
+    # after 10 s, so a line landing after the first draw still counts (20 s:
+    # room for a loaded runner; mretry never asks again)
     fake_claude("pkrl", "53353353-3533-4533-8533-533533533535",
                 ("l1",), ())
     s = wait_screen("pkf3", lambda s: "pkrl" in shells(s)[1])
@@ -848,8 +849,31 @@ def groupscroll():
                   mk[0] == ("Sessions", False, True) and
                   mk[-1] == ("History", True, False), mk)
         dch("-k", "pk18")
+    # 39 cols, tab 2 selected: the first-tab search counts the right marker
+    picker("pk18", "39x14", "NO_COLOR=1", "TERM=xterm-256color")
+    wait_screen("pk18", lambda s: "[Sessions" in s)
+    dch("--keys", "pk18", "tab", "tab")
+    s = wait_screen("pk18", lambda s: "[LongGroupName1" in s.split("\n")[0])
+    check("#580: 39 cols, tab 2 selected: whole, line 0 ends with \u203a",
+          "[LongGroupName1 1]" in s.split("\n")[0] and
+          s.split("\n")[0].rstrip().endswith("\u203a"), s.split("\n")[0])
+    dch("-k", "pk18")
     for k in range(8):
         dch("-k", "nw%d" % k)
+    # a 32-char name (the cap) at 30 cols: the selected tab is cut, not
+    # dropped, and keeps the cell of the right marker (NIT-VG1)
+    with open(ENV["DCH_CONFIG"], "w") as f:
+        f.write("group = %s = ^nw$\ngroup = Other = ^zz$\n" % ("W" * 32))
+    dch("--spawn", "nw", "--size", "80x24", "sh", "-c", "sleep 600")
+    picker("pk18", "30x14", "NO_COLOR=1", "TERM=xterm-256color")
+    wait_screen("pk18", lambda s: "[Sessions" in s)
+    dch("--keys", "pk18", "tab")
+    s = wait_screen("pk18", lambda s: "[WWW" in s.split("\n")[0])
+    l = s.split("\n")[0]
+    check("#580: 30 cols, a 32-char group selected: its start and \u203a "
+          "are on line 0", "[WWW" in l and "\u203a" in l, l)
+    dch("-k", "pk18")
+    dch("-k", "nw")
 
 
 def main():

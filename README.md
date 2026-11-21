@@ -302,7 +302,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.135.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.136.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -497,7 +497,7 @@ someone is watching is invisible to them.
 | `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe; a stdout closed from the start (`>&-`) exits 0 at once. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
-| `--passive <n> --pid <pid>` | Mark the client attached to the session from process `<pid>` passive (the master finds it by the pid the kernel recorded for its connection). A passive client still gets all output, and its input still goes in, but it never sets the session's size (no resize, no focus-in resize), counts in `--ls-json`'s `passive_clients`, not `clients`, and does not make the session busy: plain `dch` joins a session whose only clients are passive instead of starting `<name>-2`. `dch -a <n> --passive` (with `-E`, `--scrollback` as usual) attaches passive from the start. A `--restart` keeps the mark. Local attaches only: a remote attach (`host:name`) attaches active. | 0 ok, 1 no session, no attached client with that pid, or a master too old to know it |
+| `--passive <n> --pid <pid>` | Mark the client attached to the session from process `<pid>` passive (the master finds it by the pid the kernel recorded for its connection). A passive client still gets all output, and its input still goes in except its focus reports (`ESC [ I` / `ESC [ O`, dropped by the master: focus, like size, is the session's), but it never sets the session's size (no resize, no focus-in resize), counts in `--ls-json`'s `passive_clients`, not `clients`, and does not make the session busy: plain `dch` joins a session whose only clients are passive instead of starting `<name>-2`. `dch -a <n> --passive` (with `-E`, `--scrollback` as usual) attaches passive from the start. A `--restart` keeps the mark. Local attaches only: a remote attach (`host:name`) attaches active. | 0 ok, 1 no session, no attached client with that pid, or a master too old to know it |
 | `--active <n> --pid <pid>` | Undo `--passive`: the client counts and makes the session busy again, and follows the focus rules again. It does not take the size at once: its next focus-in or window resize does (see [The focused client sets the size](#the-focused-client-sets-the-size)). | 0 ok, 1 as for `--passive` |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
@@ -3190,6 +3190,14 @@ A passive client (`dch -a <name> --passive`, or `dch --passive <name> --pid
 focus-in send, and its attach replay is drawn at the session's size. When the
 only clients are passive the size stays as it was. Marked `--active` again, it
 takes the size at its next focus-in or window resize, not at once.
+
+A passive client's focus reports (`ESC [ I`, `ESC [ O`) never reach the
+program either: the master drops them, so a hidden view gaining or losing
+focus cannot tell a program with focus reporting on (Claude Code) that the
+user came or left. Its other input goes in as usual; a lone Esc at most 50 ms
+late (the master waits that long for a report's `[`). A client marked
+`--active` again does not replay a focus-in it sent while passive: send one
+after `--active` returns 0 if the view has focus.
 
 `DCH_FOCUS_RESIZE=0` (or `false`, `no`, `off`) in the client's environment,
 or `focus_resize = false`
