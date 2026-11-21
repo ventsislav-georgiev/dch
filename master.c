@@ -2024,8 +2024,9 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 #define FOCUS_HOLD_DEF	50
 
 /* DCH_FOCUS_HOLD_MS=<1..10000> sets the hold (tests only: a slow runner's
-** gap between two writes must not pass it). Read once at dch's start (main),
-** then unset so no child sees it. */
+** gap between two writes must not pass it). Read once at dch's start (main);
+** master_main unsets it, so the program and hooks never see it. The master
+** is the only reader: a --restart re-exec drops the knob (default 50 ms). */
 int
 focus_hold_ms(void)
 {
@@ -5222,6 +5223,7 @@ master_main(char **argv, int waitattach, int dontfork)
 	int s;
 	pid_t pid;
 
+	unsetenv("DCH_FOCUS_HOLD_MS");	/* main cached it; no child inherits */
 	/* Use a default redraw method if one hasn't been specified yet.
 	** WINCH, not CTRL_L: modern TUIs bind ^L to actions (Claude Code
 	** >=2.1.94 maps it to clear-input — a stray ^L on every attach showed
