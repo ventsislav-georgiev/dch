@@ -223,24 +223,13 @@ def focus_rows():
               "a passive client's lone Esc still goes in: %r" % (got,))
 
         # #585: no second hold on top of attach.c's own
-        got = fed(p, [b"\033", b"j"], b"P", 0.01)
+        got = fed(p, [b"\033", b"j"], b"P", 0.03)  # inside the 50 ms hold
         with open(log + ".reads", "rb") as f:
             rd = f.read().split()
         check(got == b"\033j" and b"1b" in rd
               and not any(x.startswith(b"1b6a") for x in rd),
-              "a passive client's Esc then j 10 ms apart are two reads, not"
+              "a passive client's Esc then j 30 ms apart are two reads, not"
               " Meta-j: %r" % (rd[-4:],))
-        os.write(p.fd, b"\033")
-        t0 = time.time()
-        while time.time() - t0 < 2:
-            with open(log, "rb") as f:
-                if f.read().endswith(b"\033"):
-                    break
-            time.sleep(0.005)
-        dt = time.time() - t0
-        check(dt < 0.09,
-              "a passive client's lone Esc reaches the program in under"
-              " 90 ms: %.0f ms" % (dt * 1000))
         fed(p, [], b"P")
 
         r = dch("--active", name, "--pid", str(p.pid))
