@@ -11317,10 +11317,14 @@ pick_session(const char *header, char *out, size_t outsz, int opens)
 	struct pk p;
 	int fd = open("/dev/tty", O_RDWR | O_CLOEXEC), rc = 1, k;
 
-	if (fd < 0)
+	if (fd < 0 || (opens && !isatty(STDIN_FILENO)))
 	{
-		/* Headless: list names so the caller can still see them. */
+		/* Headless: list names so the caller can still see them.
+		** Also when stdin is no tty: an Enter could not attach (#593). */
 		struct slist sl = {0};
+
+		if (fd >= 0)
+			close(fd);
 
 		list_sessions(&sl);
 		if (!sl.n)

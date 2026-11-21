@@ -904,6 +904,17 @@ def main():
           s.startswith("[Sessions ") and "q quit" in s, s)
     dch("-k", "pk0")
     wait_live("pk0", False)
+
+    # bare dch with a stdin that is no tty lists, it does not draw a picker
+    # whose Enter could not attach (#593)
+    dch("--spawn", "pk0n", "--size", "100x30", "sh", "-c",
+        '"$0" </dev/null; echo RC=$?; sleep 600', DCH)
+    s = wait_screen("pk0n", lambda s: "RC=" in s)
+    check("#593: bare dch with stdin from /dev/null lists, rc 0, no picker",
+          "RC=0" in s and "pk0n" in s and "[Sessions " not in s, s)
+    dch("-k", "pk0n")
+    wait_live("pk0n", False)
+    dch("--forget", "pk0n")
     dch("--forget", "pk0")  # no History tab yet: the tab rows below cycle
 
     # 1. tabs: no Sidekicks tab until a "-qa" session exists

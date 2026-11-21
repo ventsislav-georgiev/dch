@@ -65,6 +65,9 @@ The forms you'll use 90% of the time are bare `dch`, which opens the
 [session picker](#the-session-picker) exactly as `dch -l` does, and
 `dch <cmd>`, which auto-names the session from the current directory.
 `dch --` is the auto-named session with your default shell (`$SHELL`).
+Bare `dch` and `dch -l` with no terminal, or with a stdin that is not a
+terminal (`dch </dev/null`, cron, CI), print the session names (`no sessions`
+on stderr when there are none) and exit 0: no picker opens.
 
 ```sh
 cd ~/code/coolapp              # git repo, currently on branch "feat-auth"
