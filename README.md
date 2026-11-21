@@ -310,7 +310,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.142.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.143.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -3226,7 +3226,11 @@ A passive client's focus reports (`ESC [ I`, `ESC [ O`) never reach the
 program either: the master drops them, so a hidden view gaining or losing
 focus cannot tell a program with focus reporting on (Claude Code) that the
 user came or left. Its other input goes in as usual; a lone Esc is not delayed
-(the master holds only a trailing `Esc [`, up to 50 ms). A client marked
+(the master holds only a trailing `Esc [`, up to 50 ms). A passive
+client's focus reports never count as typing, so one arriving between a
+picker's Enter and its pick does not refuse the pick (#601). Limit: a run of
+more than eight `Alt-[` (`Esc [`) in one read from a passive client keeps the
+last eight (#599). A client marked
 `--active` again does not replay a focus-in it sent while passive: send one
 after `--active` returns 0 if the view has focus.
 

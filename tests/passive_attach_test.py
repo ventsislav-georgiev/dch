@@ -32,14 +32,14 @@ TMP = tempfile.mkdtemp(dir=os.environ.get("DCH_TEST_TMP", "/tmp"), prefix="dchpa
 ENV = dict(os.environ, XDG_RUNTIME_DIR=TMP, XDG_STATE_HOME=TMP + "/state",
            HOME=TMP + "/home", DCH_CONFIG=TMP + "/config",
            DCH_LOGIN_ENV="0", DCH_NO_REMOTE="1", SHELL="/bin/sh")
-for k in ("DCH_SOCKET_DIR", "DCH_SESSION"):
+for k in ("DCH_SOCKET_DIR", "DCH_SESSION", "DCH_FOCUS_HOLD_MS"):
     ENV.pop(k, None)
 SOCKDIR = os.path.join(TMP, "dch-%d" % os.getuid())
 fails = []
 
 
-def dch(*args):
-    return subprocess.run([DCH] + list(args), env=ENV, capture_output=True,
+def dch(*args, env=ENV):
+    return subprocess.run([DCH] + list(args), env=env, capture_output=True,
                           text=True, timeout=30)
 
 
@@ -163,14 +163,18 @@ with open(sys.argv[1], "ab", buffering=0) as f:
 '''
 
 
-def focus_rows():
-    """#578: a program with 1004 on records what it reads."""
-    name = "paf%d" % os.getpid()
+def focus_rows(slow):
+    """#578: a program with 1004 on records what it reads. slow: its master
+    holds a trailing ESC [ 2 s (#602: DCH_FOCUS_HOLD_MS), so the split rows
+    do not depend on a gap staying under the default 50 ms on a slow runner;
+    else the default hold, and a split with a longer pause gets through."""
+    name = "paf%s%d" % ("s" if slow else "d", os.getpid())
     rec, log = os.path.join(TMP, "rec.py"), os.path.join(TMP, "rec.log")
     with open(rec, "w") as f:
         f.write(REC)
     open(log, "wb").close()
-    r = dch("--spawn", name, "--size", "100x30", sys.executable, rec, log)
+    r = dch("--spawn", name, "--size", "100x30", sys.executable, rec, log,
+            env=dict(ENV, DCH_FOCUS_HOLD_MS="2000") if slow else ENV)
     check(r.returncode == 0, "focus spawn: rc=%d err=%r"
           % (r.returncode, r.stderr))
     seen = [0]
@@ -212,15 +216,21 @@ def focus_rows():
         check(got == b"",
               "1004 on: a passive client's focus-in/out never reach the"
               " program: %r" % (got,))
-        got = fed(q, [b"\033[", b"O"], b"Q", 0.01)
-        check(got == b"",
-              "a passive client's focus-out split across two pushes never"
-              " reaches the program: %r" % (got,))
-        # #599: a nested report split after ESC[ ESC[ (nightly fuzz_frames)
-        got = fed(q, [b"[I\033[\033[", b"II\0["], b"Q", 0.02)
-        check(got == b"[I\0[",
-              "a passive client's nested focus-in split after ESC[ ESC["
-              " never reaches the program: %r" % (got,))
+        if slow:
+            got = fed(q, [b"\033[", b"O"], b"Q", 0.01)
+            check(got == b"",
+                  "a passive client's focus-out split across two pushes never"
+                  " reaches the program: %r" % (got,))
+            # #599: a nested report split after ESC[ ESC[ (nightly fuzz_frames)
+            got = fed(q, [b"[I\033[\033[", b"II\0["], b"Q", 0.02)
+            check(got == b"[I\0[",
+                  "a passive client's nested focus-in split after ESC[ ESC["
+                  " never reaches the program: %r" % (got,))
+        else:
+            got = fed(q, [b"\033[", b"O"], b"Q", 0.3)
+            check(got == b"\033[O",
+                  "default hold: a passive client's focus-out split with a"
+                  " pause past the hold gets through: %r" % (got,))
         got = fed(p, [b"x\033[Iy"], b"P")
         check(got == b"xy",
               "a passive client's other input still reaches the program"
@@ -393,7 +403,8 @@ def main():
         srv.close()
         os.unlink(path)
 
-    focus_rows()
+    focus_rows(True)
+    focus_rows(False)
 
     shutil.rmtree(TMP, ignore_errors=True)
     print("%d failure(s)" % len(fails) if fails else "ok")

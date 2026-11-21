@@ -2021,7 +2021,25 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 ** of a focus report; attach.c's FOCUS_HOLD_MS, same trade. Only a passive
 ** client's pushes that END in one wait. A lone ESC does not: attach.c holds
 ** it already, so a hold here would stack on that (Esc + key read as Meta). */
-#define FOCUS_HOLD_MS	50
+#define FOCUS_HOLD_DEF	50
+
+/* DCH_FOCUS_HOLD_MS=<1..10000> sets the hold (tests only: a slow runner's
+** gap between two writes must not pass it). Read once at dch's start (main),
+** then unset so no child sees it. */
+int
+focus_hold_ms(void)
+{
+	static int ms;
+	const char *e;
+
+	if (!ms)
+	{
+		e = getenv("DCH_FOCUS_HOLD_MS");
+		ms = e && atoi(e) >= 1 && atoi(e) <= 10000 ? atoi(e) : FOCUS_HOLD_DEF;
+	}
+	return ms;
+}
+#define FOCUS_HOLD_MS	focus_hold_ms()
 
 /* A passive client's focus reports (#578): ESC [ I and ESC [ O are session
 ** state like its size, so they never reach the program. Puts the carry and
@@ -4197,19 +4215,23 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Push out data to the program. */
 	if (type == MSG_PUSH)
 	{
-		p->in_at = ++in_seq;
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
 			unsigned char o[PKT_MAX + FOCUS_CAR];
 			size_t n = focus_drop(p, o, payload, len);
 
+			/* #601: a passive push of only focus reports is not typing */
+			if (!p->passive || n || p->fcar_n)
+				p->in_at = ++in_seq;
 			if (n)
 			{
 				push_input(p, o, n);
 				dch_vt_input_seen(o, n);	/* §11.5, #302 */
 			}
 		}
+		else
+			p->in_at = ++in_seq;
 	}
 	/* the end of a dch --send (#307): did all of it go in */
 	else if (type == MSG_PUSH_END && p->role != ROLE_ATTACHED)

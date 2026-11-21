@@ -847,6 +847,11 @@ or a client or master older than 1.140.0) dch prints
 .I "already inside session; nesting disabled"
 and exits 1. Only the master can tell the client to switch, behind a secret
 the client gave it on attach; nothing printed in the session can.
+A passive client's focus reports
+.RB ( "ESC [ I" ", " "ESC [ O" )
+never count as typing, so one arriving after the pick's Enter does not refuse
+the pick. A passive client's run of more than eight Alt\-[ in one read keeps
+the last eight.
 .PP
 .B DCH_DOUBLE_TAP_MS
 sets that window in milliseconds (default

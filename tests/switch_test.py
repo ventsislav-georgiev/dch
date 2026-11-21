@@ -34,7 +34,7 @@ Covers, in order:
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
 """
-import os, sys, pty, signal, select, time, errno, re, subprocess, tempfile
+import os, sys, pty, signal, select, time, errno, re, subprocess, tempfile, threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -464,6 +464,38 @@ def main():
                 if "BBB_BRAVO" in out or reap(op, ofd, 0.2) is not None:
                     return fail("#600: the other active client was switched "
                                 "by the %s one's pick" % picker, out)
+            # #601: a passive client's focus report between the pick and its
+            # Enter is no typing, so the active terminal's Enter still picks
+            kill_client(spid, sfd)
+            spid, sfd = spawn_client(["-f", "-a", E])
+            drain(sfd, 3.0, b"EEE> ")
+            os.write(sfd, DCH.encode() + b"; echo R10=$?\r")
+            drain(sfd, 5.0, b"Sessions")
+            drain(sfd, 0.5)
+            os.write(sfd, b"/" + B.encode())
+            drain(sfd, 0.5)
+            kill_client(ppid, pfd)
+            ppid, pfd = spawn_client(["-E", "-a", E, "--passive"],
+                                    {"DCH_FOCUS_RESIZE": "0"})
+            drain(pfd, 3.0, b"EEE> ")
+            # (the pick is read after its Enter, so reports keep coming
+            # across that window: any one landing in it made it refused)
+            stop = threading.Event()
+
+            def focus_burst():
+                while not stop.is_set():
+                    os.write(pfd, b"\033[I")
+
+            burst = threading.Thread(target=focus_burst)
+            burst.start()
+            time.sleep(0.2)
+            os.write(sfd, b"\r")
+            landed = drain(sfd, 10.0, b"BBB_BRAVO")
+            stop.set()
+            burst.join()
+            if "BBB_BRAVO" not in landed or "nesting disabled" in landed:
+                return fail("#601: a passive client's focus report refused "
+                            "the active terminal's pick", landed)
         finally:
             kill_client(ppid, pfd)
             kill_client(epid, efd)
