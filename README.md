@@ -23,16 +23,16 @@ disconnect — and nothing else:
 - **No windows / panes / tabs.** If you want those, use tmux.
 - **One session per project.** Auto-named `<repo>-<branch>` when run from a
   git worktree, otherwise the directory basename.
-- **Attach is idempotent.** Run `dch` again from the same dir — it reattaches
+- **Attach is idempotent.** Run `dch <cmd>` (or `dch --`) again from the same dir — it reattaches
   the existing session instead of starting a duplicate. If another terminal
   is attached to it, you get the next free `<name>-2`, `<name>-3`, …; `-f`
   (or `-n <name>`) joins the busy one instead. A passive client (an app's
-  hidden pane, `dch -a <name> --passive`) does not make a session busy: `dch`
+  hidden pane, `dch -a <name> --passive`) does not make a session busy: `dch --`
   joins it, and the passive client stays attached as a silent extra.
 - **Survives client death.** The master daemon is split from the client, so
   killing the terminal window (crash, GUI quit, SSH drop) leaves the shell
-  alive. Open a new window and `dch` reattaches.
-- **A picker that acts.** `dch -l` shows every session's live state, agents
+  alive. Open a new window and `dch --` reattaches.
+- **A picker that acts.** `dch` (or `dch -l`) shows every session's live state, agents
   and PRs, ended sessions to resume, and the settings. See
   [The session picker](#the-session-picker).
 - **Agents can drive sessions headlessly.** Each session keeps an in-memory
@@ -61,8 +61,10 @@ disconnect — and nothing else:
 
 ## Examples
 
-The two forms you'll use 90% of the time are bare `dch` and `dch <cmd>` —
-both auto-name the session from the current directory.
+The forms you'll use 90% of the time are bare `dch`, which opens the
+[session picker](#the-session-picker) exactly as `dch -l` does, and
+`dch <cmd>`, which auto-names the session from the current directory.
+`dch --` is the auto-named session with your default shell (`$SHELL`).
 
 ```sh
 cd ~/code/coolapp              # git repo, currently on branch "feat-auth"
@@ -71,15 +73,16 @@ dch claude                     # → session "coolapp-feat-auth" if absent;
 
 # new terminal, or after detach:
 git checkout master
-dch                            # → DIFFERENT session: "coolapp-master" (branch is part of the name)
+dch --                         # → DIFFERENT session: "coolapp-master" (branch is part of the name)
 
 # new terminal, or after detach:
 cd /tmp/scratch                # not a git repo
-dch                            # → session "scratch", starts default shell
+dch --                         # → session "scratch", starts default shell
 
 dch -n release zsh             # → override auto-name; session "release"
 dch -ls                        # → list sessions: display-name (real-name), or real-name
-dch -l                         # → the picker: states, actions, history, filter (/), settings (,)
+dch                            # → the picker: states, actions, history, filter (/), settings (,)
+dch -l                         # → the same picker
 dch -rl                        # → pick one, type a new display name, repeat
 dch -k                         # → pick one and kill it
 dch -kl                        # → kill ALL sessions
@@ -120,8 +123,8 @@ Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 
 ### The session picker
 
-`dch -l`, `dch -k` / `dch -d` without a name, and the detach-key switch open
-the same full-screen picker, modelled on Prosper's Agent Island. Its tabs,
+Bare `dch`, `dch -l`, `dch -k` / `dch -d` without a name, and the detach-key
+switch open the same full-screen picker, modelled on Prosper's Agent Island. Its tabs,
 each with its count: **Sessions**; one tab per session group, named by it,
 in the config's order, shown only when it has sessions; and **History**.
 A group is a `group = <name> = <regex>` line in the [config
@@ -302,7 +305,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.138.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.139.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -358,7 +361,8 @@ it's the whole point of giving them dch.
 ## Cheatsheet
 
 ```sh
-dch              # attach the auto-named session, or create it
+dch              # session picker, as dch -l
+dch --           # attach the auto-named session, or create it
 dch <cmd...>     # same, but if new, run <cmd> in it
 dch -ls          # list sessions as alias/harness (real-name), or real-name
 dch -lj          # list as name<TAB>alias<TAB>activity_epoch
@@ -497,7 +501,7 @@ someone is watching is invisible to them.
 | `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe; a stdout closed from the start (`>&-`) exits 0 at once. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
-| `--passive <n> --pid <pid>` | Mark the client attached to the session from process `<pid>` passive (the master finds it by the pid the kernel recorded for its connection). A passive client still gets all output, and its input still goes in except its focus reports (`ESC [ I` / `ESC [ O`, dropped by the master: focus, like size, is the session's), but it never sets the session's size (no resize, no focus-in resize), counts in `--ls-json`'s `passive_clients`, not `clients`, and does not make the session busy: plain `dch` joins a session whose only clients are passive instead of starting `<name>-2`. `dch -a <n> --passive` (with `-E`, `--scrollback` as usual) attaches passive from the start. A `--restart` keeps the mark. Local attaches only: a remote attach (`host:name`) attaches active. | 0 ok, 1 no session, no attached client with that pid, or a master too old to know it |
+| `--passive <n> --pid <pid>` | Mark the client attached to the session from process `<pid>` passive (the master finds it by the pid the kernel recorded for its connection). A passive client still gets all output, and its input still goes in except its focus reports (`ESC [ I` / `ESC [ O`, dropped by the master: focus, like size, is the session's), but it never sets the session's size (no resize, no focus-in resize), counts in `--ls-json`'s `passive_clients`, not `clients`, and does not make the session busy: plain `dch --` joins a session whose only clients are passive instead of starting `<name>-2`. `dch -a <n> --passive` (with `-E`, `--scrollback` as usual) attaches passive from the start. A `--restart` keeps the mark. Local attaches only: a remote attach (`host:name`) attaches active. | 0 ok, 1 no session, no attached client with that pid, or a master too old to know it |
 | `--active <n> --pid <pid>` | Undo `--passive`: the client counts and makes the session busy again, and follows the focus rules again. It does not take the size at once: its next focus-in or window resize does (see [The focused client sets the size](#the-focused-client-sets-the-size)). | 0 ok, 1 as for `--passive` |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
@@ -2929,7 +2933,7 @@ is the exception, a flag that never takes one. Claude Code itself runs
 a one-word prompt that names one of its commands (`update`, `doctor`, `mcp`,
 …) as that command, `--` or not, so give such a prompt more words.
 
-A new session under a dead session's name — `dch` in the same repo after
+A new session under a dead session's name — `dch --` in the same repo after
 `dch --stop`, `dch work` again, `--revive other --as work` — would replace
 `work.json`. When that record still holds a Claude id (it ended `stopped`,
 `killed`, on a signal or `vanished` with Claude alive), the new master first
@@ -3131,7 +3135,7 @@ stored. A byte that is not UTF-8 (a Linux file name, say) is stored as
 U+FFFD, in every field, so the record always parses; `--revive` refuses one
 whose command, cwd or Claude launch holds U+FFFD (`not_utf8`, with the
 Claude id to resume by hand) rather than run something else. `DCH_NO_HISTORY=1` (any value but empty or `0`) in the environment a
-session is started from (`dch`, `dch --spawn`, `dch --revive`) keeps no
+session is started from (`dch --`, `dch --spawn`, `dch --revive`) keeps no
 record of it at all: the master writes nothing and prunes nothing under the
 state dir, so the session never shows in `--history` and cannot be revived.
 `--env` does not set it; that reaches only the session's program.
