@@ -224,14 +224,30 @@ def focus_rows():
         check(got == b"\033" and time.time() - t0 < 2,
               "a passive client's lone Esc still goes in: %r" % (got,))
 
-        # #585: no second hold on top of attach.c's own
-        got = fed(p, [b"\033", b"j"], b"P", 0.03)  # inside the 50 ms hold
-        with open(log + ".reads", "rb") as f:
-            rd = f.read().split()
-        check(got == b"\033j" and b"1b" in rd
+        # #585: no second hold on top of attach.c's own (50 ms). The Esc
+        # must reach the program before j exists, so a slow reader cannot
+        # merge them, and within 90 ms: attach.c's hold plus a master hold
+        # is >= 100. A loaded runner may blow it once, so any of 5 tries
+        # may pass.
+        def reads():
+            with open(log + ".reads", "rb") as f:
+                return f.read().split()
+
+        for _ in range(5):
+            n0 = len(reads())
+            t0 = time.time()
+            os.write(p.fd, b"\033")
+            while time.time() < t0 + DUE and reads()[n0:] != [b"1b"]:
+                time.sleep(0.001)
+            lat = time.time() - t0
+            got = fed(p, [b"j"], b"P")
+            rd = reads()[n0:]
+            if lat < 0.09 and got == b"\033j" and rd[:1] == [b"1b"]:
+                break
+        check(lat < 0.09 and got == b"\033j" and rd[:1] == [b"1b"]
               and not any(x.startswith(b"1b6a") for x in rd),
-              "a passive client's Esc then j 30 ms apart are two reads, not"
-              " Meta-j: %r" % (rd[-4:],))
+              "a passive client's lone Esc reaches the program on its own,"
+              " not held: %.0f ms %r" % (lat * 1000, rd))
         fed(p, [], b"P")
 
         r = dch("--active", name, "--pid", str(p.pid))
