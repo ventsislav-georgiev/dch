@@ -478,7 +478,7 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
             time.sleep(0.3)
         # the background probe fetches the host's history, the next
         # reload shows it
-        s = until(lambda: row in rows(screen(pk)) and screen(pk), 15)
+        s = until(lambda: row in rows(screen(pk)) and screen(pk), 15) or ""
         for _ in range(10):
             s = screen(pk)
             r, c = rows(s), cur(s)
@@ -495,13 +495,13 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
     check("srv:gone selected", cur(screen("pk1")) == "srv:gone",
           screen("pk1"))
     dch(cenv, "--keys", "pk1", "p")
-    s = until(lambda: "another host" in screen("pk1") and screen("pk1"), 5)
+    s = until(lambda: "another host" in screen("pk1") and screen("pk1"), 5) or ""
     check("p on a remote row says what works there",
           "srv:gone: on another host; Enter resumes it there" in (s or ""), s)
     dch(cenv, "--keys", "pk1", "Enter")
     want = "dch: srv: does not support --revive (needs dch serve " \
            "--allow-create)"
-    s = until(lambda: want in screen("pk1") and screen("pk1"), 15)
+    s = until(lambda: want in screen("pk1") and screen("pk1"), 15) or ""
     check("Enter on it without --allow-create there: the gate's refusal "
           "in one line", want in (s or ""), s)
     dch(cenv, "-k", "pk1")
@@ -514,7 +514,7 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
     s = open_on("pk2", ["--hosts", "srv=127.0.0.1:%d" % port])
     dch(cenv, "--keys", "pk2", "Enter")
     s = until(lambda: "Resumed as srv:gone" in screen("pk2")
-              and screen("pk2"), 30)
+              and screen("pk2"), 30) or ""
     check("Enter with --allow-create there: Resumed as srv:gone, live there",
           "Resumed as srv:gone" in s and "gone" in
           dch(senv, "-ls").stdout.split(), (s, dch(senv, "-ls").stdout))
@@ -548,7 +548,7 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
     n0 = host_attaches()
     dch(cenv, "--keys", "pk5", "o")
     ok = until(lambda: host_attaches() > n0, 30)
-    s = until(lambda: "HOST-MARK" in screen("pk5") and screen("pk5"), 10)
+    s = until(lambda: "HOST-MARK" in screen("pk5") and screen("pk5"), 10) or ""
     check("o on host srv's og with a local srv:og running: revived there, "
           "the host's og attached, the local srv:og no client (#248)",
           ok and s and "LOCAL-MARK" not in s and local_clients() == [0],
@@ -628,7 +628,7 @@ def twin_checks(dch, check, cenv, fake, until):
             break
         dch(cenv, "--keys", pk, "tab")
         time.sleep(0.3)
-    s = until(lambda: any(map(remote_row, lines(screen()))) and screen(), 15)
+    s = until(lambda: any(map(remote_row, lines(screen()))) and screen(), 15) or ""
     rows = [ROW_RE.match(x).group(2) for x in lines(s or "")]
     check("History: the local tw:gone and host tw's gone, tw:aaa among the "
           "local rows (before zz), no row for a record with a key twice",
@@ -658,7 +658,7 @@ def twin_checks(dch, check, cenv, fake, until):
     s = screen()
     check("... and still there 3.5 s later", remote_row(cur(s)), s)
     dch(cenv, "--keys", pk, "p")
-    s = until(lambda: "another host" in screen() and screen(), 5)
+    s = until(lambda: "another host" in screen() and screen(), 5) or ""
     h = [x for x in json.loads(dch(cenv, "--history", "--json").stdout)
          if x.get("name") == "tw:gone"]
     check("p there says it is on another host and pins no local record",
@@ -714,13 +714,13 @@ def stale_route_checks(dch, check, cenv, fake, until):
     until(lambda: "History" in screen())
     ok = tab_to("History") and go_row("lh:lr")
     dch(cenv, "--keys", pk, "o")
-    s = until(lambda: "Resumed as lh:xxx" in screen() and screen(), 15)
+    s = until(lambda: "Resumed as lh:xxx" in screen() and screen(), 15) or ""
     check("o on lh:lr, revived as a name too long to attach: said, the "
           "picker stays", ok and s and "--revive" in
           [b["argv"][0] for b in hf.bodies], (ok, hf.bodies, s or screen()))
     ok = tab_to("Sessions") and go_row("lh:loc")
     dch(cenv, "--keys", pk, "Enter")
-    s = until(lambda: "LOCAL-MARK" in screen() and screen(), 10)
+    s = until(lambda: "LOCAL-MARK" in screen() and screen(), 10) or ""
     check("... then Enter on the local lh:loc attaches it here, no host "
           "route left by the revive (#248)", ok and s and [
               x.get("clients") for x in json.loads(dch(cenv, "--ls-json")
