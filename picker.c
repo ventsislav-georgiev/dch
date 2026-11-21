@@ -1486,8 +1486,14 @@ pk_tabs(const struct pk *p)
 			if (t != p->tab && pk_col + pk_tabw(p, t, pk_col) +
 			    (t < last) > pk_w)
 				break;
+			/* a selected tab cut at the line's edge leaves the
+			** right marker's cell (QA 1.131.0 NIT-VG1) */
+			if (t == p->tab && t < last)
+				pk_w--;
 			pk_tab(pk_tname(p, t), pk_pos(p, t, p->n[t]),
 			       t == p->tab);
+			if (t == p->tab && t < last)
+				pk_w++;
 			e = t;
 		}
 	if (e < last)
