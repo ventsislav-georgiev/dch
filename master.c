@@ -50,6 +50,10 @@ struct pty
 	struct winsize ws;
 };
 
+/* A passive client's held run of ESC [ (#599): bytes, a whole number of
+** them */
+#define FOCUS_CAR	16
+
 /* A connected client */
 struct client
 {
@@ -142,7 +146,7 @@ struct client
 	unsigned long long in_from;
 	/* #578: a passive client's trailing ESC [ held for a focus report
 	** split across two pushes, since fcar_at */
-	unsigned char fcar[2], fcar_n;
+	unsigned char fcar[FOCUS_CAR], fcar_n;
 	struct timespec fcar_at;
 };
 
@@ -2021,9 +2025,12 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 
 /* A passive client's focus reports (#578): ESC [ I and ESC [ O are session
 ** state like its size, so they never reach the program. Puts the carry and
-** b's n bytes in o (room for n + 2), takes the reports out (one the removal
-** closes up too, so none is left), holds a trailing ESC [ of a passive
-** client, and returns the length of what goes in.
+** b's n bytes in o (room for n + FOCUS_CAR), takes the reports out (one the
+** removal closes up too, so none is left), holds a passive client's trailing
+** run of ESC [ whole (#599: the next push's I or O closes each of them up in
+** turn, so none may have gone in already), and returns the length of what
+** goes in. Past FOCUS_CAR the run's older ESC [ are dropped: each is cut off
+** by the next ESC, no sequence to the program.
 ** shortcut: a lone trailing ESC goes straight in, so a report split as
 ** ESC | [I reaches the program, unless the client rejoins it as attach.c
 ** does; hold it too if a client without that hold turns up. */
@@ -2031,7 +2038,7 @@ static size_t
 focus_drop(struct client *p, unsigned char *o, const unsigned char *b,
            size_t n)
 {
-	size_t i, k = 0;
+	size_t i, k = 0, c;
 
 	memcpy(o, p->fcar, p->fcar_n);
 	memcpy(o + p->fcar_n, b, n);
@@ -2046,15 +2053,15 @@ focus_drop(struct client *p, unsigned char *o, const unsigned char *b,
 		    (o[k - 1] == 'I' || o[k - 1] == 'O'))
 			k -= 3;
 	}
-	if (k >= 2 && o[k - 2] == '\033' && o[k - 1] == '[')
-		p->fcar_n = 2;
-	if (p->fcar_n)
+	for (c = k; c >= 2 && o[c - 2] == '\033' && o[c - 1] == '['; c -= 2)
+		;
+	if (c < k)
 	{
-		k -= p->fcar_n;
-		memcpy(p->fcar, o + k, p->fcar_n);
+		p->fcar_n = k - c < FOCUS_CAR ? (unsigned char)(k - c) : FOCUS_CAR;
+		memcpy(p->fcar, o + k - p->fcar_n, p->fcar_n);
 		clock_gettime(CLOCK_MONOTONIC, &p->fcar_at);
 	}
-	return k;
+	return c;
 }
 
 /* One pty output buffer: track modes, queue to attached clients, feed the
@@ -4194,7 +4201,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
-			unsigned char o[PKT_MAX + 2];
+			unsigned char o[PKT_MAX + FOCUS_CAR];
 			size_t n = focus_drop(p, o, payload, len);
 
 			if (n)

@@ -24,7 +24,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	unsigned char *push = malloc(n + 1);	/* the pushes, end to end */
 	unsigned char *fd_cut = calloc(n + 3, 1);
 	unsigned char *fd_out = malloc(n + 3);	/* what focus_drop let in */
-	unsigned char fo[PKT_MAX + 2];
+	unsigned char fo[PKT_MAX + FOCUS_CAR];
 	struct client fc;
 	size_t fd_n = 0;
 	long fs;
@@ -70,7 +70,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 				abort();
 			/* #578: a passive client's pushes, held carry and all */
 			i = focus_drop(&fc, fo, payload, len);
-			if (fc.fcar_n > 2)
+			if (fc.fcar_n > FOCUS_CAR || fc.fcar_n % 2)
 				abort();
 			memcpy(fd_out + fd_n, fo, i);
 			fd_n += i;
