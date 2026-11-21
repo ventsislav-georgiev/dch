@@ -467,7 +467,7 @@ nesting disabled` (exit 1), when no switchable client is attached there: a
 headless session, a picker run with `--run`/`--spawn`, only a passive client
 (`--passive`) or a `-E` one (dch serve's, Prosper's), a session you are
 attached to from another host through `dch serve`, a client or master older
-than 1.139.0, or a master `--restart`ed from one. Only the master can tell
+than 1.140.0, or a master `--restart`ed from one. Only the master can tell
 your client to switch, behind a secret your client gave it on attach; nothing
 a program prints in the session can.
 

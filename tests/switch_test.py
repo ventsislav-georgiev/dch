@@ -22,7 +22,8 @@ Covers, in order:
      passive client is never switched, and with no active client the
      nesting refusal stays; -a, -n, -- inside it are refused, never a
      switch (#594); a second active client (-f) that did not type the
-     Enter stays on the session (#595).
+     Enter stays on the session (#595), and once made passive at runtime
+     (--passive --pid) its own pick switches nothing (#596).
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -352,8 +353,11 @@ def main():
                     "SECOND_" + D not in sout:
                 return fail("#595: the active client that did not pick was "
                             "switched too", sout)
-            kill_client(spid, sfd)
-            spid = None
+            # (b') made passive at runtime (#596): it keeps its key, the
+            # master alone must skip it
+            rp = dch("--passive", D, "--pid", str(spid))
+            if rp.returncode:
+                return fail("#596: --passive --pid failed", rp.stderr)
             # its own switch loop goes on: double tap opens the picker
             os.write(fd, DETACH)
             time.sleep(0.05)
@@ -366,13 +370,19 @@ def main():
             if reap(pid, fd, 5.0) is None:
                 return fail("#591: q in the picker did not leave")
             pid = None
-            # (d) only the passive client left: the refusal stays
-            os.write(pfd, DCH.encode() + b" -n " + B.encode() +
-                     b"; echo INNER2_RC=$?\r")
-            out = drain(pfd, 5.0, b"INNER2_RC=") + drain(pfd, 0.5)
-            if "nesting disabled" not in out or "INNER2_RC=1" not in out:
-                return fail("#591: no active client, but no nesting "
-                            "refusal", out)
+            # (d) only passive clients left, one of them keyed and made
+            # passive at runtime: its own pick of B is refused (#596)
+            os.write(sfd, DCH.encode() + b"; echo INNER2_RC=$?\r")
+            drain(sfd, 5.0, b"Sessions")
+            drain(sfd, 0.5)
+            os.write(sfd, b"/" + B.encode())
+            drain(sfd, 0.5)
+            os.write(sfd, b"\r")
+            out = drain(sfd, 5.0, b"INNER2_RC=1") + drain(sfd, 0.5)
+            if "nesting disabled" not in out or "INNER2_RC=1" not in out or \
+                    "BBB_BRAVO" in out or reap(spid, sfd, 0.2) is not None:
+                return fail("#596: a client made passive at runtime was "
+                            "switched, or no nesting refusal", out)
         finally:
             kill_client(ppid, pfd)
             kill_client(spid, sfd)
