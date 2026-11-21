@@ -26,7 +26,10 @@ Covers, in order:
      (--passive --pid) its own pick switches nothing (#596);
   9. the pick's Enter from a source that cannot switch (dch --keys, a
      passive client, a -E client) after the active terminal typed the rest
-     moves nothing and the inner dch is refused (#598).
+     moves nothing and the inner dch is refused (#598); a --keys pick
+     with an active client that never typed is refused; of two active
+     clients only the one that types the pick switches, the newer or the
+     older (#600).
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -394,8 +397,22 @@ def main():
         pid, fd = spawn_client(["-n", E, "env", "PS1=EEE> ", "sh", "-i"])
         if "EEE> " not in drain(fd, 10.0, b"EEE> "):
             return fail("#598: session E's shell never prompted")
+        # #600: a --keys pick while the only active client never typed
+        dch("--run", E, "%s; echo R0=$?" % DCH)
+        if dch("--wait", E, "--match", "Sessions",
+               "--timeout", "5000").returncode:
+            return fail("#600: the picker inside E never opened")
+        dch("--send", E, "/" + B)
+        time.sleep(0.5)
+        dch("--keys", E, "enter")
+        out = drain(fd, 5.0, b"R0=") + drain(fd, 0.5)
+        if "nesting disabled" not in out or "R0=1" not in out or \
+                "BBB_BRAVO" in out or reap(pid, fd, 0.2) is not None:
+            return fail("#600: a --keys pick switched an active client that "
+                        "never typed", out)
         ppid, pfd = spawn_client(["-a", E, "--passive"])
         epid, efd = spawn_client(["-E", "-a", E])
+        spid, sfd = None, None
         try:
             drain(pfd, 3.0, b"EEE> ")
             drain(efd, 3.0, b"EEE> ")
@@ -423,9 +440,34 @@ def main():
                     return fail("#598: the pick's Enter from %s moved the "
                                 "active terminal, or no nesting refusal"
                                 % who, out)
+            # #600: of two active clients the one that types the whole
+            # pick switches, the other stays on E: the newer one (-f)
+            # picks, then the older one next to a newer, so neither list
+            # order lets "the first keyed client" pass
+            for picker, newer in (("newer", True), ("older", False)):
+                kill_client(spid, sfd)
+                spid, sfd = spawn_client(["-f", "-a", E])
+                drain(sfd, 3.0, b"EEE> ")
+                tfd, op, ofd = (sfd, pid, fd) if newer else (fd, spid, sfd)
+                os.write(tfd, DCH.encode() + b"; echo R9=$?\r")
+                drain(tfd, 5.0, b"Sessions")
+                drain(tfd, 0.5)
+                os.write(tfd, b"/" + B.encode())
+                drain(tfd, 0.5)
+                drain(ofd, 0.2)
+                os.write(tfd, b"\r")
+                landed = drain(tfd, 10.0, b"BBB_BRAVO")
+                out = drain(ofd, 0.5)
+                if "BBB_BRAVO" not in landed or "nesting disabled" in landed:
+                    return fail("#600: the %s active client's pick did not "
+                                "switch it" % picker, landed)
+                if "BBB_BRAVO" in out or reap(op, ofd, 0.2) is not None:
+                    return fail("#600: the other active client was switched "
+                                "by the %s one's pick" % picker, out)
         finally:
             kill_client(ppid, pfd)
             kill_client(epid, efd)
+            kill_client(spid, sfd)
 
         print("PASS: double tap switches sessions, single tap detaches; "
               "detach_key = switch swaps them; the picker inside a "
