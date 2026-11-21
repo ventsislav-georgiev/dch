@@ -497,13 +497,13 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
     dch(cenv, "--keys", "pk1", "p")
     s = until(lambda: "another host" in screen("pk1") and screen("pk1"), 5)
     check("p on a remote row says what works there",
-          "srv:gone: on another host; Enter resumes it there" in s, s)
+          "srv:gone: on another host; Enter resumes it there" in (s or ""), s)
     dch(cenv, "--keys", "pk1", "Enter")
     want = "dch: srv: does not support --revive (needs dch serve " \
            "--allow-create)"
     s = until(lambda: want in screen("pk1") and screen("pk1"), 15)
     check("Enter on it without --allow-create there: the gate's refusal "
-          "in one line", want in s, s)
+          "in one line", want in (s or ""), s)
     dch(cenv, "-k", "pk1")
 
     port = serve_at(os.path.join(tmp, "serve-create.log"), "--allow-create")
