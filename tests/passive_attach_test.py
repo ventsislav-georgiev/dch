@@ -23,7 +23,7 @@ import os, sys, json, time, fcntl, struct, termios, socket
 import shutil, signal, tempfile, threading, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
+DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 DUE = 20.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 5.0
 MSG_ACK = 11
 
@@ -86,10 +86,12 @@ class Client:
     def __init__(self, argv, cols, rows_, cwd=None, env=None):
         self.pid, self.fd = os.forkpty()
         if self.pid == 0:
-            if cwd:
-                os.chdir(cwd)
-            os.execve(DCH, [DCH] + argv, env or ENV)
-            os._exit(127)
+            try:	# a failed exec must not run the parent's finally: it kills p
+                if cwd:
+                    os.chdir(cwd)
+                os.execve(DCH, [DCH] + argv, env or ENV)
+            finally:
+                os._exit(127)
         set_size(self.fd, cols, rows_)
         threading.Thread(target=self._drain, daemon=True).start()
 
