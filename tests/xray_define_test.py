@@ -972,6 +972,8 @@ REPLIES = [("assistant", "Decision for you (OQ-185):\n- a) ship it\n- b) wait"
            ("assistant", "**Open (OQ-345):\nbody"),
            ("assistant", "> Quote (OQ-346):\n> first\n>\n> after"),
            ("assistant", "* **Mix** *x* (OQ-347):\nbody"),
+           ("assistant", "**a *b* c** (OQ-348):\nbody"),
+           ("assistant", "**Bold* (OQ-349):\nbody"),
            ("assistant", "Decision A (OQ-301):\nbody one"),
            ("assistant", "Decision B (OQ-301):\nbody two"),
            ("assistant", "Later lead (OQ-306):\nweak body"),
@@ -1107,6 +1109,10 @@ def test_lead_in():
           ti("OQ-347") == ["Mix *x* (OQ-347)"], defs("OQ-340"))
     check("#586 guard: a fully wrapped lead-in stays clean",
           ti("OQ-344") == ["Decision (OQ-344)"], defs("OQ-344"))
+    check("#586 a nested pair strips the outer markers, the inner one stays",
+          ti("OQ-348") == ["a *b* c (OQ-348)"], defs("OQ-348"))
+    check("#586 mismatched marker lengths stay as written",
+          ti("OQ-349") == ["**Bold* (OQ-349)"], defs("OQ-349"))
     check("#586 an unmatched leading run stays as written",
           ti("OQ-345") == ["**Open (OQ-345)"], defs("OQ-345"))
     check("#586 a bare \">\" ends the quoted passage like a blank line",

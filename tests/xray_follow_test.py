@@ -816,7 +816,8 @@ def test_follow_cadence():
         ts = [t for t, _ in ran()]
         check("cadence: a changed answer brings its next run in at the base "
               "(0.5 s or more under the gap before it)",
-              len(ts) > c + 1 and ts[c + 1] - ts[c] <= g[5] - 0.5,
+              len(ts) > c + 1 and len(g) >= 6 and
+              ts[c + 1] - ts[c] <= g[5] - 0.5,
               (c, g, ts[c:c + 2]))
 
         # a batch, right after a run at the longest gap again
