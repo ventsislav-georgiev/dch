@@ -10,6 +10,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#ifdef __linux__
+#include <sys/random.h>
+#endif
 #include "ring.h"
 
 #ifndef MAP_ANONYMOUS
@@ -46,15 +49,24 @@ ring_parse_size(const char *v)
 	return (long)((n + RING_CHUNK - 1) / RING_CHUNK * RING_CHUNK);
 }
 
-static void
+/* 0: buf is from the system's randomness; -1: the time^pid fallback,
+** fine for a base or an id, never for a secret (#596) */
+static int
 rand_bytes(void *buf, size_t n)
 {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 	arc4random_buf(buf, n);
+	return 0;
 #else
-	int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-	ssize_t got = fd >= 0 ? read(fd, buf, n) : -1;
+	int fd;
+	ssize_t got;
 
+#ifdef __linux__
+	if (getrandom(buf, n, 0) == (ssize_t)n)	/* no fd: works in a chroot */
+		return 0;
+#endif
+	fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+	got = fd >= 0 ? read(fd, buf, n) : -1;
 	if (fd >= 0)
 		close(fd);
 	if (got != (ssize_t)n)
@@ -72,7 +84,9 @@ rand_bytes(void *buf, size_t n)
 			s = s * 6364136223846793005ull + 1442695040888963407ull;
 			b[i] = (unsigned char)(s >> 56);
 		}
+		return -1;
 	}
+	return 0;
 #endif
 }
 
@@ -100,6 +114,24 @@ ring_session_id(char out[18])
 		out[2 + i * 2] = d[b[i] & 15];
 	}
 	out[17] = '\0';
+}
+
+int
+ring_secret_hex(char out[33])
+{
+	static const char d[] = "0123456789abcdef";
+	unsigned char b[16];
+	int i;
+
+	if (rand_bytes(b, sizeof b) < 0)
+		return -1;
+	for (i = 0; i < 16; i++)
+	{
+		out[i * 2] = d[b[i] >> 4];
+		out[i * 2 + 1] = d[b[i] & 15];
+	}
+	out[32] = '\0';
+	return 0;
 }
 
 static unsigned char *

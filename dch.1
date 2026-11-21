@@ -826,11 +826,18 @@ open the picker in that session's terminal; choosing another session makes the
 client attached there leave this session and attach the chosen one. This
 session keeps running, its shell back at the prompt; the inner
 .B dch
-exits 0. With no switchable client attached (a headless session, a passive or
+exits 0. Only a pick switches:
+.BR "dch \-a" ,
+.BR "dch \-n" ,
+.B dch \-\-
+and a command inside a session are refused as before.
+Only the client that typed last, the one that made the pick, switches; another
+client attached to the session stays.
+With no switchable client attached (a headless session, a passive or
 .B \-E
 client only, an attach from another host through
 .BR "dch serve" ,
-or a client or master older than 1.139.0) dch prints
+or a client or master older than 1.140.0) dch prints
 .I "already inside session; nesting disabled"
 and exits 1. Only the master can tell the client to switch, behind a secret
 the client gave it on attach; nothing printed in the session can.

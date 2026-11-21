@@ -84,6 +84,9 @@ struct client
 	** secret (the blob's swkey line). */
 	char swkey[DCH_SWKEY_LEN + 1];
 	int swclose;
+	/* #595: in_seq at its last MSG_PUSH (0 none): only the client that
+	** typed last, the picker's Enter, takes a switch */
+	unsigned long long in_at;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
 	** receives framed responses on the same socket attached clients
@@ -4182,6 +4185,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Push out data to the program. */
 	if (type == MSG_PUSH)
 	{
+		static unsigned long long in_seq;
+
+		p->in_at = ++in_seq;
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
@@ -4452,15 +4458,16 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	}
 
 	/* #591: a picker inside the session chose another. On an attached
-	** connection the client registers its secret. On a control one each
-	** keyed active client gets the name behind its secret as its last
-	** output and stops getting the pty's (so nothing the program prints
-	** can follow it); the main loop's flush then closes it. */
+	** connection the client registers its secret. On a control one the
+	** keyed active client that typed last (#595: the picker's Enter, not
+	** another terminal on the session) gets the name behind its secret as
+	** its last output and stops getting the pty's (so nothing the program
+	** prints can follow it); the main loop's flush then closes it. */
 	else if (type == MSG_SWITCH)
 	{
 		static const char hex[] = "0123456789abcdef";
 		char osc[sizeof DCH_SWITCH_OSC + DCH_SWKEY_LEN + PKT_MAX + 2];
-		struct client *c;
+		struct client *c, *to = NULL;
 		unsigned int k;
 		int n, hit = 0;
 
@@ -4485,17 +4492,19 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			return queue_status(p, MSG_ACK, DCH_ST_ERR);
 		for (c = clients; c; c = c->next)
 		{
-			if (c->role != ROLE_ATTACHED || !c->attached ||
-			    c->viewing || c->passive || !c->swkey[0])
-				continue;
-			n = snprintf(osc, sizeof osc, DCH_SWITCH_OSC "%s;%.*s\a",
-			             c->swkey, (int)len, (const char *)payload);
-			if (n <= 0 || (size_t)n >= sizeof osc ||
-			    queue_to_client(c, (const unsigned char *)osc,
-			                    (size_t)n) < 0)
-				continue;
-			c->attached = 0;
-			c->swclose = 1;
+			if (c->role == ROLE_ATTACHED && c->attached &&
+			    !c->viewing && !c->passive && c->swkey[0] &&
+			    c->in_at && (!to || c->in_at > to->in_at))
+				to = c;
+		}
+		n = to ? snprintf(osc, sizeof osc, DCH_SWITCH_OSC "%s;%.*s\a",
+		                  to->swkey, (int)len, (const char *)payload) : 0;
+		if (n > 0 && (size_t)n < sizeof osc &&
+		    queue_to_client(to, (const unsigned char *)osc,
+		                    (size_t)n) == 0)
+		{
+			to->attached = 0;
+			to->swclose = 1;
 			hit = 1;
 		}
 		dch_trace("switch len=%u hit=%d", len, hit);

@@ -310,7 +310,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.140.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.141.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -459,12 +459,15 @@ terminal you are attached from: your `dch` client leaves this session and
 attaches the chosen one, as the double press does. The session you were in
 keeps running with its shell back at the prompt (the inner `dch` exits 0).
 A History row's `Shift-Enter` / `o` resumes the session and then switches the
-same way. Nothing switches, and dch says `dch: already inside session '<n>';
+same way. Only a pick switches: `dch -a <name>`, `dch -n <name>`, `dch --`
+and `dch <command>` inside a session never move your terminal; they are
+refused as before. Only the terminal that typed last (the one that made the
+pick) switches; another terminal attached to the session stays. Nothing switches, and dch says `dch: already inside session '<n>';
 nesting disabled` (exit 1), when no switchable client is attached there: a
 headless session, a picker run with `--run`/`--spawn`, only a passive client
 (`--passive`) or a `-E` one (dch serve's, Prosper's), a session you are
 attached to from another host through `dch serve`, a client or master older
-than 1.139.0, or a master `--restart`ed from one. Only the master can tell
+than 1.140.0, or a master `--restart`ed from one. Only the master can tell
 your client to switch, behind a secret your client gave it on attach; nothing
 a program prints in the session can.
 

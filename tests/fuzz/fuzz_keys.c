@@ -11,8 +11,8 @@
 ** tail: a hit is the input's end, its name printable and inside the cap,
 ** and never with a key the bytes do not carry. switch_hold (#591) is the
 ** start of a handover still to come: held bytes are a suffix, and the
-** read loop's hold + tail logic never emits a handover byte, and emits all
-** else in order. */
+** read loop's step (switch_step, attach.c's own) never emits a handover
+** byte, and emits all else in order. */
 #include "../../attach.c"
 #include "../../picker.h"
 #include <stdint.h>
@@ -21,41 +21,29 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
 static const char hkey[] = "0123456789abcdef0123456789abcdef";
 
-/* The read loop's hold + tail logic over two reads: what it writes into
+/* attach.c's read-loop step over two reads: what it writes into
 ** out (cap: n), 1 when it switched. Held bytes at the end are flushed. */
 static int
 hold_sim(const uint8_t *d, size_t n, size_t cut, uint8_t *out, size_t *on)
 {
 	uint8_t comb[sizeof swhold + 2 * 4096];
-	size_t at, c, total, keep, h, o = 0;
-	char name[sizeof attach_to];
+	size_t c, emit, o = 0;
 
+	snprintf(swkey, sizeof swkey, "%s", hkey);
 	swtail_n = swhold_n = 0;
 	for (c = 0; c < 2; c++)
 	{
 		const uint8_t *b = d + (c ? cut : 0);
 		size_t len = c ? n - cut : cut;
+		size_t h = switch_step(b, len, comb, &emit);
 
-		memcpy(comb, swhold, swhold_n);
-		memcpy(comb + swhold_n, b, len);
-		total = swhold_n + len;
-		swhold_n = 0;
-		swtail_add(b, len);
-		h = switch_tail(swtail, swtail_n, hkey, name, sizeof name);
+		memcpy(out + o, comb, emit);
+		o += emit;
 		if (h)
 		{
-			memcpy(out + o, comb, total - h);
-			*on = o + total - h;
+			*on = o;
 			return 1;
 		}
-		keep = switch_hold(swtail, swtail_n, hkey);
-		if (keep > total)
-			abort();
-		memcpy(swhold, comb + total - keep, keep);
-		swhold_n = keep;
-		at = total - keep;
-		memcpy(out + o, comb, at);
-		o += at;
 	}
 	memcpy(out + o, swhold, swhold_n);	/* restore_term's flush */
 	*on = o + swhold_n;

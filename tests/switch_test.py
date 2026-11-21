@@ -20,7 +20,10 @@ Covers, in order:
      terminal attached there, the session keeps running with its shell
      back at the prompt; the session's own output cannot trigger that, a
      passive client is never switched, and with no active client the
-     nesting refusal stays.
+     nesting refusal stays; -a, -n, -- inside it are refused, never a
+     switch (#594); a second active client (-f) that did not type the
+     Enter stays on the session (#595), and once made passive at runtime
+     (--passive --pid) its own pick switches nothing (#596).
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -31,6 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 TAG = "sw%d" % os.getpid()
 A, B, C, D = TAG + "a", TAG + "b", TAG + "c", TAG + "d"
+NOSUCH, NEWN = TAG + "x", TAG + "n"	# #594: never created
 DETACH = b"\x1c"
 SOCKDIR = os.path.join(tempfile.mkdtemp(prefix="dchswitch"), "sock")
 SWAPCFG = os.path.join(os.path.dirname(SOCKDIR), "config")
@@ -289,10 +293,29 @@ def main():
         if "FORGED_OK" not in out or "BBB_BRAVO" in out or \
                 reap(pid, fd, 0.3) is not None:
             return fail("#591: printed bytes switched the client", out)
+        # #594: only a pick switches; -a, -n and -- inside D are refused
+        # and leave the terminal on D
+        for n, cmd in enumerate(("-a " + NOSUCH,
+                                 "-n " + NEWN + " sh -c 'echo X'",
+                                 "-- true")):
+            os.write(fd, b"%s %s; echo R%d=$?\r" % (DCH.encode(),
+                                                     cmd.encode(), n))
+            out = drain(fd, 5.0, b"R%d=1" % n) + drain(fd, 0.3)
+            if "nesting disabled" not in out or "R%d=1" % n not in out or \
+                    reap(pid, fd, 0.3) is not None:
+                return fail("#594: dch %s inside D was not refused" % cmd,
+                            out)
+        if [f for f in os.listdir(SOCKDIR)
+                if f.startswith(NOSUCH) or f.startswith(NEWN)]:
+            return fail("#594: a refused attach inside D created a session",
+                        os.listdir(SOCKDIR))
         # (b) a passive client on D rides along, never switched
         ppid, pfd = spawn_client(["-a", D, "--passive"])
+        # #595: a second active client, which never types the Enter
+        spid, sfd = spawn_client(["-f", "-a", D])
         try:
             drain(pfd, 3.0, b"DDD> ")
+            drain(sfd, 3.0, b"DDD> ")
             # a --restart carries the client's secret (the release flow)
             rs = dch("--restart", D)
             if rs.returncode:
@@ -323,6 +346,18 @@ def main():
             pout = drain(pfd, 1.0)
             if reap(ppid, pfd, 0.2) is not None or "BBB_BRAVO" in pout:
                 return fail("#591: the passive client was switched", pout)
+            # #595: the other active client is still on D, getting its output
+            os.write(sfd, b"echo SECOND_$DCH_SESSION\r")
+            sout = drain(sfd, 5.0, ("SECOND_" + D).encode())
+            if reap(spid, sfd, 0.2) is not None or "BBB_BRAVO" in sout or \
+                    "SECOND_" + D not in sout:
+                return fail("#595: the active client that did not pick was "
+                            "switched too", sout)
+            # (b') made passive at runtime (#596): it keeps its key, the
+            # master alone must skip it
+            rp = dch("--passive", D, "--pid", str(spid))
+            if rp.returncode:
+                return fail("#596: --passive --pid failed", rp.stderr)
             # its own switch loop goes on: double tap opens the picker
             os.write(fd, DETACH)
             time.sleep(0.05)
@@ -335,15 +370,22 @@ def main():
             if reap(pid, fd, 5.0) is None:
                 return fail("#591: q in the picker did not leave")
             pid = None
-            # (d) only the passive client left: the refusal stays
-            os.write(pfd, DCH.encode() + b" -n " + B.encode() +
-                     b"; echo INNER2_RC=$?\r")
-            out = drain(pfd, 5.0, b"INNER2_RC=") + drain(pfd, 0.5)
-            if "nesting disabled" not in out or "INNER2_RC=1" not in out:
-                return fail("#591: no active client, but no nesting "
-                            "refusal", out)
+            # (d) only passive clients left, one of them keyed and made
+            # passive at runtime: its own pick of B is refused (#596)
+            os.write(sfd, DCH.encode() + b"; echo INNER2_RC=$?\r")
+            drain(sfd, 5.0, b"Sessions")
+            drain(sfd, 0.5)
+            os.write(sfd, b"/" + B.encode())
+            drain(sfd, 0.5)
+            os.write(sfd, b"\r")
+            out = drain(sfd, 5.0, b"INNER2_RC=1") + drain(sfd, 0.5)
+            if "nesting disabled" not in out or "INNER2_RC=1" not in out or \
+                    "BBB_BRAVO" in out or reap(spid, sfd, 0.2) is not None:
+                return fail("#596: a client made passive at runtime was "
+                            "switched, or no nesting refusal", out)
         finally:
             kill_client(ppid, pfd)
+            kill_client(spid, sfd)
 
         print("PASS: double tap switches sessions, single tap detaches; "
               "detach_key = switch swaps them; the picker inside a "
@@ -351,7 +393,7 @@ def main():
         return 0
     finally:
         kill_client(pid, fd)
-        for s in (A, B, C, D):
+        for s in (A, B, C, D, NOSUCH, NEWN):
             dch("-k", s)
 
 

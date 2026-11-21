@@ -71,6 +71,9 @@ long ring_parse_size(const char *v);
 /* A fresh random 48-bit seq base, and a session id "m" + 16 hex. */
 uint64_t ring_seq_base(void);
 void ring_session_id(char out[18]);
+/* 32 hex of 128 random bits, a secret (#591's switch key): 0, or -1 when
+** the system has no randomness to give (out is then unset). */
+int ring_secret_hex(char out[33]);
 
 /* 0, or -1 (no memory: the ring stays off). cap 0 = off. */
 int ring_init(struct dch_ring *r, size_t cap, uint64_t seq_base);

@@ -237,6 +237,38 @@ swtail_add(const unsigned char *b, size_t n)
 	memcpy(swtail + swtail_n, b, n);
 	swtail_n += n;
 }
+
+/* One read of the master's stream, in a keyed attach: comb gets the held
+** bytes then buf's. A handover at its end: its length, and *emit what goes
+** out before it. Else 0, *emit the bytes to write, and a trailing start of a
+** split handover is held in swhold. The read loop's step, for the fuzzer. */
+static size_t
+switch_step(const unsigned char *buf, size_t len, unsigned char *comb,
+            size_t *emit)
+{
+	size_t h, total, keep;
+
+	/* held bytes first: they are the stream's older end */
+	memcpy(comb, swhold, swhold_n);
+	memcpy(comb + swhold_n, buf, len);
+	total = swhold_n + len;
+	swhold_n = 0;
+	swtail_add(buf, len);
+	h = switch_tail(swtail, swtail_n, swkey, attach_to, sizeof attach_to);
+	if (h)
+	{
+		*emit = total > h ? total - h : 0;	/* its start went out: timer */
+		return h;
+	}
+	/* a split handover's start waits for the next read */
+	keep = switch_hold(swtail, swtail_n, swkey);
+	if (keep > total)
+		keep = total;
+	memcpy(swhold, comb + total - keep, keep);
+	swhold_n = keep;
+	*emit = total - keep;
+	return 0;
+}
 const char *(*attach_lost)(int *code);
 int (*attach_detached)(void);
 int (*attach_xray)(void);
@@ -1281,13 +1313,10 @@ attach_main(int noerror)
 	swkey[0] = '\0';
 	swtail_n = 0;
 	swhold_n = 0;
-	if (detach_char >= 0 && !dch_attach_passive && attach_sock < 0)
+	/* no real randomness (#596): no key, so this attach is never switched */
+	if (detach_char >= 0 && !dch_attach_passive && attach_sock < 0 &&
+	    ring_secret_hex(swkey) == 0)
 	{
-		char a[18], b[18];
-
-		ring_session_id(a);
-		ring_session_id(b);
-		snprintf(swkey, sizeof swkey, "%.16s%.16s", a + 1, b + 1);
 		pkt.type = MSG_SWITCH;
 		pkt.len = DCH_SWKEY_LEN;
 		memcpy(pkt.u.buf, swkey, DCH_SWKEY_LEN);
@@ -1467,35 +1496,21 @@ attach_main(int noerror)
 			olen = len;
 			if (swkey[0])
 			{
-				size_t h, total, keep;
+				size_t emit;
 
-				/* held bytes first: they are the stream's older end */
-				memcpy(comb, swhold, swhold_n);
-				memcpy(comb + swhold_n, buf, (size_t)len);
-				total = swhold_n + (size_t)len;
-				swhold_n = 0;
-				swtail_add(buf, (size_t)len);
-				h = switch_tail(swtail, swtail_n, swkey, attach_to,
-				                sizeof attach_to);
-				if (h)
+				if (switch_step(buf, (size_t)len, comb, &emit))
 				{
-					if (total > h)
-						write_buf_or_fail(1, comb, total - h);
+					if (emit)
+						write_buf_or_fail(1, comb, emit);
 					dch_trace("client switch handed: %s",
 					          attach_to);
 					restore_term();
 					close(s);
 					return ATTACH_TO;
 				}
-				/* a split handover's start waits for the next read */
-				keep = switch_hold(swtail, swtail_n, swkey);
-				if (keep > total)
-					keep = total;
-				memcpy(swhold, comb + total - keep, keep);
-				swhold_n = keep;
 				swhold_t = mono_us();
 				out = comb;
-				olen = (ssize_t)(total - keep);
+				olen = (ssize_t)emit;
 			}
 			/* Send the data to the terminal. The inner program
 			** turning its 1004 off turns ours off too: back on. */
