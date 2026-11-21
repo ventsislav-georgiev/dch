@@ -226,28 +226,32 @@ def focus_rows():
 
         # #585: no second hold on top of attach.c's own (50 ms). The Esc
         # must reach the program before j exists, so a slow reader cannot
-        # merge them, and within 90 ms: attach.c's hold plus a master hold
-        # is >= 100. A loaded runner may blow it once, so any of 5 tries
-        # may pass.
+        # merge them. Its latency is timed against an active client's Esc
+        # on the same reader, so load cancels: a master hold adds ~50 ms to
+        # the passive one only. Any of 5 tries may pass.
         def reads():
             with open(log + ".reads", "rb") as f:
                 return f.read().split()
 
-        for _ in range(5):
+        def esc_ms(c, mark):
             n0 = len(reads())
             t0 = time.time()
-            os.write(p.fd, b"\033")
+            os.write(c.fd, b"\033")
             while time.time() < t0 + DUE and reads()[n0:] != [b"1b"]:
                 time.sleep(0.001)
-            lat = time.time() - t0
-            got = fed(p, [b"j"], b"P")
-            rd = reads()[n0:]
-            if lat < 0.09 and got == b"\033j" and rd[:1] == [b"1b"]:
+            lat = (time.time() - t0) * 1000
+            return lat, fed(c, [b"j"], mark), reads()[n0:]
+
+        for _ in range(5):
+            am, _g, _r = esc_ms(a, b"A")
+            pm, got, rd = esc_ms(p, b"P")
+            if pm <= am + 30 and got == b"\033j" and rd[:1] == [b"1b"]:
                 break
-        check(lat < 0.09 and got == b"\033j" and rd[:1] == [b"1b"]
+        check(pm <= am + 30 and got == b"\033j" and rd[:1] == [b"1b"]
               and not any(x.startswith(b"1b6a") for x in rd),
               "a passive client's lone Esc reaches the program on its own,"
-              " not held: %.0f ms %r" % (lat * 1000, rd))
+              " not held: passive %.0f ms vs active %.0f ms %r"
+              % (pm, am, rd))
         fed(p, [], b"P")
 
         r = dch("--active", name, "--pid", str(p.pid))
