@@ -91,6 +91,11 @@ tty_stop_arm(int fd, const struct termios *t)
 
 static pid_t term_pid;	/* the client: attach_main's process */
 
+/* #591: output held back because it may be the start of the master's
+** handover (switch_hold); restore_term puts it out if none came. */
+static unsigned char swhold[sizeof DCH_SWITCH_OSC + DCH_SWKEY_LEN + 512];
+static size_t swhold_n;
+
 static void
 restore_term(void)
 {
@@ -99,6 +104,13 @@ restore_term(void)
 	** stays the view's */
 	if (getpid() != term_pid)
 		return;
+	if (swhold_n)
+	{
+		ssize_t r = write(1, swhold, swhold_n);
+
+		(void)r;
+		swhold_n = 0;
+	}
 	/* disarmed after: a SIGTSTP that cuts the drain short (a terminal
 	** reading nothing) puts these modes on itself (QA 1.65.0 LOW-V22) */
 	dch_trace("client restore");
@@ -167,6 +179,38 @@ switch_tail(const unsigned char *t, size_t n, const char *key, char *name,
 	memcpy(name, t + j, e - j);
 	name[e - j] = '\0';
 	return n - (i - 1);
+}
+
+/* How many trailing bytes of b[0..n) could still become a handover with this
+** key: from an ESC, every byte matches DCH_SWITCH_OSC key ; then printable
+** name bytes, no BEL yet, and short enough to fit swtail. 0 when none. Pure,
+** for the fuzzer: these bytes are held back, not written, until it is clear. */
+static size_t
+switch_hold(const unsigned char *b, size_t n, const char *key)
+{
+	size_t pl = sizeof DCH_SWITCH_OSC - 1, kl = strlen(key), i, j, m;
+
+	for (i = n >= sizeof swtail ? n - sizeof swtail + 1 : 0; i < n; i++)
+	{
+		if (b[i] != 033)
+			continue;
+		m = n - i;
+		for (j = 0; j < m && j < pl + kl + 1; j++)
+		{
+			unsigned char want = j < pl ? (unsigned char)DCH_SWITCH_OSC[j] :
+			                     j < pl + kl ? (unsigned char)key[j - pl] : ';';
+
+			if (b[i + j] != want)
+				break;
+		}
+		if (j < m && j < pl + kl + 1)
+			continue;
+		for (; j < m && b[i + j] >= 0x20 && b[i + j] != 0x7f; j++)
+			;
+		if (j == m)
+			return m;
+	}
+	return 0;
 }
 
 /* Keep the stream's last sizeof swtail bytes. */
@@ -1232,6 +1276,7 @@ attach_main(int noerror)
 	** serve's and Prosper's clients), not passive, not remote. */
 	swkey[0] = '\0';
 	swtail_n = 0;
+	swhold_n = 0;
 	if (detach_char >= 0 && !dch_attach_passive && attach_sock < 0)
 	{
 		char a[18], b[18];
@@ -1373,7 +1418,8 @@ attach_main(int noerror)
 		/* Pty activity */
 		if (n > 0 && FD_ISSET(s, &readfds))
 		{
-			ssize_t len = read(s, buf, sizeof(buf));
+			ssize_t len = read(s, buf, sizeof(buf)), olen;
+			unsigned char comb[sizeof swhold + BUFSIZE], *out;
 
 			if (len <= 0 && attach_lost)
 				lost();
@@ -1399,28 +1445,44 @@ attach_main(int noerror)
 			}
 			/* The master's handover is its last output (#591):
 			** what came before it goes out, then attach_to. */
+			out = buf;
+			olen = len;
 			if (swkey[0])
 			{
-				size_t h;
+				size_t h, total, keep;
 
+				/* held bytes first: they are the stream's older end */
+				memcpy(comb, swhold, swhold_n);
+				memcpy(comb + swhold_n, buf, (size_t)len);
+				total = swhold_n + (size_t)len;
+				swhold_n = 0;
 				swtail_add(buf, (size_t)len);
 				h = switch_tail(swtail, swtail_n, swkey, attach_to,
 				                sizeof attach_to);
 				if (h)
 				{
-					if ((size_t)len > h)
-						write_buf_or_fail(1, buf, len - h);
+					if (total > h)
+						write_buf_or_fail(1, comb, total - h);
 					dch_trace("client switch handed: %s",
 					          attach_to);
 					restore_term();
 					close(s);
 					return ATTACH_TO;
 				}
+				/* a split handover's start waits for the next read */
+				keep = switch_hold(swtail, swtail_n, swkey);
+				if (keep > total)
+					keep = total;
+				memcpy(swhold, comb + total - keep, keep);
+				swhold_n = keep;
+				out = comb;
+				olen = (ssize_t)(total - keep);
 			}
 			/* Send the data to the terminal. The inner program
 			** turning its 1004 off turns ours off too: back on. */
-			write_buf_or_fail(1, buf, len);
-			if (focus_on && focus_scan(buf, len))
+			if (olen > 0)
+				write_buf_or_fail(1, out, olen);
+			if (focus_on && olen > 0 && focus_scan(out, olen))
 				write_buf_or_fail(1, "\033[?1004h", 8);
 			n--;
 		}
