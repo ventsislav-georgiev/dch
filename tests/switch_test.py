@@ -15,7 +15,12 @@ Covers, in order:
      detach; with DCH_DOUBLE_TAP_MS=0 one press opens the picker at once;
   7. a switch from a session this same client created (#109): the spawn
      left DCH_SESSION set in the client, so the next attach hit the nesting
-     refusal and dch exited to the shell. The new session still gets it.
+     refusal and dch exited to the shell. The new session still gets it;
+  8. the picker inside a session (#591): Enter on another switches the
+     terminal attached there, the session keeps running with its shell
+     back at the prompt; the session's own output cannot trigger that, a
+     passive client is never switched, and with no active client the
+     nesting refusal stays.
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -25,7 +30,7 @@ import os, sys, pty, signal, select, time, errno, re, subprocess, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 TAG = "sw%d" % os.getpid()
-A, B, C = TAG + "a", TAG + "b", TAG + "c"
+A, B, C, D = TAG + "a", TAG + "b", TAG + "c", TAG + "d"
 DETACH = b"\x1c"
 SOCKDIR = os.path.join(tempfile.mkdtemp(prefix="dchswitch"), "sock")
 SWAPCFG = os.path.join(os.path.dirname(SOCKDIR), "config")
@@ -108,7 +113,7 @@ def picker_rows(text):
     rows = []
     # The picker positions each line with CUP rather than newlines.
     for line in re.split(r"\n|\x1b\[\d+;1H", text):
-        m = re.search(r"(%s[abc])" % TAG, line)
+        m = re.search(r"(%s[abcd])" % TAG, line)
         if m and m.group(1) not in rows:
             rows.append(m.group(1))
     return rows
@@ -272,12 +277,81 @@ def main():
         kill_client(pid, fd)
         pid = None
 
+        # 8. The picker inside a session switches its terminal (#591).
+        pid, fd = spawn_client(["-n", D, "env", "PS1=DDD> ", "sh", "-i"])
+        if "DDD> " not in drain(fd, 10.0, b"DDD> "):
+            return fail("#591: session D's shell never prompted")
+        # (c) the session's output, the handover's shape with a key it
+        # cannot know, switches nothing
+        os.write(fd, b"printf '\\033]5911;0123456789abcdef0123456789abcd"
+                     b"ef;%s\\a'; echo FORGED_OK\r" % B.encode())
+        out = drain(fd, 5.0, b"FORGED_OK\r\n") + drain(fd, 0.5)
+        if "FORGED_OK" not in out or "BBB_BRAVO" in out or \
+                reap(pid, fd, 0.3) is not None:
+            return fail("#591: printed bytes switched the client", out)
+        # (b) a passive client on D rides along, never switched
+        ppid, pfd = spawn_client(["-a", D, "--passive"])
+        try:
+            drain(pfd, 3.0, b"DDD> ")
+            # a --restart carries the client's secret (the release flow)
+            rs = dch("--restart", D)
+            if rs.returncode:
+                return fail("#591: --restart of D failed", rs.stderr)
+            drain(fd, 1.0)
+            # (a) bare dch inside D: Enter on B
+            os.write(fd, DCH.encode() + b"; echo INNER_RC=$?\r")
+            out = drain(fd, 5.0, b"Sessions") + drain(fd, 0.5)
+            rows = picker_rows(out)
+            if B not in rows:
+                return fail("#591: the picker inside D did not list B",
+                            rows, out)
+            # the "/" filter (#096) selects B: rows move as they update
+            os.write(fd, b"/" + B.encode())
+            drain(fd, 0.5)
+            os.write(fd, b"\r")
+            landed = drain(fd, 10.0, b"BBB_BRAVO")
+            if "BBB_BRAVO" not in landed or "nesting disabled" in landed:
+                return fail("#591: Enter on B inside D did not switch the "
+                            "terminal to B", landed)
+            time.sleep(0.5)
+            scr = dch("--read", D)
+            if scr.returncode or "INNER_RC=0" not in scr.stdout or \
+                    not scr.stdout.rstrip().endswith("DDD>"):
+                return fail("#591: D is not live at its prompt with the "
+                            "inner dch exited 0", scr.stdout, scr.stderr)
+            # the passive client is still on D
+            pout = drain(pfd, 1.0)
+            if reap(ppid, pfd, 0.2) is not None or "BBB_BRAVO" in pout:
+                return fail("#591: the passive client was switched", pout)
+            # its own switch loop goes on: double tap opens the picker
+            os.write(fd, DETACH)
+            time.sleep(0.05)
+            os.write(fd, DETACH)
+            out = drain(fd, 5.0, b"Sessions")
+            if "Sessions" not in out:
+                return fail("#591: double tap after the switch did not "
+                            "open the picker", out)
+            os.write(fd, b"q")
+            if reap(pid, fd, 5.0) is None:
+                return fail("#591: q in the picker did not leave")
+            pid = None
+            # (d) only the passive client left: the refusal stays
+            os.write(pfd, DCH.encode() + b" -n " + B.encode() +
+                     b"; echo INNER2_RC=$?\r")
+            out = drain(pfd, 5.0, b"INNER2_RC=") + drain(pfd, 0.5)
+            if "nesting disabled" not in out or "INNER2_RC=1" not in out:
+                return fail("#591: no active client, but no nesting "
+                            "refusal", out)
+        finally:
+            kill_client(ppid, pfd)
+
         print("PASS: double tap switches sessions, single tap detaches; "
-              "detach_key = switch swaps them.")
+              "detach_key = switch swaps them; the picker inside a "
+              "session switches its terminal.")
         return 0
     finally:
         kill_client(pid, fd)
-        for s in (A, B, C):
+        for s in (A, B, C, D):
             dch("-k", s)
 
 

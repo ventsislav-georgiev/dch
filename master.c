@@ -78,6 +78,12 @@ struct client
 	** --restart carries the flag (the blob's passive line). */
 	int passive;
 	long peer;
+	/* #591: the secret its MSG_SWITCH registered ("" none: it cannot
+	** switch sessions), and the picker's choice went out behind it: the
+	** connection closes once that is flushed. A --restart carries the
+	** secret (the blob's swkey line). */
+	char swkey[DCH_SWKEY_LEN + 1];
+	int swclose;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
 	** receives framed responses on the same socket attached clients
@@ -3191,6 +3197,7 @@ struct resume_state
 	size_t cinlen[RESUME_MAX_CLI];
 	unsigned char cview[RESUME_MAX_CLI];	/* its view was up */
 	unsigned char cpassive[RESUME_MAX_CLI];	/* it was passive (#566) */
+	char ckey[RESUME_MAX_CLI][DCH_SWKEY_LEN + 1];	/* its swkey (#591) */
 	int ncfd;
 	unsigned char *snap;
 	size_t snaplen;
@@ -3330,6 +3337,8 @@ restart_save(const char *path, int lfd, int ackfd, int ringfd, int core)
 			fprintf(f, "view %d\n", p->fd);
 		if (p->passive)
 			fprintf(f, "passive %d\n", p->fd);
+		if (p->swkey[0])
+			fprintf(f, "swkey %d %s\n", p->fd, p->swkey);
 	}
 
 	/* Drop the snapshot rather than write one the loader will reject: past
@@ -3503,6 +3512,20 @@ restart_load(void)
 				if (resume.cfd[i] == cfd)
 					resume.cpassive[i] = 1;
 			continue;
+		}
+		{
+			char k[DCH_SWKEY_LEN + 1];
+			int i;
+
+			if (sscanf(line, "swkey %d %32[0-9a-f]", &cfd, k) == 2)
+			{
+				for (i = 0; i < resume.ncfd; i++)
+					if (resume.cfd[i] == cfd &&
+					    strlen(k) == DCH_SWKEY_LEN)
+						memcpy(resume.ckey[i], k,
+						       sizeof k);
+				continue;
+			}
 		}
 		if (strncmp(line, "dec ", 4) == 0)
 		{
@@ -4428,6 +4451,57 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		return queue_status(p, MSG_ACK, hit ? DCH_ST_OK : DCH_ST_ERR);
 	}
 
+	/* #591: a picker inside the session chose another. On an attached
+	** connection the client registers its secret. On a control one each
+	** keyed active client gets the name behind its secret as its last
+	** output and stops getting the pty's (so nothing the program prints
+	** can follow it); the main loop's flush then closes it. */
+	else if (type == MSG_SWITCH)
+	{
+		static const char hex[] = "0123456789abcdef";
+		char osc[sizeof DCH_SWITCH_OSC + DCH_SWKEY_LEN + PKT_MAX + 2];
+		struct client *c;
+		unsigned int k;
+		int n, hit = 0;
+
+		if (p->role == ROLE_ATTACHED)
+		{
+			for (k = 0; k < len && payload[k] &&
+			            strchr(hex, payload[k]); k++)
+				;
+			if (len == DCH_SWKEY_LEN && k == len)
+			{
+				memcpy(p->swkey, payload, len);
+				p->swkey[len] = '\0';
+			}
+			return 0;
+		}
+		p->role = ROLE_CONTROL;
+		/* it goes into a terminal's stream: no control bytes */
+		for (k = 0; k < len && payload[k] >= 0x20 && payload[k] != 0x7f;
+		     k++)
+			;
+		if (!len || k < len || len >= 512)
+			return queue_status(p, MSG_ACK, DCH_ST_ERR);
+		for (c = clients; c; c = c->next)
+		{
+			if (c->role != ROLE_ATTACHED || !c->attached ||
+			    c->viewing || c->passive || !c->swkey[0])
+				continue;
+			n = snprintf(osc, sizeof osc, DCH_SWITCH_OSC "%s;%.*s\a",
+			             c->swkey, (int)len, (const char *)payload);
+			if (n <= 0 || (size_t)n >= sizeof osc ||
+			    queue_to_client(c, (const unsigned char *)osc,
+			                    (size_t)n) < 0)
+				continue;
+			c->attached = 0;
+			c->swclose = 1;
+			hit = 1;
+		}
+		dch_trace("switch len=%u hit=%d", len, hit);
+		return queue_status(p, MSG_ACK, hit ? DCH_ST_OK : DCH_ST_ERR);
+	}
+
 	/* A verb this master does not know — i.e. the client is NEWER than the
 	** session. Say so instead of going silent: silence costs the client its
 	** whole inactivity deadline and can only be guessed at afterwards. Never
@@ -4656,6 +4730,7 @@ master_adopt(void)
 		p->attached = p->armed = 1;
 		p->viewing = resume.cview[i];
 		p->passive = resume.cpassive[i];
+		memcpy(p->swkey, resume.ckey[i], sizeof p->swkey);
 		p->role = ROLE_ATTACHED;
 		/* Half-read frame from before the exec. Without it the next
 		** read() lands mid-packet and the stream desyncs for good. */
@@ -5091,7 +5166,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		for (p = clients; p; p = next)
 		{
 			next = p->next;
-			if (p->outoff < p->outlen && flush_client(p) < 0)
+			if ((p->outoff < p->outlen && flush_client(p) < 0) ||
+			    (p->swclose && p->outoff >= p->outlen))
 				remove_client(p);
 		}
 	}

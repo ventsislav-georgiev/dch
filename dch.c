@@ -109,7 +109,8 @@ packet_payload_len(const struct packet *pkt)
 	    pkt->type == MSG_READ || pkt->type == MSG_WAIT ||
 	    pkt->type == MSG_RESTART || pkt->type == MSG_RESPAWN ||
 	    pkt->type == MSG_CMD || pkt->type == MSG_RING_READ ||
-	    pkt->type == MSG_RESTART_CAPS || pkt->type == MSG_PASSIVE)
+	    pkt->type == MSG_RESTART_CAPS || pkt->type == MSG_PASSIVE ||
+	    pkt->type == MSG_SWITCH)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -3007,7 +3008,8 @@ usage(void)
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Switch: Ctrl-\\ twice quickly — detach and pick another session.\n"
 	    "        detach_key = switch swaps the two (one press: the picker).\n"
-	    "Nesting refused inside an existing dch session.\n");
+	    "Inside a session, a pick switches the attached terminal to it\n"
+	    "        (no attached client: refused, never nested).\n");
 }
 
 /* ---- subcommand: server-only sentinel ------------------------------- */
@@ -3205,6 +3207,7 @@ static const char stuck_fmt[] = "dch: " STUCK_MSG "\n";
 
 static int attach_xray_view(void);
 static int passive_clients_on(const char *path);
+static int switch_outer(const char *in, const char *to);
 static int attach_remote;	/* this attach is a host's: so is its chord's view */
 /* The next attach's route as the picked row or the view is (#210), not as
 ** its name routes: 1 the host's, -1 local, 0 by the name. One attach. */
@@ -3219,6 +3222,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	int route = attach_route;
 
 	attach_route = 0;
+	/* #591: the terminal attached to this session switches instead */
+	if (nested && *nested && switch_outer(nested, session_name) == 0)
+		return 0;
 	if (nested && *nested)
 	{
 		fprintf(stderr,
@@ -3342,7 +3348,8 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		** socket, so it must not fall through to the respawn. */
 		int rc = attach_main(1);
 
-		if (rc == ATTACH_SWITCH || rc == ATTACH_ENDED)
+		if (rc == ATTACH_SWITCH || rc == ATTACH_ENDED ||
+		    rc == ATTACH_TO)
 			return rc;
 		/* live but stuck: never respawned over (#269) */
 		if (rc == 1 && errno == EAGAIN)
@@ -3407,7 +3414,9 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 		attach_end_back = picked;
 		rc = do_attach(exe, forced_name, force, inner_argv, inner_argc);
 		attach_end_back = 0;
-		if (rc == ATTACH_ENDED)
+		if (rc == ATTACH_TO)
+			snprintf(chosen, sizeof chosen, "%s", attach_to);
+		else if (rc == ATTACH_ENDED)
 			pk_ended(session_name, since);
 		else if (rc != ATTACH_SWITCH)
 			return rc;
@@ -3419,8 +3428,8 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 			pk_focus(chosen);
 		pk_remote = 1;
 		attach_only = 0;	/* before the pick: a view's o sets it */
-		if (pick_session("", chosen,
-		                 sizeof(chosen), 1) != 0)
+		if (rc != ATTACH_TO && pick_session("", chosen,
+		                                    sizeof(chosen), 1) != 0)
 			return 0;
 		snprintf(session_name, sizeof(session_name), "%s", chosen);
 		picked = 1;
@@ -3720,6 +3729,30 @@ ctl_dead_exit(struct ctl_reader *r, const char *verb)
 	else
 		fprintf(stderr, "dch: truncated %s response\n", verb);
 	return 1;
+}
+
+/* #591: a picker inside session `in` chose `to`. MSG_SWITCH asks in's master
+** to hand the name to the terminal attached there, which leaves in for to.
+** 0 when a client took it; -1 (no attached switchable client, a passive or
+** remote one only, an older master) keeps the nesting refusal. */
+static int
+switch_outer(const char *in, const char *to)
+{
+	unsigned char payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	size_t n = strlen(to);
+	int s, rc;
+
+	if (strcmp(in, to) == 0)
+		return 0;	/* already there */
+	if (!n || n >= sizeof attach_to || make_sock_path(in) < 0 ||
+	    (s = control_connect_path(sock_path)) < 0)
+		return -1;
+	send_ctl(s, MSG_SWITCH, to, n);
+	rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+	close(s);
+	return rc > 0 && type == MSG_ACK && len == DCH_ST_OK ? 0 : -1;
 }
 
 /* ---- Built-in agent-state detection (--status/--wait/--ls-json) ----
@@ -11284,10 +11317,14 @@ pick_session(const char *header, char *out, size_t outsz, int opens)
 	struct pk p;
 	int fd = open("/dev/tty", O_RDWR | O_CLOEXEC), rc = 1, k;
 
-	if (fd < 0)
+	if (fd < 0 || (opens && !isatty(STDIN_FILENO)))
 	{
-		/* Headless: list names so the caller can still see them. */
+		/* Headless: list names so the caller can still see them.
+		** Also when stdin is no tty: an Enter could not attach (#593). */
 		struct slist sl = {0};
+
+		if (fd >= 0)
+			close(fd);
 
 		list_sessions(&sl);
 		if (!sl.n)
