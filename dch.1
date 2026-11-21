@@ -826,7 +826,12 @@ open the picker in that session's terminal; choosing another session makes the
 client attached there leave this session and attach the chosen one. This
 session keeps running, its shell back at the prompt; the inner
 .B dch
-exits 0. With no switchable client attached (a headless session, a passive or
+exits 0. Only a pick switches:
+.BR "dch \-a" ,
+.BR "dch \-n" ,
+.B dch \-\-
+and a command inside a session are refused as before.
+With no switchable client attached (a headless session, a passive or
 .B \-E
 client only, an attach from another host through
 .BR "dch serve" ,

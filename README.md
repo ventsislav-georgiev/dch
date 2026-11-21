@@ -459,7 +459,9 @@ terminal you are attached from: your `dch` client leaves this session and
 attaches the chosen one, as the double press does. The session you were in
 keeps running with its shell back at the prompt (the inner `dch` exits 0).
 A History row's `Shift-Enter` / `o` resumes the session and then switches the
-same way. Nothing switches, and dch says `dch: already inside session '<n>';
+same way. Only a pick switches: `dch -a <name>`, `dch -n <name>`, `dch --`
+and `dch <command>` inside a session never move your terminal; they are
+refused as before. Nothing switches, and dch says `dch: already inside session '<n>';
 nesting disabled` (exit 1), when no switchable client is attached there: a
 headless session, a picker run with `--run`/`--spawn`, only a passive client
 (`--passive`) or a `-E` one (dch serve's, Prosper's), a session you are

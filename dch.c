@@ -3008,8 +3008,8 @@ usage(void)
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Switch: Ctrl-\\ twice quickly — detach and pick another session.\n"
 	    "        detach_key = switch swaps the two (one press: the picker).\n"
-	    "Inside a session, a pick switches the attached terminal to it\n"
-	    "        (no attached client: refused, never nested).\n");
+	    "Inside a session, only a pick switches the attached terminal\n"
+	    "        to it; -a, -n, a command: refused, never nested.\n");
 }
 
 /* ---- subcommand: server-only sentinel ------------------------------- */
@@ -3222,8 +3222,10 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	int route = attach_route;
 
 	attach_route = 0;
-	/* #591: the terminal attached to this session switches instead */
-	if (nested && *nested && switch_outer(nested, session_name) == 0)
+	/* #591: the terminal attached to this session switches instead, for
+	** a picker's choice only (#594: -a, -n, --, a command keep the refusal) */
+	if (nested && *nested && attach_end_back &&
+	    switch_outer(nested, session_name) == 0)
 		return 0;
 	if (nested && *nested)
 	{

@@ -20,7 +20,8 @@ Covers, in order:
      terminal attached there, the session keeps running with its shell
      back at the prompt; the session's own output cannot trigger that, a
      passive client is never switched, and with no active client the
-     nesting refusal stays.
+     nesting refusal stays; -a, -n, -- inside it are refused, never a
+     switch (#594).
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -31,6 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 TAG = "sw%d" % os.getpid()
 A, B, C, D = TAG + "a", TAG + "b", TAG + "c", TAG + "d"
+NOSUCH, NEWN = TAG + "x", TAG + "n"	# #594: never created
 DETACH = b"\x1c"
 SOCKDIR = os.path.join(tempfile.mkdtemp(prefix="dchswitch"), "sock")
 SWAPCFG = os.path.join(os.path.dirname(SOCKDIR), "config")
@@ -289,6 +291,22 @@ def main():
         if "FORGED_OK" not in out or "BBB_BRAVO" in out or \
                 reap(pid, fd, 0.3) is not None:
             return fail("#591: printed bytes switched the client", out)
+        # #594: only a pick switches; -a, -n and -- inside D are refused
+        # and leave the terminal on D
+        for n, cmd in enumerate(("-a " + NOSUCH,
+                                 "-n " + NEWN + " sh -c 'echo X'",
+                                 "-- true")):
+            os.write(fd, b"%s %s; echo R%d=$?\r" % (DCH.encode(),
+                                                     cmd.encode(), n))
+            out = drain(fd, 5.0, b"R%d=1" % n) + drain(fd, 0.3)
+            if "nesting disabled" not in out or "R%d=1" % n not in out or \
+                    reap(pid, fd, 0.3) is not None:
+                return fail("#594: dch %s inside D was not refused" % cmd,
+                            out)
+        if [f for f in os.listdir(SOCKDIR)
+                if f.startswith(NOSUCH) or f.startswith(NEWN)]:
+            return fail("#594: a refused attach inside D created a session",
+                        os.listdir(SOCKDIR))
         # (b) a passive client on D rides along, never switched
         ppid, pfd = spawn_client(["-a", D, "--passive"])
         try:
@@ -351,7 +369,7 @@ def main():
         return 0
     finally:
         kill_client(pid, fd)
-        for s in (A, B, C, D):
+        for s in (A, B, C, D, NOSUCH, NEWN):
             dch("-k", s)
 
 
