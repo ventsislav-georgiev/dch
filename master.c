@@ -4197,19 +4197,23 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Push out data to the program. */
 	if (type == MSG_PUSH)
 	{
-		p->in_at = ++in_seq;
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
 			unsigned char o[PKT_MAX + FOCUS_CAR];
 			size_t n = focus_drop(p, o, payload, len);
 
+			/* #601: a passive push of only focus reports is not typing */
+			if (!p->passive || n || p->fcar_n)
+				p->in_at = ++in_seq;
 			if (n)
 			{
 				push_input(p, o, n);
 				dch_vt_input_seen(o, n);	/* §11.5, #302 */
 			}
 		}
+		else
+			p->in_at = ++in_seq;
 	}
 	/* the end of a dch --send (#307): did all of it go in */
 	else if (type == MSG_PUSH_END && p->role != ROLE_ATTACHED)

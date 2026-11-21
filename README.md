@@ -3226,7 +3226,11 @@ A passive client's focus reports (`ESC [ I`, `ESC [ O`) never reach the
 program either: the master drops them, so a hidden view gaining or losing
 focus cannot tell a program with focus reporting on (Claude Code) that the
 user came or left. Its other input goes in as usual; a lone Esc is not delayed
-(the master holds only a trailing `Esc [`, up to 50 ms). A client marked
+(the master holds only a trailing `Esc [`, up to 50 ms). A passive
+client's focus reports never count as typing, so one arriving between a
+picker's Enter and its pick does not refuse the pick (#601). Limit: a run of
+more than eight `Alt-[` (`Esc [`) in one read from a passive client keeps the
+last eight (#599). A client marked
 `--active` again does not replay a focus-in it sent while passive: send one
 after `--active` returns 0 if the view has focus.
 
