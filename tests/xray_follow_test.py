@@ -823,7 +823,7 @@ def test_follow_cadence():
         # a batch, right after a run at the longest gap again
         wait_for(lambda: len(ran()) >= c + 5, 20)
         ts = [t for t, _ in ran()]
-        gl = ts[c + 4] - ts[c + 3]
+        gl = ts[c + 4] - ts[c + 3] if len(ts) > c + 4 else 0.0
         n0 = len(ran())
         wait_for(lambda: len(ran()) > n0, 6)
         n1 = len(ran())
