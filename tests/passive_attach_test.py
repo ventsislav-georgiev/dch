@@ -151,6 +151,8 @@ def old_master(name):
 REC = r'''
 import os, sys, tty
 tty.setraw(0)
+with open(sys.argv[1] + ".env", "w") as f:
+    f.write(repr(os.environ.get("DCH_FOCUS_HOLD_MS")))
 os.write(1, b"\033[?1004hrec\r\n")
 with open(sys.argv[1], "ab", buffering=0) as f:
     while True:
@@ -212,6 +214,10 @@ def focus_rows(slow):
         check(got == b"\033[I",
               "1004 on: an active client's focus-in reaches the program:"
               " %r" % (got,))
+        if slow:	# master_main unsets the knob: the program never sees it
+            with open(log + ".env") as f:
+                check(f.read() == "None",
+                      "the program does not inherit DCH_FOCUS_HOLD_MS")
         got = fed(p, [b"\033[I", b"\033[O"], b"P", 0.2)
         check(got == b"",
               "1004 on: a passive client's focus-in/out never reach the"
