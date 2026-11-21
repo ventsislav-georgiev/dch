@@ -95,6 +95,10 @@ static pid_t term_pid;	/* the client: attach_main's process */
 ** handover (switch_hold); restore_term puts it out if none came. */
 static unsigned char swhold[sizeof DCH_SWITCH_OSC + DCH_SWKEY_LEN + 512];
 static size_t swhold_n;
+static long long swhold_t;	/* mono_us when swhold was filled */
+/* The master writes its handover in one go, so a real one's parts arrive
+** microseconds apart: held bytes that wait longer were never one (#591). */
+#define SWITCH_HOLD_MS	25
 
 static void
 restore_term(void)
@@ -1345,6 +1349,20 @@ attach_main(int noerror)
 		/* A held ESC prefix: wake when it is due to go out as typed;
 		** delayed keys: wake when their gap is up. Timers, so pty
 		** output never waits on them. */
+		/* held handover bytes no read completed in time go out */
+		if (swhold_n)
+		{
+			long long d = swhold_t + SWITCH_HOLD_MS * 1000LL -
+			              mono_us();
+
+			if (d <= 0)
+			{
+				write_buf_or_fail(1, swhold, swhold_n);
+				swhold_n = 0;
+			}
+			else if (wait_us < 0 || d < wait_us)
+				wait_us = (long)d;
+		}
 		if (fpend_n || dq_n)
 		{
 			long long now = mono_us(), us = LLONG_MAX, d;
@@ -1475,6 +1493,7 @@ attach_main(int noerror)
 					keep = total;
 				memcpy(swhold, comb + total - keep, keep);
 				swhold_n = keep;
+				swhold_t = mono_us();
 				out = comb;
 				olen = (ssize_t)(total - keep);
 			}
