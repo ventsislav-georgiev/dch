@@ -17166,8 +17166,7 @@ main(int argc, char **argv)
 
 	ts_ms();	/* DCH_TS_MS read once, then gone from every child (tests only) */
 	unsetenv("DCH_TS_MS");
-	focus_hold_ms();	/* DCH_FOCUS_HOLD_MS too, for the master (tests only) */
-	unsetenv("DCH_FOCUS_HOLD_MS");
+	focus_hold_ms();	/* DCH_FOCUS_HOLD_MS cached; master_main unsets it (tests only) */
 	rc = main_run(argc, argv);
 	if (rc != 0 && g_rhint[0])
 		fprintf(stderr, "(%s is not a known host; --host %s to reach it)\n",

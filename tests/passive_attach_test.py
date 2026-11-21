@@ -221,6 +221,11 @@ def focus_rows(slow):
             check(got == b"",
                   "a passive client's focus-out split across two pushes never"
                   " reaches the program: %r" % (got,))
+            # #603: a pause past the default hold, held 2 s: still nothing
+            got = fed(q, [b"\033[", b"O"], b"Q", 0.3)
+            check(got == b"",
+                  "2 s hold reaches the master: a passive focus-out split by"
+                  " a 0.3 s pause never reaches the program: %r" % (got,))
             # #599: a nested report split after ESC[ ESC[ (nightly fuzz_frames)
             got = fed(q, [b"[I\033[\033[", b"II\0["], b"Q", 0.02)
             check(got == b"[I\0[",
