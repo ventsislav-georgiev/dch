@@ -413,8 +413,9 @@ size_t packet_payload_len(const struct packet *pkt);
 #define ATTACH_ENDED 3
 extern int attach_end_back;
 /* ... and ATTACH_TO when the master handed this client a picker's choice
-** made inside its session (#591): that name is in attach_to. */
-#define ATTACH_TO 4
+** made inside its session (#591): that name is in attach_to. Above 255,
+** so no remote attach's exit status (remote.h: 4 refused, 5 taken) is it. */
+#define ATTACH_TO 256
 extern char attach_to[512];
 
 /* Session history (#042): each master keeps a JSON record of its session in
