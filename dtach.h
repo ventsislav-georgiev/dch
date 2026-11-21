@@ -226,7 +226,20 @@ enum
 				** client gets output and sends input, but
 				** never sets the pty size and counts in no
 				** busy check or "clients". */
+	MSG_SWITCH	= 25,	/* Picker inside a session (#591). On an
+				** attached connection, payload: this client's
+				** DCH_SWKEY_LEN hex secret (an attach that can
+				** switch sessions); a master before it
+				** ignores it. On a control connection,
+				** payload: a session name. Each keyed active
+				** client gets DCH_SWITCH_OSC key ; name BEL
+				** as its last output, then its connection
+				** closes. MSG_ACK reply: DCH_ST_OK, or
+				** DCH_ST_ERR when no client took it; a
+				** master before it answers DCH_ST_UNSUP. */
 };
+#define DCH_SWKEY_LEN 32
+#define DCH_SWITCH_OSC "\033]5911;"
 #define DCH_RESTART_F_RING 0x01	/* adopts the blob's ringfd and core lines */
 
 /* MSG_RING_READ flags */
@@ -399,6 +412,10 @@ size_t packet_payload_len(const struct packet *pkt);
 ** (#133): back to the picker, not the shell. Local attaches only. */
 #define ATTACH_ENDED 3
 extern int attach_end_back;
+/* ... and ATTACH_TO when the master handed this client a picker's choice
+** made inside its session (#591): that name is in attach_to. */
+#define ATTACH_TO 4
+extern char attach_to[512];
 
 /* Session history (#042): each master keeps a JSON record of its session in
 ** dch_history_dir(); `--history` lists the dead ones, `--revive` restarts

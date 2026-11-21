@@ -6,7 +6,10 @@
 ** attach.o, and dch.c built with -Dmain=dch_main (detach_char is ^\).
 ** The X-ray chord's x decode (xray_x, #187) reads what follows a press
 ** and a whole read; a read of key releases only (#196) is -1. The picker's sequence reader (pk_csi, #132) gets the
-** bytes after ESC [ as pk_key collects them, at most 16. */
+** bytes after ESC [ as pk_key collects them, at most 16. The handover
+** scan (switch_tail, #591) reads the session's output through the rolling
+** tail: a hit is the input's end, its name printable and inside the cap,
+** and never with a key the bytes do not carry. */
 #include "../../attach.c"
 #include "../../picker.h"
 #include <stdint.h>
@@ -74,6 +77,26 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		dq_n = 0;
 		if (gl != n || memcmp(got, d, n) != 0 || fpend_n)
 			abort();
+	}
+	{
+		static const char key[] = "0123456789abcdef0123456789abcdef";
+		char name[sizeof attach_to];
+		size_t h, i;
+
+		swtail_n = 0;
+		swtail_add(d, n / 2);
+		swtail_add(d + n / 2, n - n / 2);
+		h = switch_tail(swtail, swtail_n, key, name, sizeof name);
+		if (h > swtail_n || (h && (!name[0] ||
+		    strlen(name) >= sizeof name ||
+		    memcmp(swtail + swtail_n - h, DCH_SWITCH_OSC,
+		           sizeof DCH_SWITCH_OSC - 1) != 0 ||
+		    memcmp(swtail + swtail_n - h + sizeof DCH_SWITCH_OSC - 1, key,
+		           sizeof key - 1) != 0)))
+			abort();
+		for (i = 0; h && name[i]; i++)
+			if ((unsigned char)name[i] < 0x20 || name[i] == 0x7f)
+				abort();
 	}
 	return 0;
 }

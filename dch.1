@@ -815,6 +815,26 @@ the first switch after a plain attach opens on that session too.
 Quitting the picker leaves you
 detached. A single press still detaches; it simply waits out the window first.
 .PP
+Inside a session
+.RB ( DCH_SESSION
+set),
+.B dch
+and
+.B dch \-l
+open the picker in that session's terminal; choosing another session makes the
+.B dch
+client attached there leave this session and attach the chosen one. This
+session keeps running, its shell back at the prompt; the inner
+.B dch
+exits 0. With no switchable client attached (a headless session, a passive or
+.B \-E
+client only, an attach from another host through
+.BR "dch serve" ,
+or a client or master older than 1.139.0) dch prints
+.I "already inside session; nesting disabled"
+and exits 1. Only the master can tell the client to switch, behind a secret
+the client gave it on attach; nothing printed in the session can.
+.PP
 .B DCH_DOUBLE_TAP_MS
 sets that window in milliseconds (default
 .BR 300 ).

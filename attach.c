@@ -16,6 +16,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "dtach.h"
+#include "ring.h"
 #include <poll.h>
 #include <strings.h>
 
@@ -131,6 +132,63 @@ restore_term(void)
 
 int attach_sock = -1;
 int attach_end_back;
+char attach_to[512];
+
+/* #591: this attach's secret (MSG_SWITCH), "" when it cannot switch, and the
+** last bytes the master sent: where its handover of a picker's choice made
+** inside the session ends up. */
+static char swkey[DCH_SWKEY_LEN + 1];
+static unsigned char swtail[sizeof DCH_SWITCH_OSC + DCH_SWKEY_LEN +
+                            sizeof attach_to];
+static size_t swtail_n;
+
+/* Does the tail t[0..n) end in the master's handover, DCH_SWITCH_OSC key ;
+** name BEL, with this key? Its length, the name (no control bytes, shorter
+** than cap) in name; 0 when not. Pure, for the fuzzer: the bytes are the
+** session's output, and without the key nothing it prints is a handover. */
+static size_t
+switch_tail(const unsigned char *t, size_t n, const char *key, char *name,
+            size_t cap)
+{
+	size_t pl = sizeof DCH_SWITCH_OSC - 1, kl = strlen(key), e, i, j;
+
+	if (!kl || n < 2 || t[n - 1] != '\a')
+		return 0;
+	/* back over the printable run before the BEL to the prefix's ESC */
+	for (e = i = n - 1; i > 0 && t[i - 1] >= 0x20 && t[i - 1] != 0x7f; i--)
+		;
+	if (i == 0 || e - i < pl + kl + 1 ||
+	    memcmp(t + i - 1, DCH_SWITCH_OSC, pl) != 0 ||
+	    memcmp(t + i - 1 + pl, key, kl) != 0 || t[i - 1 + pl + kl] != ';')
+		return 0;
+	j = i - 1 + pl + kl + 1;
+	if (e - j >= cap)
+		return 0;
+	memcpy(name, t + j, e - j);
+	name[e - j] = '\0';
+	return n - (i - 1);
+}
+
+/* Keep the stream's last sizeof swtail bytes. */
+static void
+swtail_add(const unsigned char *b, size_t n)
+{
+	size_t drop;
+
+	if (n >= sizeof swtail)
+	{
+		b += n - sizeof swtail;
+		n = sizeof swtail;
+	}
+	if (swtail_n + n > sizeof swtail)
+	{
+		drop = swtail_n + n - sizeof swtail;
+		memmove(swtail, swtail + drop, swtail_n - drop);
+		swtail_n -= drop;
+	}
+	memcpy(swtail + swtail_n, b, n);
+	swtail_n += n;
+}
 const char *(*attach_lost)(int *code);
 int (*attach_detached)(void);
 int (*attach_xray)(void);
@@ -1168,6 +1226,24 @@ attach_main(int noerror)
 		pkt.u.buf[0] = 1;
 		write_packet_or_fail(s, &pkt);
 	}
+	/* #591: an attach that can switch sessions takes a picker's choice
+	** made inside its session, behind a secret only it and the master
+	** know: never printed, new each attach. Not -E (no detach key: dch
+	** serve's and Prosper's clients), not passive, not remote. */
+	swkey[0] = '\0';
+	swtail_n = 0;
+	if (detach_char >= 0 && !dch_attach_passive && attach_sock < 0)
+	{
+		char a[18], b[18];
+
+		ring_session_id(a);
+		ring_session_id(b);
+		snprintf(swkey, sizeof swkey, "%.16s%.16s", a + 1, b + 1);
+		pkt.type = MSG_SWITCH;
+		pkt.len = DCH_SWKEY_LEN;
+		memcpy(pkt.u.buf, swkey, DCH_SWKEY_LEN);
+		write_packet_or_fail(s, &pkt);
+	}
 
 	/* We would like a redraw, too. WINCH when unspecified — see the
 	** resume path above; a ^L redraw double-types into modern TUIs. */
@@ -1320,6 +1396,26 @@ attach_main(int noerror)
 			{
 				dch_trace("client exit: read(s) errno=%d", errno);
 				exit(1);
+			}
+			/* The master's handover is its last output (#591):
+			** what came before it goes out, then attach_to. */
+			if (swkey[0])
+			{
+				size_t h;
+
+				swtail_add(buf, (size_t)len);
+				h = switch_tail(swtail, swtail_n, swkey, attach_to,
+				                sizeof attach_to);
+				if (h)
+				{
+					if ((size_t)len > h)
+						write_buf_or_fail(1, buf, len - h);
+					dch_trace("client switch handed: %s",
+					          attach_to);
+					restore_term();
+					close(s);
+					return ATTACH_TO;
+				}
 			}
 			/* Send the data to the terminal. The inner program
 			** turning its 1004 off turns ours off too: back on. */

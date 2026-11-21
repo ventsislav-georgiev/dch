@@ -124,7 +124,9 @@ Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 ### The session picker
 
 Bare `dch`, `dch -l`, `dch -k` / `dch -d` without a name, and the detach-key
-switch open the same full-screen picker, modelled on Prosper's Agent Island. Its tabs,
+switch open the same full-screen picker, modelled on Prosper's Agent Island
+(inside a session, choosing another one switches your terminal to it: see
+[below](#switching-from-inside-a-session)). Its tabs,
 each with its count: **Sessions**; one tab per session group, named by it,
 in the config's order, shown only when it has sessions; and **History**.
 A group is a `group = <name> = <regex>` line in the [config
@@ -445,6 +447,23 @@ as nothing else read the terminal meanwhile. An interactive shell
 with job control takes the terminal back whenever dch stops (Ctrl-Z or a stop
 signal), and bash with job control off (`set +m`) goes on to its next command:
 either reads that key itself, and dch then does a plain detach.
+
+### Switching from inside a session
+
+Inside a session (`DCH_SESSION` set), bare `dch` and `dch -l` open the
+picker in that session's terminal, and choosing another session switches the
+terminal you are attached from: your `dch` client leaves this session and
+attaches the chosen one, as the double press does. The session you were in
+keeps running with its shell back at the prompt (the inner `dch` exits 0).
+A History row's `Shift-Enter` / `o` resumes the session and then switches the
+same way. Nothing switches, and dch says `dch: already inside session '<n>';
+nesting disabled` (exit 1), when no switchable client is attached there: a
+headless session, a picker run with `--run`/`--spawn`, only a passive client
+(`--passive`) or a `-E` one (dch serve's, Prosper's), a session you are
+attached to from another host through `dch serve`, a client or master older
+than 1.139.0, or a master `--restart`ed from one. Only the master can tell
+your client to switch, behind a secret your client gave it on attach; nothing
+a program prints in the session can.
 
 A stop of `dch -a` or of the session picker (`dch -l`) (Ctrl-Z while it
 starts, or `kill -TSTP`) puts your shell's terminal modes back before dch
@@ -2711,7 +2730,7 @@ later does nothing to a running session.
 
 | Variable | Read by | Default | Does |
 | --- | --- | --- | --- |
-| `DCH_SESSION` | every `dch` | set by dch | The session name, set for everything inside a session; hooks use it ([reporting](#optional-explicit-state-reporting)). Attaching refuses while it is set: no nesting. |
+| `DCH_SESSION` | every `dch` | set by dch | The session name, set for everything inside a session; hooks use it ([reporting](#optional-explicit-state-reporting)). Attaching never nests while it is set: a pick switches the attached terminal instead, or is refused ([details](#switching-from-inside-a-session)). |
 | `DCH_SOCKET_DIR` | every `dch` | `$XDG_RUNTIME_DIR/dch-$UID`, else `/tmp/dch-$UID` | Where sockets and sidecars live ([self-heal](#socket-loss-and-self-heal)). Records of one socket dir never mix with another's. |
 | `DCH_CONFIG` | every `dch` | `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config` | The [config file](#config-file). |
 | `DCH_DOUBLE_TAP_MS` | attaching client | `300` | The double-press window of `Ctrl-\`; `0`: one press acts at once ([Cheatsheet](#cheatsheet)). |
