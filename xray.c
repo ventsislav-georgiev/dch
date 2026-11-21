@@ -3838,8 +3838,8 @@ one_ref(void *ctx, const struct xr_span *sp)
 }
 
 /* #534: line [ls, le) a lead-in: at most 120 bytes, naming one ref (not an
-** issue or pull, #560: *sp, offsets in s) and ending in ':' (blanks, '*' and
-** '_' after it count as the end); the ':''s offset, else 0. */
+** issue, pull or commit, #560: *sp, offsets in s) and ending in ':' (blanks,
+** '*' and '_' after it count as the end); the ':''s offset, else 0. */
 static size_t
 lead_in(const char *s, size_t ls, size_t le, const char *cwd,
         struct xr_span *sp)
@@ -3889,6 +3889,11 @@ d5(const char *s, const struct olines *o, size_t k, const char *cwd,
 		if (blank(ln, l) || (h && h < 7 && h < l && ln[h] == ' ') ||
 		    lead_in(s, o->ls[j], o->le[j], cwd, &sp))
 			break;
+		if (l > 1 && ln[0] == '>' && ln[1] == ' ')
+		{
+			ln += 2;	/* a quoted body line, as the title (#562) */
+			l -= 2;
+		}
 		if (l > sizeof pb - 8 - pl)
 			l = sizeof pb - 8 - pl;
 		if (pl)
@@ -3912,6 +3917,8 @@ d5(const char *s, const struct olines *o, size_t k, const char *cwd,
 		    (s[h] == '.' || s[h] == ')') && s[h + 1] == ' ')
 			t = h + 2;
 	}
+	while (t < c && s[t] && strchr(" \t*", s[t]))
+		t++;		/* a "* " marker after a quote or list one */
 	title_of(s + t, c - t, d->title);
 	if (!d->title[0])
 		return 0;

@@ -962,6 +962,8 @@ REPLIES = [("assistant", "Decision for you (OQ-185):\n- a) ship it\n- b) wait"
            ("assistant", "1. Step (OQ-318):\n   indented body"),
            ("assistant", "2) Next (OQ-319):\nbody"),
            ("assistant", "- Bullet (OQ-320):\nbody"),
+           ("assistant", "> * Star (OQ-321):\nbody"),
+           ("assistant", "Fixed in abc1234:\nthe fix"),
            ("assistant", "Decision A (OQ-301):\nbody one"),
            ("assistant", "Decision B (OQ-301):\nbody two"),
            ("assistant", "Later lead (OQ-306):\nweak body"),
@@ -1081,6 +1083,16 @@ def test_lead_in():
                     ("OQ-317", "OQ-318", "OQ-319", "OQ-320")] ==
           [["Quoted (OQ-317)"], ["Step (OQ-318)"], ["Next (OQ-319)"],
            ["Bullet (OQ-320)"]], defs("OQ-317"))
+    d, out = defs("OQ-317")
+    check("#576 a quoted passage line loses its \"> \"",
+          [x["passage"] for x in d] == ["quoted body"], (d, out))
+    d, out = defs("OQ-321")
+    check("#576 a \"* \" marker after a quote marker is not the title",
+          [x["title"] for x in d] == ["Star (OQ-321)"], (d, out))
+    d, out = defs("abc1234")
+    check("#576 \"Fixed in abc1234:\" with a body gives no D5 (a commit "
+          "has its own title)", not [x for x in d if x["rule"] == "D5"],
+          (d, out))
 
     d, out = defs("OQ-301")
     check("#563 two lead-ins for one ref: the card keeps the first one",
