@@ -58,6 +58,7 @@ and --keys types into it. Covers:
      skipped, the rest still apply; a group no session matches has no tab;
      at most 8; with none, sidekick_pattern (default -qa) is Sidekicks, and
      `sidekick_pattern =` empties the list; dch --config keeps the lines.
+ 18. bare dch, no arguments, opens the same picker as dch -l (#590).
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -894,6 +895,16 @@ def main():
     if dch("--read", "s2").returncode == 3:
         print("skip: no terminal mirror in this build")
         return 0
+
+    # bare dch, no arguments, is dch -l (#590): the picker, not an attach
+    dch("--spawn", "pk0", "--size", "100x30", "env", "NO_COLOR=1",
+        "TERM=xterm-256color", DCH)
+    s = wait_screen("pk0", lambda s: "q quit" in s)
+    check("#590: bare dch opens the picker, as dch -l",
+          s.startswith("[Sessions ") and "q quit" in s, s)
+    dch("-k", "pk0")
+    wait_live("pk0", False)
+    dch("--forget", "pk0")  # no History tab yet: the tab rows below cycle
 
     # 1. tabs: no Sidekicks tab until a "-qa" session exists
     picker("pk1", "100x30", "NO_COLOR=1", "TERM=xterm-256color")

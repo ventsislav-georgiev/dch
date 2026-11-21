@@ -2772,9 +2772,9 @@ usage(void)
 	printf(
 	    "dch " DCH_VERSION " — detachable terminal session\n"
 	    "Usage:\n"
-	    "  dch              attach free session, else spawn new\n"
+	    "  dch, dch -l      pick a session and attach (mirror)\n"
+	    "  dch --           attach free auto-named session, else spawn new\n"
 	    "  dch <cmd...>     attach-or-create, run cmd\n"
-	    "  dch -l           pick a session and attach (mirror)\n"
 	    "  dch -k [name]    kill session; without name, pick interactively\n"
 	    "  dch -kl          kill ALL sessions\n"
 	    "  dch -ls, --ls    list local sessions (one per line)\n"
@@ -17146,7 +17146,7 @@ main_run(int argc, char **argv)
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
 	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP,
 	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW, A_PASSIVE }
-	    action = A_ATTACH;
+	    action = argc == 1 ? A_LIST : A_ATTACH;	/* bare dch is dch -l (#590) */
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
 	int opt_all = 0, opt_cancel = 0, opt_agents = 0, opt_nomsg = 0;

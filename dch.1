@@ -3,6 +3,7 @@
 dch \- detachable terminal sessions with a headless agent API
 .SH SYNOPSIS
 .B dch
+.RB [ \-\- ]
 .RI [ cmd... ]
 .br
 .B dch \-a
@@ -171,10 +172,15 @@ dch \- detachable terminal sessions with a headless agent API
 .SH DESCRIPTION
 .B dch
 keeps a program running in a detachable session (a fork of dtach). Run bare,
-it attaches to the auto-named session for the current directory
-(\fI<repo>\-<branch>\fR or the cwd basename), creating it if needed. The
-session master survives terminal crashes, GUI quits, and SSH drops; a new
-.B dch
+it opens the session picker, as
+.BR "dch \-l" .
+With a command, or
+.B \-\-
+for the default shell, it attaches to the auto-named session for the current
+directory (\fI<repo>\-<branch>\fR or the cwd basename), creating it if
+needed. The session master survives terminal crashes, GUI quits, and SSH
+drops; a new
+.B dch \-\-
 in the same directory reattaches. While another client is attached, it
 starts the next free
 .IR <name>\-2 ,

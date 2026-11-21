@@ -282,7 +282,7 @@ def main():
               "a passive client's resize leaves the size: %r" % (o,))
 
         dl = time.time() + DUE
-        j = Client([], 80, 24, cwd=proj)
+        j = Client(["--"], 80, 24, cwd=proj)
         cl.append(j)
         o = wait_row(name, lambda o: counts(o) == (1, 1), dl)
         check(counts(o) == (1, 1) and name + "-2" not in rows(),
@@ -292,7 +292,7 @@ def main():
               "the joined active client sets the size: %r" % (o,))
 
         dl = time.time() + DUE
-        k = Client([], 80, 24, cwd=proj)
+        k = Client(["--"], 80, 24, cwd=proj)
         cl.append(k)
         o = wait_row(name + "-2", lambda o: True, dl)
         check(o is not None and counts(rows().get(name)) == (1, 1),
@@ -317,7 +317,7 @@ def main():
         j.kill()
         wait_row(name, lambda o: counts(o) == (1, 0), time.time() + DUE)
         dl = time.time() + DUE
-        k = Client([], 80, 24, cwd=proj)
+        k = Client(["--"], 80, 24, cwd=proj)
         cl.append(k)
         o = wait_row(name + "-2", lambda o: True, dl)
         check(o is not None, "--active: the session is busy again (-2)")
