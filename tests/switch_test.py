@@ -23,7 +23,10 @@ Covers, in order:
      nesting refusal stays; -a, -n, -- inside it are refused, never a
      switch (#594); a second active client (-f) that did not type the
      Enter stays on the session (#595), and once made passive at runtime
-     (--passive --pid) its own pick switches nothing (#596).
+     (--passive --pid) its own pick switches nothing (#596);
+  9. the pick's Enter from a source that cannot switch (dch --keys, a
+     passive client, a -E client) after the active terminal typed the rest
+     moves nothing and the inner dch is refused (#598).
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -33,7 +36,7 @@ import os, sys, pty, signal, select, time, errno, re, subprocess, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 TAG = "sw%d" % os.getpid()
-A, B, C, D = TAG + "a", TAG + "b", TAG + "c", TAG + "d"
+A, B, C, D, E = (TAG + s for s in "abcde")
 NOSUCH, NEWN = TAG + "x", TAG + "n"	# #594: never created
 DETACH = b"\x1c"
 SOCKDIR = os.path.join(tempfile.mkdtemp(prefix="dchswitch"), "sock")
@@ -117,7 +120,7 @@ def picker_rows(text):
     rows = []
     # The picker positions each line with CUP rather than newlines.
     for line in re.split(r"\n|\x1b\[\d+;1H", text):
-        m = re.search(r"(%s[abcd])" % TAG, line)
+        m = re.search(r"(%s[abcde])" % TAG, line)
         if m and m.group(1) not in rows:
             rows.append(m.group(1))
     return rows
@@ -387,13 +390,50 @@ def main():
             kill_client(ppid, pfd)
             kill_client(spid, sfd)
 
+        # 9. Only the newest input of any source makes the pick (#598).
+        pid, fd = spawn_client(["-n", E, "env", "PS1=EEE> ", "sh", "-i"])
+        if "EEE> " not in drain(fd, 10.0, b"EEE> "):
+            return fail("#598: session E's shell never prompted")
+        ppid, pfd = spawn_client(["-a", E, "--passive"])
+        epid, efd = spawn_client(["-E", "-a", E])
+        try:
+            drain(pfd, 3.0, b"EEE> ")
+            drain(efd, 3.0, b"EEE> ")
+
+            def keys_enter():
+                dch("--keys", E, "enter")
+
+            # the active terminal types the rest, another source the Enter
+            for n, (who, enter) in enumerate((
+                    ("dch --keys", keys_enter),
+                    ("a passive client", lambda: os.write(pfd, b"\r")),
+                    ("a -E client", lambda: os.write(efd, b"\r"))), 1):
+                os.write(fd, DCH.encode() + b"; echo R%d=$?\r" % n)
+                drain(fd, 5.0, b"Sessions")
+                drain(fd, 0.5)
+                os.write(fd, b"/" + B.encode())
+                drain(fd, 0.5)
+                drain(pfd, 0.2)	# a client blocked on its output reads
+                drain(efd, 0.2)	# no keys
+                enter()
+                out = drain(fd, 5.0, b"R%d=" % n) + drain(fd, 0.5)
+                if "nesting disabled" not in out or "R%d=1" % n not in out \
+                        or "BBB_BRAVO" in out or \
+                        reap(pid, fd, 0.2) is not None:
+                    return fail("#598: the pick's Enter from %s moved the "
+                                "active terminal, or no nesting refusal"
+                                % who, out)
+        finally:
+            kill_client(ppid, pfd)
+            kill_client(epid, efd)
+
         print("PASS: double tap switches sessions, single tap detaches; "
               "detach_key = switch swaps them; the picker inside a "
               "session switches its terminal.")
         return 0
     finally:
         kill_client(pid, fd)
-        for s in (A, B, C, D, NOSUCH, NEWN):
+        for s in (A, B, C, D, E, NOSUCH, NEWN):
             dch("-k", s)
 
 

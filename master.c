@@ -257,6 +257,10 @@ static int cur_argv_owned, dch_argv_owned;
 ** respawn keeps when it rewrites the inner command for the next live
 ** restart. 0 = could not tell, so a restart reverts to the launch argv. */
 static int argv_prefix;
+/* #598: one count over every input source (any client's MSG_PUSH, so
+** passive, -E and dch --send/--run too, and MSG_KEYS): a switch goes to
+** a keyed active client only while its in_at is still the newest */
+static unsigned long long in_seq;
 static int respawn_live(void);
 static int pty_input(const void *buf, size_t len);
 static long ms_since(const struct timespec *t);
@@ -3132,6 +3136,7 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 		dch_vt_buf_free(bytes);
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
 	}
+	in_seq++;	/* #598: a --keys pick is no active client's */
 	/* Held (no child): dropped, like any other input. */
 	if (the_pty.fd >= 0)
 	{
@@ -4185,8 +4190,6 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Push out data to the program. */
 	if (type == MSG_PUSH)
 	{
-		static unsigned long long in_seq;
-
 		p->in_at = ++in_seq;
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
@@ -4460,7 +4463,8 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* #591: a picker inside the session chose another. On an attached
 	** connection the client registers its secret. On a control one the
 	** keyed active client that typed last (#595: the picker's Enter, not
-	** another terminal on the session) gets the name behind its secret as
+	** another terminal on the session; #598: and no other source typed
+	** since, or none does) gets the name behind its secret as
 	** its last output and stops getting the pty's (so nothing the program
 	** prints can follow it); the main loop's flush then closes it. */
 	else if (type == MSG_SWITCH)
@@ -4494,7 +4498,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		{
 			if (c->role == ROLE_ATTACHED && c->attached &&
 			    !c->viewing && !c->passive && c->swkey[0] &&
-			    c->in_at && (!to || c->in_at > to->in_at))
+			    c->in_at && c->in_at == in_seq)
 				to = c;
 		}
 		n = to ? snprintf(osc, sizeof osc, DCH_SWITCH_OSC "%s;%.*s\a",

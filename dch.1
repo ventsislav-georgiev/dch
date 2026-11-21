@@ -833,6 +833,12 @@ exits 0. Only a pick switches:
 and a command inside a session are refused as before.
 Only the client that typed last, the one that made the pick, switches; another
 client attached to the session stays.
+When the last key of the pick came from a client that cannot switch or from
+.BR \-\-keys ,
+.B \-\-send
+or
+.BR \-\-run ,
+nothing switches and dch refuses as below.
 With no switchable client attached (a headless session, a passive or
 .B \-E
 client only, an attach from another host through

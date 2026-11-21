@@ -462,7 +462,9 @@ A History row's `Shift-Enter` / `o` resumes the session and then switches the
 same way. Only a pick switches: `dch -a <name>`, `dch -n <name>`, `dch --`
 and `dch <command>` inside a session never move your terminal; they are
 refused as before. Only the terminal that typed last (the one that made the
-pick) switches; another terminal attached to the session stays. Nothing switches, and dch says `dch: already inside session '<n>';
+pick) switches; another terminal attached to the session stays. When the pick's
+last key came from a terminal that cannot switch (a passive or `-E` client) or
+from `dch --keys`/`--send`/`--run`, nothing switches and dch refuses as below. Nothing switches, and dch says `dch: already inside session '<n>';
 nesting disabled` (exit 1), when no switchable client is attached there: a
 headless session, a picker run with `--run`/`--spawn`, only a passive client
 (`--passive`) or a `-E` one (dch serve's, Prosper's), a session you are
