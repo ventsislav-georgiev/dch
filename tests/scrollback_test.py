@@ -153,6 +153,8 @@ class OldMaster:
         self.srv.bind(self.path)
         self.srv.listen(8)
         self.got = []
+
+    def start(self):
         threading.Thread(target=self.loop, daemon=True).start()
 
     def loop(self):
@@ -225,6 +227,7 @@ def stop(pid, fd):
 
 
 def main():
+    print(sys.version)
     os.makedirs(SOCKDIR, mode=0o700, exist_ok=True)
     mirror = dch("--build").stdout.strip() == "full"
     hist = "seq 1 40; printf END; exec sleep 300"
@@ -240,6 +243,7 @@ def main():
     # --- an old master (1.38.0 framing) -----------------------------------
     old = OldMaster("sbold")
     pid, fd = client(["-a", "sbold", "--scrollback", "5"])
+    old.start()  # forkpty first: CPython forkpty can fail (EBADF) once a thread exists
     out = pty_read(fd, b"OLD-MASTER-SCREEN", time.time() + DUE)
     os.write(fd, b"typed")
     wait_for(lambda: any(t == MSG_PUSH for t, _, _ in old.got),
