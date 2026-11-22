@@ -405,6 +405,19 @@ def main():
             run("-k", n)
             names.remove(n)
 
+        # --- /exit to a session that ends with Claude: sent (MED-VT1) ----
+        for what, ctl in (("ends at once", {}),
+                          ("lingers 3 s", {"die_ms": 3000}),
+                          ("quits partway", {"exit_ms": 1200})):
+            xs = sess("sx", "claude", **ctl)
+            up(xs)
+            r = say(xs, "--json", "--", "/exit")
+            check("--say /exit, Claude %s: ok, rc 0" % what,
+                  r.returncode == 0 and
+                  json.loads(r.stdout or "{}").get("result") == "ok")
+            run("-k", xs)
+            names.remove(xs)
+
         # --- concurrency: about the slowest session, not the sum ---------
         # Each slow one: two eaten Enters, 3 s apart = 6 s+; five in a row
         # would take 30 s+.
