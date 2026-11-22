@@ -33,6 +33,11 @@ State lives in $FAKE_CLAUDE_DIR:
                     footer: a dialog; every key typed then is logged as
                     key, and a digit dismisses it until the knob changes,
                     unless sticky), above (rows painted above the composer),
+                    tear ([torn_ms, whole_ms]: while a draft shows, the
+                    screen is caught mid-repaint torn_ms out of every
+                    torn_ms + whole_ms: the rows above the composer drawn,
+                    the composer and below not yet, as a mirror read
+                    between the pty chunks of a long draft's frame sees it),
                     name (the session name Claude Code 2.1.322 paints into
                     the composer's top rule), bgwork (background work an
                     idle record does not show, a monitor say: /exit then
@@ -192,6 +197,12 @@ def kill_row(d):
     return d[:st[-1] if st[-1] < len(d) or len(st) < 2 else st[-2]]
 
 
+def torn(c):
+    t = c.get("tear")
+    return bool(t and (draft or c.get("draft")) and
+                time.time() * 1000 % (t[0] + t[1]) < t[0])
+
+
 def paint(c):
     rows = ["  Claude Code v%s (fake)" % VERSION, ""] + transcript[-8:]
     if screen_up(c):
@@ -251,6 +262,10 @@ def paint(c):
         top = rule
         if c.get("name"):
             top = "─" * 50 + " %s ─" % c["name"]
+        if torn(c):
+            n = out.write(("\033[H\033[2J" + "\r\n".join(rows)).encode())
+            out.flush()
+            return n
         rows += [top, comp, rule]
     rows.append("  ⏵⏵ auto mode on" +
                 (" · 1 shell" if status == "shell" else ""))
@@ -364,7 +379,7 @@ while True:
             log(ev="raw", text="error: %s" % e)
         last, cont_paints = None, 3
     c = ctl()
-    r, _, _ = select.select([0], [], [], 0.1)
+    r, _, _ = select.select([0], [], [], 0.02 if c.get("tear") else 0.1)
     if r:
         try:
             chunk = os.read(0, 4096)
@@ -459,7 +474,8 @@ while True:
         if want != status:
             set_status(want)
     view = (status, len(transcript), len(queue), draft, json.dumps(c),
-            prompt_up, collapsed, dismissed, kill_dialog, len(exit_up))
+            prompt_up, collapsed, dismissed, kill_dialog, len(exit_up),
+            torn(c))
     if view != last:
         if cont_paints:
             cont_paints -= 1

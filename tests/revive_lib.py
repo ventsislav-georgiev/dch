@@ -1226,6 +1226,60 @@ def main(part):
                     want, why = got, "prompt (no_screen: up after revive's 4s)"
                 check("--revive --json, claude up but %s: running true, the "
                       "last key [%r]" % (why, got), got == want)
+            # --- #606: Prosper's resume with a message: --revive --no-message,
+            # then at once --say of a ~600-char paragraph with a long path,
+            # in a narrow pane (it wraps over 10 rows). The just-resumed
+            # Claude eats Enters, and its repaints of the long draft are read
+            # halfway (no composer on screen): neither is the text sent.
+            long_msg = ("(supervisor, for the operator) This session was "
+                        "stopped and resumed so it picks up the kit PATH "
+                        "switch. Every background watcher or shell you had "
+                        "running died with the old process: re-arm each one "
+                        "still needed, then carry on where you were. Tools run "
+                        "by name are now denied by the hook; call them as "
+                        "/Users/someone/.config/prosper/kits/io.github.some"
+                        "one.prosper-agentkit/bin/<tool> instead, and leave "
+                        "gcloud by name as it is. Nothing else changed: the "
+                        "ledger, the worktrees and the open pull requests are "
+                        "where you left them, so pick the next step up from "
+                        "your notes and report when the batch is done.")
+            nenv = dict(renv, COLUMNS="60", LINES="40")
+            for n, eat, want in (("rtear", 99, ("failed", "not_submitted")),
+                                 ("rtear2", 2, ("ok", ""))):
+                if lite:
+                    continue
+                sid = "60660660-0000-4000-8000-%012d" % len(names)
+                os.rename(plant(n, sock_dir=sockdir8, argv=[cl],
+                                agent=dict(kind="claude", session_id=sid,
+                                           name="", cwd=proj, launch=[cl])),
+                          os.path.join(recdir8, n + ".json"))
+                setctl(n, eat_enters=eat, tear=[120, 200])
+                r = run("--revive", n, "--no-message", "--json", env=nenv,
+                        timeout=120)
+                names.append((n, renv))
+                said = []
+
+                def say_up():
+                    r2 = run("--say", n, "--json", "--", long_msg, env=renv,
+                             timeout=120)
+                    o = (ndjson(r2.stdout) or [{}])[-1]
+                    said[:] = [r2, (o.get("result"), o.get("reason"))]
+                    # not up yet: no claude, or no composer, so far
+                    return said[1] not in (("skipped", "not_claude"),
+                                           ("skipped", "no_screen"))
+
+                until(say_up, 20)
+                s = starts(n)[-1] if starts(n) else {}
+                time.sleep(1.5)     # an Enter that did take: its turn logged
+                turns = ev(n, "turn", s.get("pid"))
+                check("#606 revive --no-message, then --say of a long wrapped "
+                      "message, %d Enters eaten, repaints read halfway: %s "
+                      "[rc=%d %r]" % (eat, "/".join(want).strip("/"),
+                                      said[0].returncode, said[0].stdout),
+                      r.returncode == 0 and said[1] == want and
+                      (len(turns) == 1 and turns[0]["text"] == long_msg
+                       if want[0] == "ok" else not turns and
+                       len(ev(n, "enter_eaten", s.get("pid"))) == 6))
             # lite's revive returns before its claude has written its record:
             # running is true once it has
             live = []
