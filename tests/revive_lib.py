@@ -1270,12 +1270,19 @@ def main(part):
 
                 until(say_up, 20)
                 s = starts(n)[-1] if starts(n) else {}
-                time.sleep(1.5)     # an Enter that did take: its turn logged
+                if want[0] == "ok":     # an Enter that did take: its turn logged
+                    until(lambda: ev(n, "turn", s.get("pid")), 10)
+                else:                   # a late turn must still be caught
+                    time.sleep(1.5)
                 turns = ev(n, "turn", s.get("pid"))
                 check("#606 revive --no-message, then --say of a long wrapped "
                       "message, %d Enters eaten, repaints read halfway: %s "
-                      "[rc=%d %r]" % (eat, "/".join(want).strip("/"),
-                                      said[0].returncode, said[0].stdout),
+                      "[rc=%d %r] [revive rc=%d turns=%d %r eaten=%d last=%r]"
+                      % (eat, "/".join(want).strip("/"),
+                         said[0].returncode, said[0].stdout, r.returncode,
+                         len(turns), [x.get("text", "")[:60] for x in turns],
+                         len(ev(n, "enter_eaten", s.get("pid"))),
+                         events(n)[-5:]),
                       r.returncode == 0 and said[1] == want and
                       (len(turns) == 1 and turns[0]["text"] == long_msg
                        if want[0] == "ok" else not turns and

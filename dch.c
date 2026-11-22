@@ -8018,16 +8018,20 @@ ag_type(const char *path, const char *text, int paste)
 		/* sent: the composer seen without it, or a dialog up (#606).
 		** No composer counts once it stays off AG_GONE_MS (Claude quit),
 		** never one read: a long draft's repaint spans pty chunks and a
-		** read between them shows none. Enter again only on a screen
-		** that shows the text. */
+		** read between them shows none. No screen read (-2) with the
+		** session socket gone is the session ended: sent; with it there
+		** it is one failed read, which neither sends nor resets the
+		** timer. Enter again only on a screen that shows the text. */
 		for (next = wall_ms() + gap, h = 1; wall_ms() < next ||
 		     (h < 0 && wall_ms() < next + AG_GONE_MS); )
 		{
 			poll(NULL, 0, AG_POLL_MS);
 			h = composer_holds_at(path, text);
-			if (h != -1)
+			if (h == -2 && access(path, F_OK) < 0)
+				return 0;
+			if (h >= 0)
 				gone = 0;
-			else if (!gone)
+			else if (h == -1 && !gone)
 				gone = wall_ms();
 			if (h == 0 || (gone && wall_ms() - gone >= AG_GONE_MS))
 				return 0;
