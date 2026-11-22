@@ -93,12 +93,13 @@ def main():
         os.rename(os.path.join(fc, n + ".ctl.tmp"),
                   os.path.join(fc, n + ".ctl"))
 
-    def sess(base, *cmd, **ctl):
+    def sess(base, *cmd, env=None, **ctl):
         n = "%s%s" % (base, TAG)
         names.append(n)
         setctl(n, **ctl)
         subprocess.run([DCH, "--spawn", n, "--size", "100x30"] + list(cmd),
-                       capture_output=True, check=True)
+                       capture_output=True, check=True,
+                       env=dict(os.environ, **env) if env else None)
         return n
 
     def events(n):
@@ -419,14 +420,18 @@ def main():
             names.remove(xs)
 
         # --- socket unlinked mid-send is not "sent" (LOW-VU1) ------------
-        gs = sess("gx", "claude", eat_enters=99)
+        gs = sess("gx", "claude", eat_enters=99,
+                  env={"DCH_HEAL_MS": "300"})
         up(gs)
         sk = os.path.join(sockdir, gs + ".sock")
         pr = subprocess.Popen([DCH, "--say", gs, "--json", "--", "hello", "there"],
-                              stdout=subprocess.PIPE, text=True)
+                              stdout=subprocess.PIPE, text=True,
+                              env=dict(os.environ, DCH_AGENT_REENTER_MS="1000"))
+        unlinked = False
         if until(lambda: any(e["ev"] == "enter_eaten" for e in events(gs)), 15):
             try:
                 os.unlink(sk)
+                unlinked = True
             except OSError:
                 pass
         try:
@@ -436,9 +441,10 @@ def main():
             out = ""
         j = json.loads(out or "{}")
         check("--say, socket unlinked mid-send: failed/not_submitted",
-              j.get("result") == "failed" and
+              unlinked and j.get("result") == "failed" and
               j.get("reason") == "not_submitted")
-        until(lambda: os.path.exists(sk), 10)   # heal_tick re-binds it
+        check("--say, unlinked socket re-bound by heal tick",
+              until(lambda: os.path.exists(sk), 5))
         run("-k", gs)
         names.remove(gs)
 
