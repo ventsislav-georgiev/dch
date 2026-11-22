@@ -7498,6 +7498,7 @@ ty_arm(void)
 /* Paste, then Enter: Enter in the same burst can fold into the paste. */
 #define AG_ENTER_MS 300
 #define AG_REENTER  5	/* Enters after the first one that did not take */
+#define AG_GONE_MS  1000	/* no composer this long after an Enter: sent */
 
 static const char ag_pause_msg[] =
     "pause all work, i need to restart you. Paused means: stop every "
@@ -7850,18 +7851,24 @@ squeeze(const char *s, size_t n, size_t cap)
 ** rows — the transcript above routinely shows "[Pasted text #1 +3 lines]"
 ** and earlier messages: our text, or the placeholder Claude Code collapses
 ** a long paste into, leading the composer. Anything typed ahead of it is
-** not ours, and an Enter would send it. */
+** not ours, and an Enter would send it. composer_holds_at: 1 it does, 0
+** not (a dialog, the composer empty or holding other text), -1 no composer
+** on the screen read (Claude quit, or a repaint read halfway, #606), -2 no
+** screen read. */
 static int
-composer_holds(const char *path, const char *text)
+composer_holds_at(const char *path, const char *text)
 {
 	char *txt, *dim, *comp, *end, *have = NULL, *want = NULL;
 	int err, ok = 0;
 
 	if (!(txt = screen_faint(path, &dim, &err)))
-		return 0;
-	if (screen_modal(txt) != CG_DIALOG && (comp = composer_find(txt, &end)) &&
-	    (have = squeeze(comp + 3, (size_t)(end - comp - 3), (size_t)-1)) &&
-	    (want = squeeze(text, strlen(text), 32)))
+		return -2;
+	if (screen_modal(txt) == CG_DIALOG)
+		;
+	else if (!(comp = composer_find(txt, &end)))
+		ok = -1;
+	else if ((have = squeeze(comp + 3, (size_t)(end - comp - 3), (size_t)-1)) &&
+	         (want = squeeze(text, strlen(text), 32)))
 		ok = *want && (strncmp(have, want, strlen(want)) == 0 ||
 		               strncmp(have, "[Pastedtext#", 12) == 0);
 	free(have);
@@ -7869,6 +7876,12 @@ composer_holds(const char *path, const char *text)
 	free(txt);
 	free(dim);
 	return ok;
+}
+
+static int
+composer_holds(const char *path, const char *text)
+{
+	return composer_holds_at(path, text) == 1;
 }
 
 /* What is left of `text` in the composer, for ty_take_back: 0 nothing
@@ -7981,8 +7994,8 @@ ag_type(const char *path, const char *text, int paste)
 	** sits in the composer, AG_REENTER times at most, this far apart. A
 	** dialog never gets one: composer_holds() reads it as not holding. */
 	long gap = env_ms("DCH_AGENT_REENTER_MS", 5000);
-	long long next;
-	int t, n;
+	long long next, gone = 0;
+	int t, n, h;
 
 	if ((t = ty_push(path, text, paste)) < 0)
 		return t;
@@ -8002,15 +8015,26 @@ ag_type(const char *path, const char *text, int paste)
 			return ty_take_back(path, text, land);
 		if (t < 0)
 			return -1;
-		for (next = wall_ms() + gap; wall_ms() < next; )
+		/* sent: the composer seen without it, or a dialog up (#606).
+		** No composer counts once it stays off AG_GONE_MS (Claude quit),
+		** never one read: a long draft's repaint spans pty chunks and a
+		** read between them shows none. Enter again only on a screen
+		** that shows the text. */
+		for (next = wall_ms() + gap, h = 1; wall_ms() < next ||
+		     (h < 0 && wall_ms() < next + AG_GONE_MS); )
 		{
 			poll(NULL, 0, AG_POLL_MS);
-			if (!composer_holds(path, text))
+			h = composer_holds_at(path, text);
+			if (h != -1)
+				gone = 0;
+			else if (!gone)
+				gone = wall_ms();
+			if (h == 0 || (gone && wall_ms() - gone >= AG_GONE_MS))
 				return 0;
 			if (ty_sig)
 				return ty_take_back(path, text, land);
 		}
-		if (n == AG_REENTER)
+		if (n == AG_REENTER || h != 1)
 			return -3;
 	}
 }
