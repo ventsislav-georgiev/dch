@@ -123,7 +123,9 @@ def main():
                       FAKE_CLAUDE_DIR=fc, PS1="$ ",
                       BASH_SILENCE_DEPRECATION_WARNING="1",
                       DCH_AGENT_TIMEOUT_MS="5000",
-                      PATH=bindir + os.pathsep + os.environ["PATH"])
+                      PATH=bindir + os.pathsep + os.environ["PATH"],
+                      # bash job messages ("Stopped") are matched in English; LANGUAGE beats LC_ALL
+                      LC_ALL="C", LANGUAGE="C")
     os.chdir(tmp)
     n = "fg" + TAG
     fails, fpid, spid, fakes, cooked = 0, None, None, [], False
