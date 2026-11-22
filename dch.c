@@ -8019,8 +8019,10 @@ ag_type(const char *path, const char *text, int paste)
 		** No composer counts once it stays off AG_GONE_MS (Claude quit),
 		** never one read: a long draft's repaint spans pty chunks and a
 		** read between them shows none. No screen read (-2) with the
-		** session socket gone is the session ended: sent; with it there
-		** it is one failed read, which neither sends nor resets the
+		** socket and its .ver sidecar both gone is the session ended
+		** (the master's exit unlinks both): sent. A gone socket alone is
+		** not an end, heal_tick re-binds it; like a socket there, it is
+		** one failed read, which neither sends nor resets the
 		** timer. Enter again only on a screen that shows the text. */
 		for (next = wall_ms() + gap, h = 1; wall_ms() < next ||
 		     (h < 0 && wall_ms() < next + AG_GONE_MS); )
@@ -8028,7 +8030,13 @@ ag_type(const char *path, const char *text, int paste)
 			poll(NULL, 0, AG_POLL_MS);
 			h = composer_holds_at(path, text);
 			if (h == -2 && access(path, F_OK) < 0)
-				return 0;
+			{
+				char vp[PATH_MAX + 8];
+
+				snprintf(vp, sizeof vp, "%s.ver", path);
+				if (access(vp, F_OK) < 0)
+					return 0;
+			}
 			if (h >= 0)
 				gone = 0;
 			else if (h == -1 && !gone)

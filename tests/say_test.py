@@ -418,6 +418,30 @@ def main():
             run("-k", xs)
             names.remove(xs)
 
+        # --- socket unlinked mid-send is not "sent" (LOW-VU1) ------------
+        gs = sess("gx", "claude", eat_enters=99)
+        up(gs)
+        sk = os.path.join(sockdir, gs + ".sock")
+        pr = subprocess.Popen([DCH, "--say", gs, "--json", "--", "hello", "there"],
+                              stdout=subprocess.PIPE, text=True)
+        if until(lambda: any(e["ev"] == "enter_eaten" for e in events(gs)), 15):
+            try:
+                os.unlink(sk)
+            except OSError:
+                pass
+        try:
+            out = pr.communicate(timeout=60)[0]
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            out = ""
+        j = json.loads(out or "{}")
+        check("--say, socket unlinked mid-send: failed/not_submitted",
+              j.get("result") == "failed" and
+              j.get("reason") == "not_submitted")
+        until(lambda: os.path.exists(sk), 10)   # heal_tick re-binds it
+        run("-k", gs)
+        names.remove(gs)
+
         # --- concurrency: about the slowest session, not the sum ---------
         # Each slow one: two eaten Enters, 3 s apart = 6 s+; five in a row
         # would take 30 s+.
