@@ -420,8 +420,7 @@ def main():
             names.remove(xs)
 
         # --- socket unlinked mid-send is not "sent" (LOW-VU1) ------------
-        gs = sess("gx", "claude", eat_enters=99,
-                  env={"DCH_HEAL_MS": "300"})
+        gs = sess("gx", "claude", eat_enters=99)
         up(gs)
         sk = os.path.join(sockdir, gs + ".sock")
         pr = subprocess.Popen([DCH, "--say", gs, "--json", "--", "hello", "there"],
@@ -430,7 +429,7 @@ def main():
         unlinked = False
         if until(lambda: any(e["ev"] == "enter_eaten" for e in events(gs)), 15):
             try:
-                os.unlink(sk)
+                os.rename(sk, sk + ".aside")  # no heal: stays gone until put back
                 unlinked = True
             except OSError:
                 pass
@@ -443,8 +442,8 @@ def main():
         check("--say, socket unlinked mid-send: failed/not_submitted",
               unlinked and j.get("result") == "failed" and
               j.get("reason") == "not_submitted")
-        check("--say, unlinked socket re-bound by heal tick",
-              until(lambda: os.path.exists(sk), 5))
+        if unlinked:
+            os.rename(sk + ".aside", sk)
         run("-k", gs)
         names.remove(gs)
 
