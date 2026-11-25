@@ -52,7 +52,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     start, the record says idle at once unless
                     MCP_CONNECTION_NONBLOCKING=0 makes it wait; each turn logs mcp, true once they
                     have), bash (the composer is in bash mode, as a
-                    human left it)
+                    human left it), key_cap (a draft stops growing at
+                    that many characters: typed text never lands whole)
   <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE*,
                     DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
                     cfg, MCP_CONNECTION_NONBLOCKING's value as nonblocking), line (typed), turn (a message taken),
@@ -475,6 +476,8 @@ while True:
                 draft = kill_row(draft) + c.get("type_on_kill", "")
             elif ch == b"!" and not draft and not bash and not in_paste:
                 bash = True
+            elif ch >= b" " and len(draft) >= c.get("key_cap", 1 << 30):
+                pass               # lost: the text never lands whole
             elif ch >= b" ":
                 draft += ch.decode("latin-1")
     now = time.time()

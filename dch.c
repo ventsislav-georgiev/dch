@@ -9216,11 +9216,12 @@ restart_agents(int force, const char *only, int json)
 enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
        SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
        SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_INTERRUPTED, SAY_WITHDRAWN,
-       SAY_DRAFT_LEFT, SAY_NOT_FG, SAY_N };
+       SAY_DRAFT_LEFT, SAY_NOT_FG, SAY_NOT_SUBMITTED_BACK, SAY_NOT_TYPED_BACK,
+       SAY_N };
 static const char *const say_code[] = {
 	"", "not_claude", "self", "prompt", "draft", "no_screen", "no_session",
 	"not_submitted", "not_typed", "old_master", "interrupted", "withdrawn",
-	"draft_left", "not_foreground",
+	"draft_left", "not_foreground", "not_submitted", "not_typed",
 };
 static const char *const say_why[] = {
 	"", "no claude runs in the session", "the session you are in",
@@ -9238,6 +9239,10 @@ static const char *const say_why[] = {
 	"claude is not in front: fg it if suspended with Ctrl-Z; under a "
 	"wrapper that does not pass the keyboard on (plain unbuffer) nothing "
 	"reaches it",
+	"the message stayed in the composer through every Enter: taken back "
+	"out, bash mode left, nothing run",
+	"the message did not land in the composer whole: taken back out, bash "
+	"mode left, nothing run",
 };
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
@@ -9288,6 +9293,8 @@ say_raw(const char *t)
 static int
 say_type(const char *path, const char *text, int paste)
 {
+	int t;
+
 	switch (claude_gate_q(path, 1))
 	{
 	case CG_EMPTY:
@@ -9299,7 +9306,14 @@ say_type(const char *path, const char *text, int paste)
 	default:
 		return SAY_NO_SCREEN;
 	}
-	switch (ag_type(path, text, paste))
+	t = ag_type(path, text, paste);
+	/* a "!" text left behind is a loaded shell command: the person's next
+	** Enter runs it with no permission prompt, so take it back (#635).
+	** ty_take_back stops at anything that is not a start of our text. */
+	if ((t == -2 || t == -3) && !paste && *text == '!' &&
+	    ty_take_back(path, text, env_ms("DCH_AGENT_LAND_MS", 30000)) == -5)
+		return t == -3 ? SAY_NOT_SUBMITTED_BACK : SAY_NOT_TYPED_BACK;
+	switch (t)
 	{
 	case 0:
 		return SAY_OK;
@@ -9340,6 +9354,15 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	if (!text[strspn(text, " \t\r\n")])
 	{
 		fprintf(stderr, "dch: --say needs text after --\n");
+		free(text);
+		return 1;
+	}
+	if ((text[0] == '!' || text[0] == '/') &&
+	    !text[1 + strspn(text + 1, " ")])
+	{
+		/* bash mode or the slash menu, opened and submitted empty */
+		fprintf(stderr, "dch: --say: a bare %c is no command\n",
+		        text[0]);
 		free(text);
 		return 1;
 	}
