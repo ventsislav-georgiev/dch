@@ -34,6 +34,7 @@ ENV = dict(os.environ, XDG_RUNTIME_DIR=TMP, XDG_STATE_HOME=TMP + "/state",
            DCH_LOGIN_ENV="0", DCH_NO_REMOTE="1", SHELL="/bin/sh")
 for k in ("DCH_SOCKET_DIR", "DCH_SESSION", "DCH_FOCUS_HOLD_MS"):
     ENV.pop(k, None)
+TRACE = ENV["DCH_DEBUG"] = TMP + "/trace"	# #634: printed on the Esc row's fail
 SOCKDIR = os.path.join(TMP, "dch-%d" % os.getuid())
 fails = []
 
@@ -254,10 +255,13 @@ def focus_rows(slow):
         # #585: no second hold on top of attach.c's own (50 ms). The Esc
         # must reach the program before j exists, so a slow reader cannot
         # merge them. Its latency is timed against an active client's Esc
-        # on the same reader: a master hold adds ~50 ms to every passive
-        # try. Load only adds, and a loaded runner's +50..120 ms can land on
-        # either client (#634), so the two floors (fastest of 8 tries each,
-        # order alternated) are compared, not one pair.
+        # on the same reader (fastest of 8 tries each, order alternated),
+        # in the slow phase only: there a master hold adds 2 s. A 50 ms one
+        # is no signal: a CI runner had every passive try +54 ms with a
+        # master (focus_drop) that cannot hold a lone ESC, and a client's own
+        # hold is a select timer a runner can stretch (#634). On a fail the
+        # trace shows each side's hold: client "focus hold" to "client push",
+        # master "push ... held=".
         def reads():
             with open(log + ".reads", "rb") as f:
                 return f.read().split()
@@ -272,21 +276,37 @@ def focus_rows(slow):
                 time.sleep(0.001)
             lat = (time.time() - t0) * 1000
             got, rd = fed(c, [b"j"], mark), reads()[n0:]
-            return lat, got, rd[rd.index(b"1b"):] if b"1b" in rd else rd
+            return (lat, got, rd[rd.index(b"1b"):] if b"1b" in rd else rd,
+                    t0)
+
+        def trace(t0, lat):
+            """dch's trace lines (client and master) during one try."""
+            with open(TRACE) as f:
+                return [ln.rstrip() for ln in f
+                        if t0 - 0.002 <= float(ln.split()[0])
+                        <= t0 + lat / 1000 + 0.002]
 
         am, ps = [], []
         for i in range(8):
             for c in (a, p) if i % 2 == 0 else (p, a):
                 if c is a:
-                    am.append(esc_ms(a, b"A")[0])
+                    am.append(esc_ms(a, b"A"))
                 else:
                     ps.append(esc_ms(p, b"P"))
-        pm, got, rd = min(ps)
-        check(pm <= min(am) + 30 and got == b"\033j" and rd[:1] == [b"1b"]
-              and not any(x.startswith(b"1b6a") for x in rd),
-              "a passive client's lone Esc reaches the program on its own,"
-              " not held: passive %.0f ms vs active %.0f ms %r"
-              % (pm, min(am), rd))
+        pm, got, rd, pt = min(ps)
+        am0, _, _, at = min(am)
+        if not check((not slow or pm <= am0 + 1000) and got == b"\033j"
+                     and rd[:1] == [b"1b"] and not any(x.startswith(b"1b6a") for x in rd),
+                     "a passive client's lone Esc reaches the program on its"
+                     " own, not held: passive %.0f ms vs active %.0f ms %r"
+                     % (pm, am0, rd)):
+            print("     all ms: passive %s active %s"
+                  % ([round(x[0]) for x in ps], [round(x[0]) for x in am]))
+            for who, t0, lat in (("passive", pt, pm), ("active", at, am0)):
+                print("     %s client pid=%d, fastest try at %.6f:"
+                      % (who, (p if who == "passive" else a).pid, t0))
+                for ln in trace(t0, lat):
+                    print("       " + ln)
         fed(p, [], b"P")
 
         r = dch("--active", name, "--pid", str(p.pid))

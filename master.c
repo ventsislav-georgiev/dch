@@ -4222,6 +4222,10 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			unsigned char o[PKT_MAX + FOCUS_CAR];
 			size_t n = focus_drop(p, o, payload, len);
 
+			/* #634: the held/straight decision, for a CI latency row */
+			dch_trace("push fd=%d passive=%d len=%u in=%zu held=%u "
+			          "last=%02x", p->fd, p->passive, (unsigned)len, n,
+			          (unsigned)p->fcar_n, len ? payload[len - 1] : 0);
 			/* #601: a passive push of only focus reports is not typing;
 			** a held ESC [ is none yet either (#636: a report split
 			** across two reads), it counts when it goes in */
@@ -5033,6 +5037,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			{
 				if (the_pty.fd >= 0)
 				{
+					dch_trace("push fd=%d held %u go in",
+					          p->fd, (unsigned)p->fcar_n);
 					push_input(p, p->fcar, p->fcar_n);
 					dch_vt_input_seen(p->fcar, p->fcar_n);
 					p->in_at = ++in_seq;	/* #601: typing after all */
