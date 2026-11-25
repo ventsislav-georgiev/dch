@@ -1697,7 +1697,7 @@ block in a prompt or compact summary (tool lists, hook context). A bold phrase k
 name is not listed when it is the session's own directory's (the basename of
 the cwd of the earliest line read, any case: `Prosper` in `~/prosper`; an exact
 match, so `ProsperApp` stays), nor when it is said in more than 35% of the
-session's turns and in more than 10 of them (said everywhere, it marks
+session's turns (all the turns read, with or without a ref) and in more than 10 of them (said everywhere, it marks
 nothing); a session of 10 turns or fewer keeps every name. Since #630 a
 name said often but under that share stays: it is a main character and
 leads the list (`Mirela` in 11 of 100 turns, `Mac` in 9% of them).

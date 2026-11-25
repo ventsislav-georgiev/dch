@@ -4780,7 +4780,8 @@ struct xr_index
 	size_t nlow, lowcap;	/* lowcap: low's slots, grown to XR_DROPSET */
 	uint64_t dropped;
 	uint64_t ord;
-	uint64_t maxturn;	/* #624: the newest turn a hit came from */
+	uint64_t maxturn;	/* #624: the newest turn a hit came from, or
+				** (#637) opened */
 	uint64_t homeoff;	/* home's line offset */
 	char home[XR_PATH_MAX + 1];	/* #624: the earliest cwd, "" none */
 	int per_row;
@@ -6472,6 +6473,7 @@ static void
 main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 {
 	struct xr_chapter *x;
+	struct xr_index *ix;
 	char *sum;
 
 	if (!d->turn || (b == B_PROMPT && !d->lead))
@@ -6490,6 +6492,10 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 		if (!(x = ch_push(&d->ch)))
 			return;
 		d->ended = 0;
+		/* #637: the spread share's denominator is the turns read, not
+		** the newest turn with a ref */
+		if ((ix = ix_of(&d->rk)) && d->ch.total > ix->maxturn)
+			ix->maxturn = d->ch.total;
 		x->guess = d->turn && !d->sure;
 		d->turn = 1;
 		d->lead = 1;

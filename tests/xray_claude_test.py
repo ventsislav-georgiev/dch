@@ -4912,6 +4912,10 @@ def test_terms_spread():
              (["we asked Bandicoot."] if t % 6 == 2 and t < 90 else []))
     tq = put("xr-spread8", "11111111-2222-4333-8444-5555555555cb",
              "/home/demo/projs", 8, lambda t: ["we asked Bilby."])
+    # #637: 12 of the first 20 of 100 turns (12%), then 80 with no ref
+    tr = put("xr-spread12", "11111111-2222-4333-8444-5555555555cc",
+             "/home/demo/projr", 100, lambda t:
+             ["we asked Dingo."] if t <= 20 and t % 5 < 3 else [])
     try:
         rc, o, err = xray("xr-spread", "--json")
         refs = {r["key"]: r for r in (o or {}).get("refs", [])}
@@ -4931,9 +4935,16 @@ def test_terms_spread():
               "its 8 turns", rc == 0 and
               refs.get("term:Bilby", {}).get("count") == 8,
               (sorted(refs), err))
+        rc, o, err = xray("xr-spread12", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        check("terms spread: a name in 12 of 100 turns stays when the "
+              "later 80 carry no ref (#637)", rc == 0 and
+              refs.get("term:Dingo", {}).get("count") == 12,
+              (sorted(refs), err))
     finally:
         os.unlink(tp)
         os.unlink(tq)
+        os.unlink(tr)
 
 
 def test_terms_628():
