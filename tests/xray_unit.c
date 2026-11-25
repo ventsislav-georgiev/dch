@@ -1074,6 +1074,35 @@ t_grammar(void)
 		{ "x/foo_bar a.foo_bar foo_bar.c foo_bar@x.org Foo_Bar a_b "
 		  "a__bc ab_cd_ MAX_RETRY", XR_PROSE | XR_TERMS,
 		  "term:MAX_RETRY" },
+		/* #460: a capitalised word mid-sentence; not at a sentence,
+		** line, bullet, heading or quote start, not a stopword, an
+		** acronym, an identifier's part or a call */
+		{ "We asked Mirela. Mirela said Tailscale, then Prosper's "
+		  "Monday; The fix, Enter, API JSON PR, Go Foo_bar Bar() "
+		  "x.Baz Qux-y", XR_MD | XR_TERMS,
+		  "term:Mirela term:Tailscale term:Prosper" },
+		{ "x Solving, Executed, Step 3, Nov 25, the Claude Code app, "
+		  "Ask Mirela: PRs SHAs, then Mirela", XR_MD | XR_TERMS,
+		  "term:Mirela" },
+		{ "see [Image #81] and Image #2, ask Mirela", XR_PROSE | XR_TERMS,
+		  "issue:#81 term:Mirela" },
+		{ "ask Mirela\n<system-reminder>\nuse SendMessage, a **tool "
+		  "list** x\n</system-reminder>\nthen Tailscale", XR_MD | XR_TERMS,
+		  "term:Mirela term:Tailscale" },
+		{ "on screen: ERR_LEDGER_SKEW Mirela TOOL_ONLY_TERM", XR_PROSE |
+		  XR_TERMS, "term:ERR_LEDGER_SKEW term:Mirela term:TOOL_ONLY_TERM" },
+		{ "Mirela first\n- Mirela\n# Mirela\n> Mirela\n1. Mirela\n"
+		  "| Mirela | x\n**Mirela** now: Mirela? (Mirela", XR_MD | XR_TERMS,
+		  "" },
+		/* #460: a short bold phrase, keyed lowercase; labels, stopwords,
+		** sentence ends and refs are not; one capitalised word is N's */
+		{ "use **Shadow Mode** here, **not** the **retry budget** path",
+		  XR_MD | XR_TERMS, "term:shadow mode term:retry budget" },
+		{ "**Why:** x\n**Next:** y\n- **Options:** z\n**Plan** \xe2\x80\x94 a\n"
+		  "**Done** - b\n**Heading line**\nsee **the fix.** and "
+		  "**PAY-219 rollout** and **DCH_TAG** and **one two three four "
+		  "five** and **Prosper** now", XR_MD | XR_TERMS,
+		  "ticket:PAY-219 term:DCH_TAG term:Prosper" },
 		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_MD, "" },
 		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_CODE, "" },
 		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_PLAIN, "" },
@@ -1803,7 +1832,7 @@ rooms_line(char *row, int pulls, size_t from, size_t n)
 static void
 t_rooms(void)
 {
-	static const size_t room[XR_SHAPES] = XR_ROOMS;
+	static const size_t room[XR_SHAPES + 1] = XR_ROOMS;
 	struct xr_index *ix = xr_index_new();
 	struct xr_sink k;
 	struct xr_chapters ch;
@@ -1813,7 +1842,7 @@ t_rooms(void)
 	uint64_t later;
 	FILE *f;
 
-	for (i = 0; i < XR_SHAPES; i++)
+	for (i = 0; i < XR_SHAPES + 1; i++)	/* + #460's name room */
 		sum += room[i];
 	CHECK("rooms: the kinds' rooms add up to XR_KEYS", sum == XR_KEYS);
 	if (!ix || !row)

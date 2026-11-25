@@ -149,9 +149,11 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 /* ---- refs (XR2a, #135): grammar, normalization, definitions ------------ */
 #define XR_KEY_MAX     1024		/* bytes of normalized text; a longer
 					** candidate is no ref */
-#define XR_KEYS        2400		/* index keys (3.2), the rest counted */
-/* ... in a room per kind, XR_TICKET..XR_TERM, XR_KEYS in all (#262) */
-#define XR_ROOMS       { 300, 400, 500, 250, 350, 200, 400 }
+#define XR_KEYS        2700		/* index keys (3.2), the rest counted */
+/* ... in a room per kind, XR_TICKET..XR_TERM, XR_KEYS in all (#262), then
+** one for #460's name and bold terms: their one-off candidates never push
+** a backticked or identifier term out */
+#define XR_ROOMS       { 300, 400, 500, 250, 350, 200, 400, 300 }
 #define XR_SPANS       128		/* mentions per entry (3.8) */
 #define XR_DEFS        8		/* definitions per entry (3.8) */
 #define XR_TEXT_CAP    6000		/* scalars: prose clips (v2.1 3.1) */
@@ -169,7 +171,9 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 #define XR_SH_LINE     (64u << 10)	/* a WRAP-joined shell line (3.8) */
 
 /* XR_TERM (#458): a backticked span or a 2+ part CONST_CASE / snake_case
-** identifier, in prose only (XR_TERMS) */
+** identifier, in prose only (XR_TERMS); #460: also a capitalised word not
+** at a sentence start (rule 'N') and a short **bold** phrase (rule 'B'),
+** listed once they recur in 2+ turns */
 enum { XR_TICKET, XR_ISSUE, XR_PULL, XR_COMMIT, XR_FILE, XR_URL, XR_TERM,
        XR_SHAPES };
 extern const char *const xr_shape_name[];

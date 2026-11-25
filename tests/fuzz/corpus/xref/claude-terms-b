@@ -1,0 +1,4 @@
+{"type": "user", "cwd": "/home/demo", "timestamp": "2026-11-10T10:00:00Z", "message": {"content": "turn 0 Mirela"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "We asked Mirela about **shadow mode**. Then Mirela said the **Shadow Mode** run is green.\n- **Why:** x\n**Next** \u2014 y\nTailscale, Edit and edit, **PAY-219 rollout**"}]}}
+{"type": "user", "cwd": "/home/demo", "timestamp": "2026-11-10T10:01:00Z", "message": {"content": "turn 1 Mirela"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "We asked Mirela about **shadow mode**. Then Mirela said the **Shadow Mode** run is green.\n- **Why:** x\n**Next** \u2014 y\nTailscale, Edit and edit, **PAY-219 rollout**"}]}}

@@ -8,7 +8,8 @@
 **      every span inside the text, in order, not overlapping, its key
 **      "<shape>:<text>" of valid UTF-8 within XR_KEY_MAX; bit 5 adds
 **      XR_TERMS (#458): a term's text is its span's bytes, 2-64 printable
-**      ASCII with no blank or backtick (also from a decoder or --ref);
+**      ASCII with no blank or backtick (also from a decoder or --ref); a
+**      bold one's (#460) lowercase, single blanks allowed;
 **   1: a Claude JSONL transcript (cut at '\n') into an index and a --ref
 **      scan for the first key the index met, then xr_print with the refs;
 **   2: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}) through
@@ -110,7 +111,9 @@ check_key(const struct xr_span *sp)
 		if (strlen(t) < 2 || strlen(t) > 64)
 			abort();
 		for (; *t; t++)
-			if (*t <= ' ' || *t >= 0x7f || *t == '`')
+			/* #460: a bold phrase's words have single blanks */
+			if ((*t <= ' ' && !(sp->rule == 'B' && *t == ' ')) ||
+			    *t >= 0x7f || *t == '`')
 				abort();
 	}
 }
@@ -132,8 +135,14 @@ gram_span(void *ctx, const struct xr_span *sp)
 	check_key(sp);
 	if (sp->shape == XR_TERM &&
 	    (strlen(xr_span_text(sp)) != sp->e - sp->s ||
-	     memcmp(xr_span_text(sp), g->s + sp->s, sp->e - sp->s)))
-		abort();	/* a term keys as written (#458) */
+	     (sp->rule == 'B' ? strncasecmp(xr_span_text(sp), g->s + sp->s,
+	                                    sp->e - sp->s) ||
+	                        strncmp(sp->full, g->s + sp->s, sp->e - sp->s)
+	      : memcmp(xr_span_text(sp), g->s + sp->s, sp->e - sp->s))))
+		abort();	/* a term keys as written (#458), a bold one
+				** lowercase with its spelling in full (#460) */
+	if ((sp->rule == 'N' || sp->rule == 'B') && sp->shape != XR_TERM)
+		abort();
 	return 0;
 }
 

@@ -877,8 +877,183 @@ r_term(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
 	return j;
 }
 
-/* The first rule (U, R, F, T, r, S, H, W) matching at i: the span's end, 0 for
-** none. The caller has checked the boundary before i. */
+static size_t try_rules(const char *s, size_t n, size_t i, uint32_t prev,
+                        int rules, int code, const char *cwd,
+                        struct xr_span *sp);
+
+/* #460: i opens a sentence, a line, a list item, a heading, a quote or a
+** table cell: past blanks, quotes, brackets and emphasis there is the text's
+** start, a line break or . ! ? : ; |, or only a bullet back to the line's
+** start. */
+static int
+sent_start(const char *s, size_t i)
+{
+	size_t k = i;
+
+	while (k && s[k - 1] && strchr(" \t*_\"'([", s[k - 1]))
+		k--;
+	if (!k || strchr("\n\r.!?:;|", s[k - 1]))
+		return 1;
+	if (!strchr("-+>#)", s[k - 1]))
+		return 0;
+	while (k && s[k - 1] && strchr(" \t-+*>#.)0123456789", s[k - 1]))
+		k--;
+	return !k || s[k - 1] == '\n' || s[k - 1] == '\r';
+}
+
+/* s[a, b) is one of the words in v, case-insensitive */
+static int
+word_in(const char *const *v, const char *s, size_t a, size_t b, int icase)
+{
+	for (; *v; v++)
+		if (strlen(*v) == b - a &&
+		    !(icase ? strncasecmp(*v, s + a, b - a)
+		            : strncmp(*v, s + a, b - a)))
+			return 1;
+	return 0;
+}
+
+/* N (#460): a capitalised word of 3-32 ASCII letters, its second lowercase
+** (an acronym, API JSON PR CI HTTP PRs, never is), not at a sentence start,
+** not part of an identifier, path, call, label, count or Title Case run, no
+** -ing or -ed word, not in the stoplist. */
+static size_t
+r_name(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
+{
+	/* capitalised mid-line though no name: words after a sentence break the
+	** scan cannot see, days and months, pronouns, keys and UI words, booleans */
+	static const char *const stop[] = {
+		"The", "This", "That", "These", "Those", "Then", "There", "Here",
+		"When", "What", "Why", "How", "Where", "Which", "Who", "And", "But",
+		"For", "Not", "Yes", "Also", "Note", "See", "Now", "Its", "Our",
+		"You", "Your", "She", "Her", "His", "They", "Their", "Some", "All",
+		"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+		"Sunday", "January", "February", "March", "April", "May", "June",
+		"July", "August", "September", "October", "November", "December",
+		"Enter", "Return", "Tab", "Esc", "Escape", "Ctrl", "Control",
+		"Shift", "Cmd", "Command", "Alt", "Option", "Space", "Backspace",
+		"Delete", "Home", "End", "Left", "Right", "Down",
+		"True", "False", "None", "Null", "Next", "New", "MiB", "KiB",
+		"GiB", NULL};
+	size_t j = i + 1, k;
+
+	/* the second letter lowercase: no acronym, nor its plural (PRs) */
+	if (!A_UP((unsigned char)s[i]) || i + 1 >= n ||
+	    !A_LO((unsigned char)s[i + 1]) || prev == '/' || prev == '.' ||
+	    prev == '-' || prev == '@' || prev == '$')
+		return 0;
+	while (j < n && j - i <= 32 && A_AL((unsigned char)s[j]))
+		j++;
+	if (j - i < 3 || j - i > 32 || !after_ok(s, n, j) ||
+	    (j + 1 < n && (s[j] == '-' || s[j] == '.' || s[j] == '/' ||
+	                   s[j] == '@') && A_ALNUM((unsigned char)s[j + 1])) ||
+	    /* a call, a label (Step:), a count or date (Step 3, Nov 25) */
+	    (j < n && (s[j] == '(' || s[j] == ':')) ||
+	    (j + 1 < n && s[j] == ' ' && A_DIG((unsigned char)s[j + 1])) ||
+	    /* Claude Code's [Image #81] placeholder, a numbered Step #3 */
+	    (j + 2 < n && s[j] == ' ' && s[j + 1] == '#' &&
+	     A_DIG((unsigned char)s[j + 2])) ||
+	    /* a verb or participle a heading capitalises (Solving, Executed) */
+	    (j - i >= 5 && (!memcmp(s + j - 3, "ing", 3) ||
+	                    !memcmp(s + j - 2, "ed", 2))) ||
+	    word_in(stop, s, i, j, 0) || sent_start(s, i))
+		return 0;
+	/* Title Case (a heading, a UI label, "Claude Code"): a capitalised
+	** word (Upper, lower) beside it, past one blank, that is no stopword;
+	** an identifier (ERR_X) is no such word */
+	if (j + 2 < n && s[j] == ' ' && A_UP((unsigned char)s[j + 1]) &&
+	    A_LO((unsigned char)s[j + 2]))
+		return 0;
+	if (i >= 3 && s[i - 1] == ' ' && A_LO((unsigned char)s[i - 2]))
+	{
+		for (k = i - 2; k && A_AL((unsigned char)s[k - 1]); k--)
+			;
+		if (A_UP((unsigned char)s[k]) && A_LO((unsigned char)s[k + 1]) &&
+		    (!k || !u_word((unsigned char)s[k - 1])) &&
+		    !word_in(stop, s, k, i - 1, 0))
+			return 0;
+	}
+	if (!span_key(sp, XR_TERM, s + i, j - i, 0))
+		return 0;
+	return j;
+}
+
+/* B (#460): **a phrase** of 1-4 words and 2-40 bytes of printable ASCII
+** with a letter, on one line, ending in a letter or digit; not a label (a
+** colon or a dash after it, or the line's end), not stopwords only, not a
+** single capitalised word (N's), holding no other ref. Keyed lowercase
+** (recurrence ignores case); full keeps the spelling. The end past the
+** closing **, the span its text. */
+static size_t
+r_bold(const char *s, size_t n, size_t i, uint32_t prev, const char *cwd,
+       struct xr_span *sp)
+{
+	/* emphasis, not a name: one-word stresses Claude bolds all the time */
+	static const char *const stop[] = {
+		"a", "an", "the", "and", "or", "but", "not", "no", "nor", "is",
+		"are", "was", "be", "do", "does", "did", "it", "this", "that",
+		"these", "those", "to", "of", "in", "on", "at", "by", "for", "with",
+		"from", "as", "if", "then", "only", "all", "any", "both", "each",
+		"every", "never", "always", "must", "should", "will", "can",
+		"cannot", "before", "after", "now", "new", "one", "same", "also",
+		"yes", "very", "more", "most", "less", "why", "what", "how", "when",
+		"where", "which", "who", "done", "fixed", "here", "there", "first",
+		"last", "next", "still", "just", "nothing", NULL};
+	size_t a = i + 2, d, k, w;
+	int words = 1, al = 0, allstop = 1;
+	struct xr_span o;
+
+	if (i + 4 >= n || s[i + 1] != '*' || prev == '*' || s[a] == ' ' ||
+	    s[a] == '*')
+		return 0;
+	for (d = a; d < n && d - a <= 40 && s[d] != '*'; d++)
+	{
+		if ((unsigned char)s[d] < ' ' || (unsigned char)s[d] >= 0x7f ||
+		    s[d] == '`' || s[d] == '[' || (s[d] == ' ' && s[d - 1] == ' '))
+			return 0;
+		words += s[d] == ' ';
+		al |= A_AL((unsigned char)s[d]);
+	}
+	if (d + 1 >= n || s[d] != '*' || s[d + 1] != '*' || d - a < 2 ||
+	    d - a > 40 || !al || words > 4 ||
+	    !A_ALNUM((unsigned char)s[d - 1]) ||
+	    (d + 2 < n && s[d + 2] == '*'))
+		return 0;
+	/* a label: **Why:** **Next** — text, a line of its own */
+	for (k = d + 2; k < n && (s[k] == ' ' || s[k] == '\t'); k++)
+		;
+	if (k >= n || s[k] == '\n' || s[k] == '\r' || s[k] == ':' ||
+	    (s[k] == '-' && k + 1 < n && s[k + 1] == ' ') ||
+	    (k + 2 < n && !memcmp(s + k, "\xe2\x80", 2) &&
+	     ((unsigned char)s[k + 2] == 0x93 || (unsigned char)s[k + 2] == 0x94)))
+		return 0;
+	for (k = a; k < d; k = w + 1)
+	{
+		for (w = k; w < d && s[w] != ' '; w++)
+			;
+		if (!word_in(stop, s, k, w, 1))
+			allstop = 0;
+	}
+	if (allstop || (words == 1 && A_UP((unsigned char)s[a])))
+		return 0;
+	/* a ref inside (**PAY-219 rollout**, **DCH_TAG**) stays its own */
+	for (k = a; k < d; k++)
+	{
+		uint32_t p = k == a ? '*' : (unsigned char)s[k - 1];
+
+		if (!u_word(p) && (try_rules(s, d, k, p, R_PROSE, 0, cwd, &o) ||
+		                   r_term(s, d, k, p, &o)))
+			return 0;
+	}
+	if (!span_key(sp, XR_TERM, s + a, d - a, 1))
+		return 0;
+	memcpy(sp->full, s + a, d - a);
+	sp->full[d - a] = '\0';
+	return d + 2;
+}
+
+/* The first rule (U, R, F, T, r, S, H, W, N, B) matching at i: the span's
+** end, 0 for none. The caller has checked the boundary before i. */
 static size_t
 try_rules(const char *s, size_t n, size_t i, uint32_t prev, int rules,
           int code, const char *cwd, struct xr_span *sp)
@@ -905,10 +1080,16 @@ try_rules(const char *s, size_t n, size_t i, uint32_t prev, int rules,
 		sp->rule = 'H';
 	else if ((rules & RW) && A_AL(c) && (e = r_term(s, n, i, prev, sp)))
 		sp->rule = 'W';
+	else if ((rules & RW) && A_UP(c) && (e = r_name(s, n, i, prev, sp)))
+		sp->rule = 'N';
+	else if ((rules & RW) && c == '*' &&
+	         (e = r_bold(s, n, i, prev, cwd, sp)))
+		sp->rule = 'B';
 	if (e)
 	{
-		sp->s = i;
-		sp->e = e;
+		/* a bold phrase's span is its text, inside the asterisks */
+		sp->s = sp->rule == 'B' ? i + 2 : i;
+		sp->e = sp->rule == 'B' ? e - 2 : e;
 	}
 	return e;
 }
@@ -922,11 +1103,42 @@ struct gscan
 	size_t count;
 	int stop;
 	int terms;	/* RW or 0: prose's terms (#458) */
+	/* #460: set, no rule runs: each lowercase prose word to wfn */
+	void (*wfn)(void *ctx, const char *w, size_t l);
+	void *wctx;
+	size_t n, hs, he;	/* s's length; g_harness's block [hs, he) */
 };
+
+static const char *find(const char *s, size_t n, const char *needle,
+                        size_t from);
+
+/* #460: p lies in a <system-reminder> block, the harness's text (its tool
+** lists, hook context) a prompt or compact summary carries; queries rise */
+static int
+g_harness(struct gscan *g, size_t p)
+{
+	const char *b, *e;
+
+	while (p >= g->he)
+	{
+		if (!(b = find(g->s, g->n, "<system-reminder>", g->he)))
+		{
+			g->hs = g->he = (size_t)-1;
+			break;
+		}
+		g->hs = (size_t)(b - g->s);
+		e = find(g->s, g->n, "</system-reminder>", g->hs);
+		g->he = e ? (size_t)(e - g->s) + 18 : g->n;
+	}
+	return p >= g->hs && p < g->he;
+}
 
 static void
 g_emit(struct gscan *g, const struct xr_span *sp)
 {
+	/* names and bold are the conversation's own: none from harness text */
+	if ((sp->rule == 'N' || sp->rule == 'B') && g_harness(g, sp->s))
+		return;
 	g->count++;
 	if (g->fn && g->fn(g->ctx, sp))
 		g->stop = 1;
@@ -943,6 +1155,30 @@ scan_run(struct gscan *g, size_t a, size_t b, int rules, int code, int whole)
 	size_t i = a, adv;
 	struct xr_span sp;
 
+	while (g->wfn && i < b)
+	{
+		size_t j = i;
+
+		/* a word of 3-32 lowercase letters, alone: no path's, host's,
+		** identifier's or flag's part */
+		while (j < b && A_LO((unsigned char)s[j]))
+			j++;
+		if (j - i >= 3 && j - i <= 32 && !u_word(prev) && prev != '/' &&
+		    prev != '.' && prev != '-' && prev != '$' && after_ok(s, b, j) &&
+		    !(j + 1 < b && strchr("-./@", s[j]) &&
+		      A_ALNUM((unsigned char)s[j + 1])))
+			g->wfn(g->wctx, s + i, j - i);
+		if (j > i)
+		{
+			prev = (unsigned char)s[j - 1];
+			i = j;
+			continue;
+		}
+		prev = u8_next((const unsigned char *)s + i, b - i, &adv);
+		i += adv;
+	}
+	if (g->wfn)
+		return;
 	while (i < b && !g->stop)
 	{
 		c = u8_next((const unsigned char *)s + i, b - i, &adv);
@@ -1107,7 +1343,7 @@ code_span(struct gscan *g, size_t a, size_t b)
 	const char *t;
 	struct xr_span sp;
 
-	if (memchr(g->s + a, '\n', n))
+	if (g->wfn || memchr(g->s + a, '\n', n))
 		return;
 	t = trim(g->s + a, &n);
 	ts = (size_t)(t - g->s);
@@ -1231,13 +1467,24 @@ static size_t
 grammar(const char *s, size_t n, int mode, int rules, const char *cwd,
         xr_span_fn fn, void *ctx)
 {
-	struct gscan g = { s, cwd, fn, ctx, 0, 0, rules & RW };
+	struct gscan g = { s, cwd, fn, ctx, 0, 0, rules & RW, NULL, NULL,
+	                   n, 0, 0 };
 
 	if (mode == XR_PROSE || mode == XR_MD)
 		scan_prose(&g, n, mode == XR_MD);
 	else
 		scan_run(&g, 0, n, rules, mode == XR_CODE, 0);
 	return g.count;
+}
+
+/* #460: each lowercase word of the prose s[0, n) (md: Markdown) to fn */
+static void
+prose_words(const char *s, size_t n, int md,
+            void (*fn)(void *ctx, const char *w, size_t l), void *ctx)
+{
+	struct gscan g = { s, NULL, NULL, NULL, 0, 0, 0, fn, ctx, n, 0, 0 };
+
+	scan_prose(&g, n, md);
 }
 
 size_t
@@ -2242,6 +2489,7 @@ title_hash(const char *t)
 /* Where a field's mentions go: the sink plus what each hit carries. */
 struct remit
 {
+	int nb;			/* #460: name and bold spans taken, own cap */
 	const struct xr_sink *k;
 	const char *cwd;
 	const char *text;	/* the field scanned */
@@ -2383,6 +2631,15 @@ rm_span(void *ctx, const struct xr_span *sp)
 		return 1;
 	if (rel_file(sp))
 		return 0;
+	/* #460: names and bold never take a machine ref's or identifier's
+	** room. shortcut: a block's first XR_SPANS are kept, not its newest;
+	** recency first if a block that long shows up */
+	if (sp->rule == 'N' || sp->rule == 'B')
+	{
+		if (r->nb++ < XR_SPANS)
+			rm_hit(r, sp, NULL, NULL, NULL);
+		return 0;
+	}
 	if (r->skip > 0)
 	{
 		r->skip--;
@@ -2398,7 +2655,7 @@ rm_span(void *ctx, const struct xr_span *sp)
 static int
 rm_count(void *ctx, const struct xr_span *sp)
 {
-	if (!rel_file(sp))
+	if (!rel_file(sp) && sp->rule != 'N' && sp->rule != 'B')
 		(*(long *)ctx)++;
 	return 0;
 }
@@ -2406,6 +2663,10 @@ rm_count(void *ctx, const struct xr_span *sp)
 /* Every span of text[0..n) in mode to the sink; text NUL-terminated. Past
 ** left spans the newest are kept (recency first): a counting pass finds how
 ** many oldest to skip. The pass costs one more scan of a bounded block. */
+static struct xr_index *ix_of(const struct xr_sink *k);
+static void ix_hit(void *ctx, const struct xr_hit *h);
+static void ix_word(void *ctx, const char *w, size_t l);
+
 static void
 rm_scan(struct remit *r, const char *text, size_t n, int mode)
 {
@@ -2415,6 +2676,7 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 	r->ctext = NULL;
 	r->ncov = 0;
 	r->skip = 0;
+	r->nb = 0;
 	if (r->left > 0)
 	{
 		(void)xr_grammar(text, n, mode, r->cwd, rm_count, &all);
@@ -2422,6 +2684,11 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 			r->skip = all - r->left;
 	}
 	(void)xr_grammar(text, n, mode, r->cwd, rm_span, r);
+	/* #460: an index learns the prose's lowercase words: a capitalised
+	** word also said lowercase is a common word, no name */
+	if ((mode & XR_TERMS) && ix_of(r->k))
+		prose_words(text, n, (mode & ~XR_TERMS) == XR_MD, ix_word,
+		            ix_of(r->k));
 }
 
 /* ---- refs: definitions (v2.1 4.2-4.3) ------------------------------------- */
@@ -4445,7 +4712,13 @@ struct xr_ent
 	uint64_t defh[XR_DEFS];
 	char *title;
 	int weak;		/* title from D5 (#534) */
+	int room;		/* its room: its shape, or XR_CAND (#460) */
+	int solid;		/* a hit by a rule other than N or B (#460) */
+	uint64_t nturn, lastturn;	/* turns it is mentioned in (#460) */
 };
+
+/* #460: the room of name and bold terms first seen as such */
+#define XR_CAND XR_SHAPES
 
 #define XR_HASH 8192		/* slots, > 2 x XR_KEYS */
 #define XR_DROPSET 65536
@@ -4453,16 +4726,25 @@ struct xr_ent
 /* Each kind its own room (#262): pulls, issues and tickets are never pushed
 ** out by files, commits or URLs. In a full room the ref whose latest
 ** mention is the oldest goes, counted in dropped_keys. */
-static const size_t xr_room[XR_SHAPES] = XR_ROOMS;
+static const size_t xr_room[XR_SHAPES + 1] = XR_ROOMS;
+
+struct low
+{
+	uint64_t h;
+	uint64_t n;		/* times said */
+};
 
 struct xr_index
 {
 	struct xr_ent *v;
-	size_t n, nk[XR_SHAPES];	/* nk: entries per kind */
-	/* each kind's list ends: entry + 1 */
-	uint32_t oldest[XR_SHAPES], newest[XR_SHAPES];
+	size_t n, nk[XR_SHAPES + 1];	/* nk: entries per room */
+	/* each room's list ends: entry + 1 */
+	uint32_t oldest[XR_SHAPES + 1], newest[XR_SHAPES + 1];
 	uint32_t slot[XR_HASH];	/* entry + 1 */
 	uint64_t *drop;		/* dropped keys' hashes, open addressing */
+	struct low *low;	/* #460: lowercase prose words by their
+				** "term:Word" hash, the same way; NULL none */
+	size_t nlow;
 	uint64_t dropped;
 	uint64_t ord;
 	int per_row;
@@ -4499,6 +4781,7 @@ xr_index_free(struct xr_index *x)
 	}
 	free(x->v);
 	free(x->drop);
+	free(x->low);
 	free(x);
 	xr_index_live--;
 }
@@ -4603,11 +4886,11 @@ ix_unlink(struct xr_index *x, size_t k)
 	if (e->older)
 		x->v[e->older - 1].newer = e->newer;
 	else
-		x->oldest[e->shape] = e->newer;
+		x->oldest[e->room] = e->newer;
 	if (e->newer)
 		x->v[e->newer - 1].older = e->older;
 	else
-		x->newest[e->shape] = e->older;
+		x->newest[e->room] = e->older;
 	e->older = e->newer = 0;
 }
 
@@ -4617,16 +4900,60 @@ ix_touch(struct xr_index *x, size_t k)
 {
 	struct xr_ent *e = &x->v[k];
 
-	if (x->newest[e->shape] == k + 1)
+	if (x->newest[e->room] == k + 1)
 		return;
-	if (e->older || e->newer || x->oldest[e->shape] == k + 1)
+	if (e->older || e->newer || x->oldest[e->room] == k + 1)
 		ix_unlink(x, k);
-	e->older = x->newest[e->shape];
+	e->older = x->newest[e->room];
 	if (e->older)
 		x->v[e->older - 1].newer = (uint32_t)(k + 1);
 	else
-		x->oldest[e->shape] = (uint32_t)(k + 1);
-	x->newest[e->shape] = (uint32_t)(k + 1);
+		x->oldest[e->room] = (uint32_t)(k + 1);
+	x->newest[e->room] = (uint32_t)(k + 1);
+}
+
+/* #460: the lowercase prose words, counted by "term:Word" hash; the set
+** stops at half load (a word past it never demotes a name) */
+static struct low *
+low_at(const struct xr_index *x, uint64_t h)
+{
+	size_t i;
+
+	h = h ? h : 1;
+	for (i = h % XR_DROPSET; x->low && x->low[i].h; i = (i + 1) % XR_DROPSET)
+		if (x->low[i].h == h)
+			return &x->low[i];
+	return NULL;
+}
+
+static void
+ix_word(void *ctx, const char *w, size_t l)
+{
+	struct xr_index *x = ctx;
+	char key[48];
+	uint64_t h;
+	size_t i;
+	struct low *o;
+
+	memcpy(key, "term:", 5);
+	memcpy(key + 5, w, l);
+	key[5] = (char)(key[5] - 32);
+	key[5 + l] = '\0';
+	h = fnv(key, 5 + l);
+	h = h ? h : 1;
+	if ((o = low_at(x, h)))
+	{
+		o->n++;
+		return;
+	}
+	if (x->nlow >= XR_DROPSET / 2 ||
+	    (!x->low && !(x->low = calloc(XR_DROPSET, sizeof *x->low))))
+		return;
+	for (i = h % XR_DROPSET; x->low[i].h; i = (i + 1) % XR_DROPSET)
+		;
+	x->low[i].h = h;
+	x->low[i].n = 1;
+	x->nlow++;
 }
 
 static struct xr_ent *
@@ -4637,6 +4964,8 @@ ix_get(struct xr_index *x, const struct xr_span *sp)
 	struct xr_ent *e;
 	char *key;
 	int s = sp->shape;
+	int r = s == XR_TERM && (sp->rule == 'N' || sp->rule == 'B') ? XR_CAND
+	        : s;
 
 	for (i = h % XR_HASH; x->slot[i]; i = (i + 1) % XR_HASH)
 		if (!strcmp(x->v[x->slot[i] - 1].key, sp->key))
@@ -4646,16 +4975,16 @@ ix_get(struct xr_index *x, const struct xr_span *sp)
 		}
 	if (s < 0 || s >= XR_SHAPES || !(key = strdup(sp->key)))
 		return NULL;
-	if (x->nk[s] == xr_room[s])
+	if (x->nk[r] == xr_room[r])
 	{
 		/* the room is full: its ref mentioned longest ago goes */
-		k = x->oldest[s] - 1;
+		k = x->oldest[r] - 1;
 		ix_drop(x, x->v[k].h);
 		ix_unslot(x, k);
 		ix_unlink(x, k);
 		free(x->v[k].key);
 		free(x->v[k].title);
-		x->nk[s]--;
+		x->nk[r]--;
 		for (i = h % XR_HASH; x->slot[i]; i = (i + 1) % XR_HASH)
 			;
 	}
@@ -4667,9 +4996,10 @@ ix_get(struct xr_index *x, const struct xr_span *sp)
 	e->key = key;
 	e->h = h;
 	e->shape = s;
+	e->room = r;
 	e->first = x->ord++;
 	x->slot[i] = (uint32_t)(k + 1);
-	x->nk[s]++;
+	x->nk[r]++;
 	ix_touch(x, k);
 	return e;
 }
@@ -4679,13 +5009,20 @@ ix_hit(void *ctx, const struct xr_hit *h)
 {
 	struct xr_index *x = ctx;
 	struct xr_ent *e = ix_get(x, h->sp);
-	int k, weak;
+	int k, weak, nb;
+	uint64_t turn = h->turn ? h->turn : h->unit;
 
 	if (!e)
 		return;
+	nb = h->sp->rule == 'N' || h->sp->rule == 'B';
+	e->solid |= !nb;
 	if (h->off >= e->last)
+	{
 		e->last = h->off, e->lastat = h->at, e->lastord = x->ord++;
-	if (strlen(h->sp->full) > strlen(e->full))
+		if (h->sp->rule == 'B')	/* the newest spelling (#460) */
+			snprintf(e->full, sizeof e->full, "%s", h->sp->full);
+	}
+	if (h->sp->rule != 'B' && strlen(h->sp->full) > strlen(e->full))
 		snprintf(e->full, sizeof e->full, "%s", h->sp->full);
 	if (h->title)
 	{
@@ -4718,6 +5055,11 @@ ix_hit(void *ctx, const struct xr_hit *h)
 		e->nunit++;
 		e->lastunit = h->unit;
 	}
+	if (!e->nturn || e->lastturn != turn)
+	{
+		e->nturn++;
+		e->lastturn = turn;
+	}
 	if (!e->nrow || e->lastrow != h->row)
 	{
 		e->nrow++;
@@ -4730,6 +5072,28 @@ xr_index_sink(struct xr_index *x, struct xr_sink *k)
 {
 	k->hit = ix_hit;
 	k->ctx = x;
+}
+
+/* #460: a name or bold term said in one turn only is emphasis, not a
+** term: kept (a second turn lists it), never written. Nor is a capitalised
+** word said lowercase in prose as often as capitalised (Edit, edit): a
+** common word, not a name. */
+static int
+ix_shown(const struct xr_index *x, const struct xr_ent *e)
+{
+	const struct low *o = e->solid ? NULL : low_at(x, e->h);
+
+	return e->solid || (e->nturn >= 2 && (!o || o->n < e->nunit));
+}
+
+static size_t
+ix_nshown(const struct xr_index *x)
+{
+	size_t k, n = 0;
+
+	for (k = 0; x && k < x->n; k++)
+		n += ix_shown(x, &x->v[k]);
+	return n;
 }
 
 static uint64_t
@@ -10509,7 +10873,9 @@ put_ref_n(FILE *m, const struct xr_ent *e, uint64_t c, const char *project,
 	fputs(comma ? ",{\"key\":" : "{\"key\":", m);
 	xr_put_str(m, e->key);
 	fprintf(m, ",\"shape\":\"%s\",\"text\":", xr_shape_name[e->shape]);
-	xr_put_str(m, strchr(e->key, ':') + 1);
+	/* a bold term's newest spelling (#460) */
+	xr_put_str(m, e->shape == XR_TERM && e->full[0] ? e->full
+	              : strchr(e->key, ':') + 1);
 	if (e->shape == XR_COMMIT)
 	{
 		fputs(",\"full\":", m);
@@ -10568,8 +10934,11 @@ xr_print(FILE *f, const struct xr_answer *a)
 		free(rs);
 		return -1;
 	}
-	for (k = 0; k < nr; k++)
-		ord[k] = drop[k] = k;
+	/* nr from here: the refs written (#460: no one-turn name) */
+	for (k = j = 0; k < nr; k++)
+		if (ix_shown(a->refs, &a->refs->v[k]))
+			ord[j] = drop[j] = k, j++;
+	nr = j;
 	if (nr)
 	{
 		ref_sort_x = a->refs;
@@ -10581,9 +10950,9 @@ xr_print(FILE *f, const struct xr_answer *a)
 		goto fail;
 	for (k = 0, rl = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
-		put_ref(m, a->refs, &a->refs->v[k], proj, 1);
-		rat[k] = (size_t)ftell(m);
-		rl += rat[k];
+		put_ref(m, a->refs, &a->refs->v[ord[k]], proj, 1);
+		rat[ord[k]] = (size_t)ftell(m);
+		rl += rat[ord[k]];
 	}
 	if (nr && (fclose(m) != 0 || k < nr))
 		goto fail;
@@ -10810,7 +11179,7 @@ sch_cmp(const void *pa, const void *pb)
 static int
 stab_build(const struct xr_answer *a, struct stab *t)
 {
-	size_t nr = a->refs ? a->refs->n : 0, nc = a->ch ? a->ch->n : 0, k;
+	size_t nr = a->refs ? a->refs->n : 0, nc = a->ch ? a->ch->n : 0, k, i;
 	const char *proj = a->project ? a->project : "";
 	char *b = NULL;
 	size_t bl = 0;
@@ -10824,11 +11193,14 @@ stab_build(const struct xr_answer *a, struct stab *t)
 		stab_free(t);
 		return -1;
 	}
-	for (k = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
+	for (k = i = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
 		const struct xr_ent *e = &a->refs->v[k];
-		struct sref *r = &t->r[k];
+		struct sref *r = &t->r[i];
 
+		if (!ix_shown(a->refs, e))	/* as --json: no one-turn name (#460) */
+			continue;
+		i++;
 		put_ref(m, a->refs, e, proj, 0);
 		if (fflush(m) != 0)
 			break;
@@ -10838,8 +11210,8 @@ stab_build(const struct xr_answer *a, struct stab *t)
 		r->shape = e->shape;
 		r->ix = k;
 	}
-	t->nr = k;
-	for (k = 0; t->nr == nr && k < nc && fseek(m, 0, SEEK_SET) == 0; k++)
+	t->nr = i;
+	for (nr = k == nr ? i : i + 1, k = 0; t->nr == nr && k < nc && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
 		const struct xr_chapter *x = xr_chapter_at(a->ch, k);
 		struct sch *c = &t->c[k];
@@ -10957,10 +11329,10 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 	uint64_t first = a->ch ? a->ch->total - a->ch->n : 0;
 	unsigned char *chg;
 
-	if (!s->have || s->pend.nr != nr || s->pend.nc != nc ||
+	if (!s->have || s->pend.nr != ix_nshown(a->refs) || s->pend.nc != nc ||
 	    !(chg = calloc(nr + nc + 1, 1)))
 		return -1;
-	for (k = 0; k < nr; k++)
+	for (k = 0; k < s->pend.nr; k++)
 	{
 		const struct sref *p = &s->pend.r[k], *o = bsearch(p, s->sent.r,
 		                                                    s->sent.nr,
@@ -14638,6 +15010,17 @@ xs_hit(void *ctx, const struct xr_hit *h)
 		s->to.hit(s->to.ctx, h);
 }
 
+/* #460: the index behind a sink: its own, or --since's */
+static struct xr_index *
+ix_of(const struct xr_sink *k)
+{
+	if (k && k->hit == ix_hit)
+		return k->ctx;
+	if (k && k->hit == xs_hit)
+		return ix_of(&((const struct xr_since *)k->ctx)->to);
+	return NULL;
+}
+
 static int
 xs_newest(const void *pa, const void *pb)
 {
@@ -14761,7 +15144,7 @@ xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
 	if (s.x->n && !(v = malloc(s.x->n * sizeof *v)))
 		goto out;
 	for (i = 0; i < s.x->n; i++)
-		if (s.x->v[i].key && s.x->v[i].nunit)
+		if (s.x->v[i].key && s.x->v[i].nunit && ix_shown(s.x, &s.x->v[i]))
 			v[n++] = &s.x->v[i];
 	if (n)
 		qsort(v, n, sizeof *v, xs_newest);
@@ -14771,7 +15154,8 @@ xr_since_print(FILE *f, int fd, uint64_t size, uint64_t ino, int codex,
 		fputs(i ? ",{\"key\":" : "{\"key\":", f);
 		xr_put_str(f, v[i]->key);
 		fprintf(f, ",\"shape\":\"%s\",\"text\":", xr_shape_name[v[i]->shape]);
-		xr_put_str(f, strchr(v[i]->key, ':') + 1);
+		xr_put_str(f, v[i]->shape == XR_TERM && v[i]->full[0] ? v[i]->full
+		              : strchr(v[i]->key, ':') + 1);
 		fprintf(f, ",\"count\":%llu,\"last_at\":%lld}",
 		        (unsigned long long)ix_count(s.x, v[i]), v[i]->lastat);
 	}

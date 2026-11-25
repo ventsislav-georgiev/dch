@@ -1080,9 +1080,10 @@ it has memories or instruction files:
   as it does for a session with none yet (nothing the host sends tells the
   two apart).
 - **Refs**: what the session touched: the pull requests, issues and tickets
-  it mentions, then its terms (a backticked span or a `CONST_CASE` /
-  `snake_case` name said in a prompt or an answer, never only in a tool's
-  output), one row each, a faint line over them saying so; `a` shows its
+  it mentions, then its terms (a backticked span, a `CONST_CASE` /
+  `snake_case` name, a capitalised name like `Mirela` or a short **bold**
+  phrase said in a prompt or an answer, never only in a tool's output),
+  one row each, a faint line over them saying so; `a` shows its
   files, commits and URLs too, and the footer says how many are hidden. In
   each group below (on screen, the last reply, the rest) the terms come
   after the other refs. `Enter` on a term opens its card: its first mention
@@ -1659,7 +1660,28 @@ compact summaries only: never from tool input or output, a notice, a harness
 prompt (a task notification) or a shell's ring, and the view's on-screen
 scan does not look for them. They count against a text block's 128 like
 any ref. `--ref ERR_LEDGER_SKEW` asks for a term; one only a code span makes
-is asked for in its backticks (``--ref '`fooBar`'``). A number
+is asked for in its backticks (``--ref '`fooBar`'``).
+Since #460 two more kinds are terms, from the same prose, listed only once
+they are said in 2 or more turns (a one-off is emphasis): a capitalised word
+of 3 to 32 ASCII letters whose second letter is lowercase (`Mirela`,
+`Tailscale`, `GitHub`; never an acronym like `API`, `JSON`, `PRs`) that is
+not at a sentence, line, list item, heading, quote or table cell start, not
+part of a path, identifier or call (`Foo_bar`, `x.Baz`, `Bar()`), not
+followed by `:` or a number (`Step 3`, `Nov 25`, `[Image #2]`), not beside
+another capitalised word (Title Case: `Claude Code`, a heading), not an `-ing` or
+`-ed` word of 5+ letters, not in a short stoplist (sentence words such as
+`The` and `Then`, days and months, keys such as `Enter` and `Ctrl`,
+booleans), and said capitalised more often than lowercase in the session's
+prose (`Edit` beside `edit` is a common word); and a `**bold**` phrase of 1
+to 4 words and 2 to 40 printable ASCII characters ending in a letter or
+digit, that is no label (`**Why:**`, `**Next** — text`, a bold line of its
+own), not stopwords only (`**not**`, `**all**`), not one capitalised word
+(that is the name rule's) and holds no other ref (`**PAY-219 rollout**`
+stays the ticket). Neither is taken from harness text: a `<system-reminder>`
+block in a prompt or compact summary (tool lists, hook context). A bold phrase keys lowercase (`**Shadow Mode**` and
+`**shadow mode**` are one term) and shows its newest spelling. These two take
+their own index room (300) and their own 128 a text block, so they never
+push out another ref. A number
 keys as written: `#00012` and `#12` are two refs. A bare `repo#n` needs a repo of at least 3
 characters that starts with a letter, ends with a letter or digit and is not a
 glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
