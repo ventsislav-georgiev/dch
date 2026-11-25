@@ -23,6 +23,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -12930,91 +12931,51 @@ res_gh_ask(char *const av[], char *const env[], long long until,
 	return k;
 }
 
-/* #549: a takeover that died between its rename and unlink left
-** "<lock>.<pid>.stale". Sweep those: the pid is dead, or older than the
-** lock's own 60 s. A live pid's fresh one is a takeover under way: kept. */
-static void
-res_sweep(const char *lock)
-{
-	char dir[PATH_MAX + 8], f[PATH_MAX + 300];
-	const char *b = strrchr(lock, '/');
-	struct dirent *e;
-	struct stat st;
-	size_t n, l;
-	char *end;
-	long pid;
-	DIR *d;
-
-	if (!b || (size_t)(b - lock) >= sizeof dir)
-		return;
-	snprintf(dir, sizeof dir, "%.*s", (int)(b - lock), lock);
-	n = strlen(++b);
-	if (!(d = opendir(dir)))
-		return;
-	while ((e = readdir(d)))
-	{
-		l = strlen(e->d_name);
-		if (l < n + 8 || strncmp(e->d_name, b, n) != 0 ||
-		    e->d_name[n] != '.' || strcmp(e->d_name + l - 6, ".stale") != 0)
-			continue;
-		pid = strtol(e->d_name + n + 1, &end, 10);
-		if (end == e->d_name + n + 1 || strcmp(end, ".stale") != 0)
-			continue;
-		snprintf(f, sizeof f, "%s/%s", dir, e->d_name);
-		if (lstat(f, &st) != 0)
-			continue;
-		if ((pid > 0 && kill((pid_t)pid, 0) != 0 && errno == ESRCH) ||
-		    time(NULL) - st.st_mtime > 60)
-			(void)unlink(f);
-	}
-	closedir(d);
-}
-
 /* #522: a real gh takes about 0.9 s, so light never waits for it: a
 ** detached grandchild (its own session, no tty, stdio on /dev/null, no fd
 ** of ours) asks under the full deadline and fills the cache for the next
-** draw. One fill per entry at a time: an O_EXCL "<entry>.lock", stale past
-** 60 s (a fill lasts XR_GIT_MS plus the reap's grace) or more than 60 s
-** ahead. 1: a fill started or one runs; 0: none can (QA 1.114.0 LOW-US1). */
+** draw. One fill per entry at a time (#646): flock on "<entry>.lock", held
+** by the grandchild's fd for the whole fill, so the kernel drops it when
+** the fill exits or dies and a leftover file is simply taken. The holder
+** unlinks it while still holding it; a locker whose inode is no longer the
+** path's lost to that fill. 1: a fill started or one runs; 0: none can
+** (QA 1.114.0 LOW-US1). */
 static int
 res_fill(char *const av[], char *const env[], struct res_run *run,
          const char *repo, const char *num, struct xr_resolved *r)
 {
-	char path[PATH_MAX], lock[PATH_MAX + 8], old[PATH_MAX + 40];
-	struct stat st, so;
+	char path[PATH_MAX], lock[PATH_MAX + 8];
+	struct stat st, sl;
 	long k, max;
-	time_t age;
 	pid_t pid;
-	int fd, ws = 0;
+	int fd, lk, ws = 0;
 
 	if (!res_cache_path(path, sizeof path, repo, num, 1) ||
 	    snprintf(lock, sizeof lock, "%s.lock", path) >= (int)sizeof lock)
 		return 0;
-	if (lstat(lock, &st) == 0 &&
-	    ((age = time(NULL) - st.st_mtime) > 60 || age < -60))
+	if ((lk = open(lock, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600)) < 0)
+		return 0;
+	if (flock(lk, LOCK_EX | LOCK_NB) != 0)
 	{
-		/* taken over by rename (QA 1.114.0 NIT-US3): one caller wins it */
-		snprintf(old, sizeof old, "%s.%ld.stale", lock, (long)getpid());
-		if (rename(lock, old) != 0)
-			return errno == ENOENT;	/* ENOENT: another caller took it */
-		if (lstat(old, &so) == 0 && so.st_ino != st.st_ino)
-		{
-			(void)rename(old, lock);	/* a fresh one: put it back */
-			return 1;
-		}
-		(void)unlink(old);
+		ws = errno == EWOULDBLOCK;	/* held: a fill runs */
+		close(lk);
+		return ws;
 	}
-	if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) < 0)
-		return errno == EEXIST;
-	close(fd);
-	res_sweep(lock);	/* once per fill started, not per ref */
+	if (fstat(lk, &st) != 0 || lstat(lock, &sl) != 0 ||
+	    st.st_ino != sl.st_ino || st.st_dev != sl.st_dev)
+	{
+		close(lk);	/* unlinked by a fill that just ended */
+		return 1;
+	}
 	if ((pid = fork()) < 0)
 	{
 		(void)unlink(lock);
+		close(lk);
 		return 0;
 	}
 	if (pid > 0)
 	{
+		close(lk);	/* the grandchild's fd holds the lock, not ours */
 		while (waitpid(pid, &ws, 0) < 0 && errno == EINTR)
 			;
 		return WIFEXITED(ws) && WEXITSTATUS(ws) == 0;
@@ -13025,15 +12986,18 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 			(void)unlink(lock);
 		_exit(pid <= 0);
 	}
+	if (lk < 3 && (lk = fcntl(lk, F_DUPFD_CLOEXEC, 3)) < 0)
+		_exit(0);	/* the parent's /dev/null dup2 would drop it */
 	if ((fd = open("/dev/null", O_RDWR)) >= 0)
 		for (k = 0; k < 3; k++)
 			(void)dup2(fd, (int)k);
 	/* shortcut: closes fds below 4096 only, a one-shot --ref holds few */
 	max = sysconf(_SC_OPEN_MAX);
 	for (k = 3; k < (max > 0 && max < 4096 ? max : 4096); k++)
-		(void)close((int)k);
+		if (k != lk)
+			(void)close((int)k);
 	(void)res_gh_ask(av, env, xr_now_ms() + XR_GIT_MS, run, repo, num, r);
-	(void)unlink(lock);
+	(void)unlink(lock);	/* still held: a waiter's inode check fails */
 	_exit(0);
 }
 
