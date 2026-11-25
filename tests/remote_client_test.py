@@ -1577,6 +1577,7 @@ class XFake:
         self.sock.listen(16)
         self.port = self.sock.getsockname()[1]
         self.conns, self.said = [], []
+        self.log = []	# #622: (event, time.time()), for a missed hello
         threading.Thread(target=self.loop, daemon=True).start()
 
     def loop(self):
@@ -1586,6 +1587,7 @@ class XFake:
             except OSError:
                 return
             self.n += 1
+            self.log.append(("accept", time.time()))
             self.conns.append(c)
             if self.mode != "dark" or self.n == 1:
                 threading.Thread(target=self.serve, args=(c,),
@@ -1593,6 +1595,7 @@ class XFake:
 
     def serve(self, c):
         buf = b""
+        self.log.append(("serve", time.time()))
         answers = {
             "nul": frame(0x31, b'{"a":1}\x00junk\n')
             + frame(0x32, b"e\x00rr\n") + frame(0x33, {"exit": 0}),
@@ -1609,7 +1612,7 @@ class XFake:
             "cut": frame(0x31, b'{"a":1}\n{"b":2}\n{"cut":')
             + frame(0x32, b"e-cut"),
             "hist": frame(0x31, self.out) + frame(0x33, {"exit": 0}),
-            "esc": b"".join(frame(0x31, x[i:i + 60000]) for x in
+            "esc": b"" if self.mode != "esc" else b"".join(frame(0x31, x[i:i + 60000]) for x in
                             [b'{"s":"' + b"\x01" * (3 << 20)
                              + b'"}\n{"after":1}\n'] for i in
                             range(0, len(x), 60000))
@@ -1627,7 +1630,7 @@ class XFake:
             + frame(0x32, b"e-whole\n") + frame(0x33, {"exit": 137}),
             "crashnone": frame(0x31, b'{"ok":1}\n')
             + frame(0x33, {"exit": 137}),
-            "raw": b"".join(frame(0x31, x[i:i + 65536]) for x in
+            "raw": b"" if self.mode != "raw" else b"".join(frame(0x31, x[i:i + 65536]) for x in
                             [b'{"s":"' + b"a" * (17 << 20) + b'"}\n']
                             for i in range(0, len(x), 65536))
             + frame(0x33, {"exit": 0})}
@@ -1643,11 +1646,13 @@ class XFake:
                         break
                     buf = buf[5 + n:]
                     if t == 0x08:
+                        self.log.append(("0x08", time.time()))
                         if self.mode == "late":
                             time.sleep(0.4)
                         c.sendall(frame(0x18, {
                             "proto": "1.1", "server": "fake",
                             "ops": ["ctl", "ctl-cancel", "xray"]}))
+                        self.log.append(("hello", time.time()))
                     elif t == 0x34 and self.mode in ("hold", "holdcut"):
                         c.sendall(frame(0x33, {"exit": 2, "why": "cancel"}))
                     elif t == 0x30 and self.mode == "slow":
@@ -1827,20 +1832,37 @@ def robust_checks(dch, check, cenv, fakes, tmp):
     (DCH_CTL_TIMEOUT_MS, the test knob dch serve reads), so a silent host
     is lost after RM_ATTACH_MS, 5 s."""
     n = [0]
+    last = {}
 
     def side(port, **kw):
         n[0] += 1
         cfg = os.path.join(tmp, "rbcfg-%d" % n[0])
         with open(cfg, "w") as f:
             f.write("remote_hosts = q=127.0.0.1:%d\n" % port)
-        e = dict(cenv, DCH_CONFIG=cfg, **kw)
+        # #622: dch's probe steps (DCH_DEBUG), for a missed hello
+        last["trace"] = os.path.join(tmp, "rbtrace-%d" % n[0])
+        e = dict(cenv, DCH_CONFIG=cfg, DCH_DEBUG=last["trace"], **kw)
         e.pop("DCH_NO_REMOTE", None)
         return e
 
     def fake(mode, out=b""):
         f = XFake(mode, out)
         fakes.append(f)
+        last["fake"] = f
         return f
+
+    def check(msg, cond, extra="", check=check):
+        """#622: a failure also prints the last fake's steps and dch's probe
+        trace, wall clock both: which side was late with the hello"""
+        if not cond and "fake" in last:
+            try:
+                with open(last.get("trace", "")) as tf:
+                    tr = [x for x in tf.read().splitlines() if "probe" in x]
+            except OSError:
+                tr = []
+            extra = "%s\nfake %s: %s\ndch trace: %s" % (
+                extra, last["fake"].mode, last["fake"].log, tr[-12:])
+        check(msg, cond, extra)
 
     # NIT-8, NIT-9: remote History keeps what a strict reader takes (objects
     # and arrays to 64 deep in a record, keys not counted) and drops a
@@ -1982,11 +2004,11 @@ def robust_checks(dch, check, cenv, fakes, tmp):
     got = rq.until(1)
     rc, rest, err = rq.end()
     check("LOW-8: a reused running id: busy with req null, then its one "
-          "end line", json.loads(a) == {"req": None, "exit": 1,
-                                        "why": "busy"}
+          "end line", a is not None	# #622: a missed hello, not a crash
+          and json.loads(a) == {"req": None, "exit": 1, "why": "busy"}
           and [json.loads(g) for g in got]
           == [{"req": 1, "exit": 2, "why": "cancel"}]
-          and rc == 0 and rest == b"", (a, got, rc, rest))
+          and rc == 0 and rest == b"", (a, got, rc, rest, err))
 
     # LOW-9: a NUL in a host line, stdout and stderr: kept as \u0000
     f = fake("nul")
