@@ -1598,8 +1598,11 @@ The corpus:
   to 32768 distinct keys and as a lower bound past that. `[]` for corpus
   `none`. Before 1.62.0 the first 2000 keys seen stayed and every later one
   was dropped.
-- **Size.** The object is capped at 4 MiB: past that, the oldest chapters'
-  `response` texts go first (`response_offset` and `tools` stay); then
+- **Size.** The object is capped at 4 MiB: past that, the copies of a
+  shared turn response (chapters with `response_from`) go first, oldest
+  first (`response_from` stays); then the oldest chapters' own
+  `response` texts (`response_offset` and `tools` stay; a text goes only
+  once every copy of it has); then
   `refs`, from the end of the list, each counted in `dropped_keys`; then the
   oldest chapters go. `why` is `"output"`.
 
