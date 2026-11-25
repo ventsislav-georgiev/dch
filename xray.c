@@ -11269,13 +11269,13 @@ xr_sent_take(struct xr_sent *s, const struct xr_answer *a)
 
 	stab_free(&s->pend);
 	if (stab_build(a, &s->pend) != 0 ||
-	    !(m = calloc(s->pend.nr + 1, 1)))
+	    !(m = calloc((a->refs ? a->refs->n : 0) + 1, 1)))
 		return -1;
 	/* the refs a's snapshot left out (LOW-9): a later change to one is
 	** no line, as --json does not show it */
 	for (k = 0; k < s->ncut; k++)
-		if (s->cut[k] < s->pend.nr)
-			m[s->cut[k]] = 1;
+		if (s->cut[k] < (a->refs ? a->refs->n : 0))
+			m[s->cut[k]] = 1;	/* cut[] and r[].ix index a->refs, not pend */
 	for (k = 0; k < s->pend.nr; k++)
 		s->pend.r[k].cut = m[s->pend.r[k].ix];
 	free(m);
