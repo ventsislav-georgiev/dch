@@ -5050,14 +5050,15 @@ def test_terms_628():
         # CSS !word and a path's directory are not (already, mandatory,
         # important, optional, critical)
         emph += ("mandatory",)
-        fenced = ("jitter", "backoff")
+        fenced = ("jitter", "backoff", "rampup", "warmup")  # #645: shell-session
         say = {2: " ".join("This is **%s** for the parser." % w
                            for w in emph + ("hyperfine",) + fenced),
                4: " ".join("Keep it **%s**, as we said." % w
                            for w in emph + ("hyperfine",) + fenced),
                3: "So %s it is, and hyperfine too." % ", ".join(emph + fenced),
                6: "Run it:\n\n```sh\njitter -n 3\n```\n\nor\n\n"
-                  "```console\n$ backoff --max 5\nretrying\n```\n\nand "
+                  "```console\n$ backoff --max 5\nretrying\n```\n\n"
+                  "```shell-session\n$ rampup 3\nwarmup done\n```\n\nand "
                   "`color: red !important`."}
         with open(tc, "w") as f:
             for t in range(1, 7):
@@ -5092,6 +5093,10 @@ def test_terms_628():
         check("terms 643: a bold said plain and shown in a sh or console "
               "fence is a term (**jitter**, **backoff**)",
               "term:jitter" in refs and "term:backoff" in refs, terms)
+        check("terms 645: in a shell-session fence a word on a $ line is a "
+              "term (**rampup**) and one on an output line is hidden "
+              "(**warmup**)",
+              "term:rampup" in refs and "term:warmup" not in refs, terms)
         check("terms 643: a quoted one-word Bash argument, a --key=value's "
               "value, a CSS !important and a path's directory make no code "
               "(already, mandatory, important, critical, optional)",
