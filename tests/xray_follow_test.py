@@ -1875,6 +1875,77 @@ def test_follow_cap():
         os.unlink(tp)
 
 
+def test_follow_hidden_names():
+    """#625: one-turn name candidates (hidden, #460) indexed ahead of a shown
+    ref: the snapshot and the delta read them in a->refs's index space (an
+    ASan build reports a heap-buffer-overflow in xr_sent_take otherwise)."""
+    n = "xc-fhn"
+    proj = os.path.join(T, "fhnproj")
+    bindir = os.path.join(T, "bin-fhn")
+    fdir = os.path.join(T, "fake-fhn")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("follow hidden names: spawned", r.returncode == 0, r.stderr)
+    names = ["Zorbak", "Quillon", "Brevitt", "Ostrander", "Pellwick",
+             "Marnoth", "Davrell", "Kestovan"]
+    ask = lambda t: {"type": "user", "cwd": proj, "message": {"content": t}}
+    said = lambda t: {"type": "assistant", "message": {
+        "stop_reason": "end_turn", "content": [{"type": "text", "text": t}]}}
+    fl = None
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        os.makedirs(pdir, exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+        ls = [ask("yesterday we met " + " and ".join(names)), said("ok")]
+        for k in range(3):
+            ls += [ask("check ERR_LEDGER_SKEW again %d" % k),
+                   said("ERR_LEDGER_SKEW is fine")]
+        with open(tp, "w") as f:
+            f.write("".join(json.dumps(o) + "\n" for o in ls))
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 10)
+        fl = Follow(n)
+        s = fl.wait(lambda o: "snapshot" in o, 15)
+        keys = " ".join(x["key"] for x in s[0]["snapshot"]["refs"]) \
+            if s else ""
+        check("follow hidden names: the snapshot has the shown ref, "
+              "no one-turn name", "ERR_LEDGER_SKEW" in keys and
+              not any(w in keys for w in names), keys)
+        frm = len(fl.got)
+        with open(tp, "a") as f:
+            f.write(json.dumps(ask("and ERR_LEDGER_SKEW once more")) + "\n" +
+                    json.dumps(said("ERR_LEDGER_SKEW, still fine")) + "\n")
+        d = fl.wait(lambda o: "ref" in o and "ERR_LEDGER_SKEW" in
+                    o["ref"]["key"], 15, frm)
+        check("follow hidden names: the change sends a ref delta, no "
+              "reset, no name", bool(d) and "reset" not in fl.kinds(frm) and
+              not any(w in json.dumps(fl.objs(frm)) for w in names),
+              fl.objs(frm))
+    finally:
+        err = b""
+        if fl:
+            fl.stop()
+            err = fl.p.stderr.read()
+        check("follow hidden names: no sanitizer report",
+              b"Sanitizer" not in err and b"runtime error" not in err,
+              err[:600])
+        dch("-k", n)
+
+
 def test_follow_shell():
     """A shell's --follow over a 64K ring: typed blocks give chapter and ref
     deltas, an eviction its evict line first, then counts down and
@@ -2273,6 +2344,7 @@ def main():
         test_follow_fast()
         test_follow_late()
         test_follow_cap()
+        test_follow_hidden_names()
         test_follow_shell()
         test_follow_stale()
         test_follow_agent()

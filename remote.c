@@ -58,6 +58,7 @@
 */
 #ifdef _WIN32
 #include "win/win.h"	/* Winsock, and the sock_* spellings below */
+#define dch_trace(...) ((void)0)	/* dch.c, its sink, is not in the Windows build */
 #else
 #include "dtach.h"
 #include "xray.h"	/* --requests checks a --ref as dch --xray does */
@@ -1521,6 +1522,7 @@ pr_read(struct probe *p)
 
 	if (k < 0 && (e == SE_INTR || e == SE_AGAIN))
 		return;
+	dch_trace("probe %s: read %ld", p->h.label, (long)k);	/* #622 */
 	if (k <= 0)
 		pr_end(p, PR_FAIL, k ? sock_str(e) : "closed the connection");
 	else
@@ -1543,6 +1545,7 @@ pr_start(struct probe *v, int n, long long end)
 			pr_end(&v[i], PR_FAIL, sock_str(sock_err()));
 		else
 			v[i].st = PR_CONN;
+		dch_trace("probe %s: dial fd %d", v[i].h.label, v[i].fd);
 	}
 }
 
@@ -1565,7 +1568,10 @@ pr_io(struct probe *p)
 	         (ssize_t)rqn)
 		pr_end(p, PR_FAIL, sock_str(sock_err()));
 	else
+	{
+		dch_trace("probe %s: connected, 0x08 sent", p->h.label);
 		p->st = PR_WAIT;
+	}
 }
 
 /* The probes still going after ms: PR_FAIL; what each not kept read,
@@ -1582,6 +1588,10 @@ pr_finish(struct probe *v, int n, int ms)
 			char why[64];
 
 			snprintf(why, sizeof why, "no answer within %d ms", ms);
+			/* #622: never connected, or no hello after the 0x08 */
+			dch_trace("probe %s: %s, %s, %zu bytes in", v[i].h.label,
+			          why, v[i].st == PR_CONN ? "connecting"
+			          : "0x08 sent", v[i].in.n);
 			pr_end(&v[i], PR_FAIL, why);
 		}
 		if (v[i].st != PR_OK || !v[i].keep)

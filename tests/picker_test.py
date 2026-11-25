@@ -771,6 +771,18 @@ def groups():
     s = to_tab("pk13", "Sessions")
     check("#616: ... gr-api-qa stays on Sessions", "gr-api-qa" in rows(s), s)
 
+    # {,m} is {0,m} to glibc, so its copies count too (#626). The pattern
+    # matches gr-api-qa as a regex (the outer * takes zero repeats; macOS
+    # reads {,99} as a literal, so the * is what matches), as text it does
+    # not: macOS's regcomp never blows up, so no Big tab shows pk_rebig's
+    # verdict was "text"
+    setcfg("group = Big = gr-api(((a{,99}){,99}){,99})*-qa\ngroup = Docs = gr-web\n")
+    s = wait_screen("pk13", lambda s: "Docs" in tabs(s))
+    check("#626: group = Big = gr-api(((a{,99}){,99}){,99})*-qa is text: "
+          "no Big tab", tabs(s) == ["Sessions", "Docs", "History"],
+          s.split("\n")[0])
+    s = to_tab("pk13", "Sessions")
+
     # every session in a group: the picker opens on it, not on empty Sessions
     setcfg("group = Everyone = .\n")
     picker("pk19", "160x30", "NO_COLOR=1", "TERM=xterm-256color")

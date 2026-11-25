@@ -482,17 +482,34 @@ def main():
             # across that window: any one landing in it made it refused)
             stop = threading.Event()
 
+            # blocking writes on purpose: a non-blocking pty write can land
+            # 2 of the 3 bytes, a broken report that is real input (#618)
             def focus_burst():
-                while not stop.is_set():
-                    os.write(pfd, b"\033[I")
+                try:
+                    while not stop.is_set():
+                        os.write(pfd, b"\033[I")
+                except OSError:
+                    pass	# the client is gone: nothing to report to
 
-            burst = threading.Thread(target=focus_burst)
+            # the passive client's output is drained, so it never blocks on
+            # it and stops reading the burst (nightly ASan 10-min hangs)
+            def drain_passive():
+                while not stop.is_set():
+                    drain(pfd, 0.1)
+
+            burst = threading.Thread(target=focus_burst, daemon=True)
+            pdrain = threading.Thread(target=drain_passive, daemon=True)
+            pdrain.start()
             burst.start()
             time.sleep(0.2)
             os.write(sfd, b"\r")
             landed = drain(sfd, 10.0, b"BBB_BRAVO")
             stop.set()
-            burst.join()
+            burst.join(10.0)
+            pdrain.join(10.0)
+            if burst.is_alive():
+                return fail("#601: the focus burst stayed blocked on the "
+                            "passive client's input", landed)
             if "BBB_BRAVO" not in landed or "nesting disabled" in landed:
                 return fail("#601: a passive client's focus report refused "
                             "the active terminal's pick", landed)

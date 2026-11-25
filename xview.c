@@ -1189,7 +1189,9 @@ xv_card(struct xv *v, const char *key, const char *text, const char *ref,
 		xv_sfree(v->cref);
 		v->ckey = strdup(key);
 		v->ctext = strdup(text);
-		v->cref = strdup(ref && ref[0] ? ref : text);
+		/* a term asks by its key: a bare name or bold phrase is no ref */
+		v->cref = strdup(ref && ref[0] ? ref
+		                 : !strncmp(key, "term:", 5) ? key : text);
 		if (!v->ckey || !v->ctext || !v->cref)
 		{
 			free(v->ckey);

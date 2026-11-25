@@ -934,6 +934,27 @@ def test_refs():
           "(%d in %.2fs)" % (len(prog), wall),
           all(l.get("schema") == 1 for l in ls) and
           (prog or wall < 0.5), r.stdout[:600])
+    # MED-VZ2 (#627): a name and a bold phrase are asked for by their term
+    # key (the view's --ref); the card has both mentions (the first as its
+    # definition), exit 0
+    put([{"type": "user", "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [{"type": "text",
+          "text": "Older: we asked Mirela today. Turn on **shadow mode** now."}]}},
+         {"type": "user", "message": {"content": "next"}},
+         {"type": "assistant", "message": {"content": [{"type": "text",
+          "text": "Then we met Mirela again. Keep **Shadow Mode** on."}]}}])
+    for what, ref in (("name", "term:Mirela"), ("bold", "term:shadow mode")):
+        r = dch("--xray", "xr-refs", "--ref", ref, "--scope", "session",
+                "--full", "--json")
+        ls = ref_lines(r.stdout) or [{}]
+        txt = [json.dumps(l["mention"]) for l in ls if "mention" in l]
+        txt += [json.dumps(l["definition"]) for l in ls if "definition" in l]
+        check("term ref: %s %r opens its card: both mentions, exit 0" %
+              (what, ref), r.returncode == 0 and len(txt) >= 2 and
+              any("Older" in t or "Turn on" in t or "asked" in t for t in txt) and
+              any("again" in t or "Keep" in t for t in txt) and
+              ls[-1].get("done") is True,
+              (r.returncode, len(txt), [t[-90:] for t in txt], r.stderr))
     os.unlink(tp)
 
 
@@ -3715,8 +3736,8 @@ def test_since():
           o and o["partial"] is True and o["more"] is True and
           titles(o) == ["big %d" % k for k in range(44, 24, -1)],
           (r.returncode, r.stdout[:300], r.stderr))
-    # 60 MB: the third round is the whole file (~0.4 s), the 200 ms cap
-    # falls inside it, after the 1 + 4 MB rounds; the cap stops it mid-read
+    # 60 MB: the third round is the whole file (~0.4 s), a cap of half a
+    # whole read falls inside it, after the 1 + 4 MB rounds; the cap stops it mid-read
     # (mtick) and the round before it stands (mstand): partial, not a
     # window half read (partial false) or a round read whole (partial false)
     since_put("xs-h", "51600000-2222-4333-8444-555555555508", [])
@@ -3733,14 +3754,23 @@ def test_since():
                                 "message": {"content": [{
                                     "type": "text", "text": "see #%d %s" % (
                                         2000 + k, pad)}]}}) + "\n")
+    # #617: the cap is half a measured uncapped read, not a fixed 200 ms:
+    # under ASan the 1 + 4 MB rounds alone pass 200 ms, so the cap fell in
+    # the 4 MB round and only the 1 MB round's ~10 turns stood
+    t = time.monotonic()
+    dch("--xray", "xs-h", "--since", "0", "--json",
+        env=dict(ENV, DCH_XRAY_CAPS="0:400000000"))
+    cap = max(1, int((time.monotonic() - t) * 500))
     r = dch("--xray", "xs-h", "--since", "0", "--json",
-            env=dict(ENV, DCH_XRAY_CAPS="0:400000000:200"))
+            env=dict(ENV, DCH_XRAY_CAPS="0:400000000:%d" % cap))
     o = json.loads(r.stdout) if r.returncode == 0 else None
-    check("since: a 200 ms time cap falls inside a 60 MB file's last round: "
-          "partial, the round before it stands (mtick, mstand)",
+    check("since: a time cap of half a whole read falls inside a 60 MB "
+          "file's last round: partial, the round before it stands (mtick, "
+          "mstand)",
           o and o["partial"] is True and o["more"] is True and
           titles(o) == ["tall %d" % k for k in range(599, 579, -1)],
-          (r.returncode, r.stdout[:300], r.stderr))
+          (cap, r.returncode, r.stdout[:300], o and o["partial"],
+           o and o["more"], titles(o) if o else None, r.stderr))
     os.unlink(os.path.join(HOME, ".claude", "projects",
                            key("/home/demo/proj"),
                            "51600000-2222-4333-8444-555555555508.jsonl"))
@@ -4774,6 +4804,59 @@ def test_terms_b():
         os.unlink(tp)
 
 
+def test_terms_spread():
+    """#624: no name term for the session's own directory (its cwd's
+    basename, any case), nor for a name in more than 3% of the turns and
+    over 10 of them; a name under the share stays, and a short session
+    keeps a name said in every turn."""
+    cfg = os.path.join(HOME, ".claude")
+
+    def put(name, sid, cwd, turns, say):
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+        with open(tp, "w") as f:
+            for t in range(1, turns + 1):
+                f.write(json.dumps({"type": "user", "cwd": cwd,
+                                    "message": {"content": "turn %d" % t}}) +
+                        "\n")
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text": "ok %d, " % t +
+                                 " ".join(say(t))}]}}) + "\n")
+        history(name, sid, cfg, cwd)
+        return tp
+
+    # 400 turns: Wombat (the cwd's name) in 2, Quokka in 13 (3.25%),
+    # Numbat in 11 (2.75%)
+    tp = put("xr-spread", "11111111-2222-4333-8444-5555555555ca",
+             "/home/demo/wombat", 400, lambda t:
+             (["we asked Wombat."] if t in (2, 3) else []) +
+             (["we asked Quokka."] if t % 30 == 1 else []) +
+             (["we asked Numbat."] if t % 30 == 2 and t < 330 else []))
+    tq = put("xr-spread8", "11111111-2222-4333-8444-5555555555cb",
+             "/home/demo/projs", 8, lambda t: ["we asked Bilby."])
+    try:
+        rc, o, err = xray("xr-spread", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        terms = sorted(k for k in refs if k.startswith("term:"))
+        check("terms spread: the session's own directory name, said "
+              "mid-sentence in two turns, is no term",
+              rc == 0 and "term:Wombat" not in refs, (terms, err))
+        check("terms spread: a name in more than 3% of the turns is no term",
+              rc == 0 and "term:Quokka" not in refs, terms)
+        check("terms spread: a name in under 3% of the turns stays",
+              refs.get("term:Numbat", {}).get("count") == 11, terms)
+        rc, o, err = xray("xr-spread8", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        check("terms spread: a short session keeps a name said in all of "
+              "its 8 turns", rc == 0 and
+              refs.get("term:Bilby", {}).get("count") == 8,
+              (sorted(refs), err))
+    finally:
+        os.unlink(tp)
+        os.unlink(tq)
+
+
 def test_recall():
     """#479: a ref's other same-project sessions carry their own turns:
     s1 (the project's other session) says #412 in its turns 2 and 3, s2 (another
@@ -4901,6 +4984,7 @@ def main():
         test_many_mentions()
         test_terms()
         test_terms_b()
+        test_terms_spread()
         test_recall()
     finally:
         shutil.rmtree(T, ignore_errors=True)

@@ -238,6 +238,7 @@ struct xr_hit
 	const char *ttitle;	/* #479: that chapter's title, NULL unknown */
 	const char *who, *tool;	/* a Claude mention's speaker, else NULL */
 	const char *read;	/* #517: the read-type call whose output it is in */
+	const char *cwd;	/* #624: the session's cwd then, NULL unknown */
 	const char *title, *passage, *rule;	/* a definition */
 };
 struct xr_sink

@@ -10195,8 +10195,10 @@ pk_rebig(const char *p)
 		}
 		if (*p == '+')
 			f = 2;
-		else if (*p == '{' && isdigit((unsigned char)p[1]))
-		{	/* {n}, {n,m}: max(n, m) copies; {n,}: n + 1 */
+		else if (*p == '{' && (isdigit((unsigned char)p[1]) ||
+		    (p[1] == ',' && isdigit((unsigned char)p[2]))))
+		{	/* {n}, {n,m}: max(n, m) copies; {n,}: n + 1; glibc reads {,m}
+			** as {0,m}: strtoul finds no digits, f = 0 */
 			f = m = strtoul(p + 1, &e, 10);
 			if (*e == ',' && isdigit((unsigned char)e[1]))
 				m = strtoul(e + 1, &e, 10);
