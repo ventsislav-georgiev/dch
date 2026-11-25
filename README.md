@@ -1686,9 +1686,11 @@ block in a prompt or compact summary (tool lists, hook context). A bold phrase k
 `**shadow mode**` are one term) and shows its newest spelling. Since #624 a
 name is not listed when it is the session's own directory's (the basename of
 the cwd of the earliest line read, any case: `Prosper` in `~/prosper`; an exact
-match, so `ProsperApp` stays), nor when it is said in more than 3% of the
+match, so `ProsperApp` stays), nor when it is said in more than 35% of the
 session's turns and in more than 10 of them (said everywhere, it marks
-nothing: `Mac`, `GitHub`); a session of 10 turns or fewer keeps every name.
+nothing); a session of 10 turns or fewer keeps every name. Since #630 a
+name said often but under that share stays: it is a main character and
+leads the list (`Mirela` in 11 of 100 turns, `Mac` in 9% of them).
 Such a name stays in the index, unwritten, as a one-turn name does. These two take
 their own index room (300) and their own 128 a text block, so they never
 push out another ref. A number

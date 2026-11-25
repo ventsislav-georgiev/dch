@@ -5111,11 +5111,13 @@ xr_index_sink(struct xr_index *x, struct xr_sink *k)
 ** term: kept (a second turn lists it), never written. Nor is a capitalised
 ** word said lowercase in prose as often as capitalised (Edit, edit): a
 ** common word, not a name. */
-/* #624: nor a name in more than 3% of the turns (and over 10 of them:
+/* #624: nor a name in more than 35% of the turns (and over 10 of them:
 ** a short session keeps its names), nor the session's own directory's:
-** said everywhere, it marks nothing (Prosper, Mac, GitHub). Names only;
-** bold phrases are rare enough. */
-#define XR_SPREAD_PCT 3
+** said everywhere, it marks nothing (Prosper in ~/prosper). Names only;
+** bold phrases are rare enough. #630: the share is measured on live
+** sessions: the names in 10-31% of the turns are the session's main
+** characters (Claude, Personio), and Mac and GitHub stay under 16%. */
+#define XR_SPREAD_PCT 35
 #define XR_SPREAD_MIN 10
 static int
 ix_shown(const struct xr_index *x, const struct xr_ent *e)

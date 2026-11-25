@@ -4845,9 +4845,9 @@ def test_terms_b():
 
 def test_terms_spread():
     """#624: no name term for the session's own directory (its cwd's
-    basename, any case), nor for a name in more than 3% of the turns and
-    over 10 of them; a name under the share stays, and a short session
-    keeps a name said in every turn."""
+    basename, any case), nor for a name in more than 35% of the turns and
+    over 10 of them (#630: 3% hid the main characters); a name under the
+    share stays, and a short session keeps a name said in every turn."""
     cfg = os.path.join(HOME, ".claude")
 
     def put(name, sid, cwd, turns, say):
@@ -4865,13 +4865,14 @@ def test_terms_spread():
         history(name, sid, cfg, cwd)
         return tp
 
-    # 400 turns: Wombat (the cwd's name) in 2, Quokka in 13 (3.25%),
-    # Numbat in 11 (2.75%)
+    # 100 turns: Wombat (the cwd's name) in 2, Quokka in 36 (36%),
+    # Numbat in 11 and Bandicoot in 15 (the main characters)
     tp = put("xr-spread", "11111111-2222-4333-8444-5555555555ca",
-             "/home/demo/wombat", 400, lambda t:
+             "/home/demo/wombat", 100, lambda t:
              (["we asked Wombat."] if t in (2, 3) else []) +
-             (["we asked Quokka."] if t % 30 == 1 else []) +
-             (["we asked Numbat."] if t % 30 == 2 and t < 330 else []))
+             (["we asked Quokka."] if t <= 36 else []) +
+             (["we asked Numbat."] if t % 9 == 1 and t < 99 else []) +
+             (["we asked Bandicoot."] if t % 6 == 2 and t < 90 else []))
     tq = put("xr-spread8", "11111111-2222-4333-8444-5555555555cb",
              "/home/demo/projs", 8, lambda t: ["we asked Bilby."])
     try:
@@ -4881,10 +4882,12 @@ def test_terms_spread():
         check("terms spread: the session's own directory name, said "
               "mid-sentence in two turns, is no term",
               rc == 0 and "term:Wombat" not in refs, (terms, err))
-        check("terms spread: a name in more than 3% of the turns is no term",
-              rc == 0 and "term:Quokka" not in refs, terms)
-        check("terms spread: a name in under 3% of the turns stays",
+        check("terms spread: a name in more than 35% of the turns is no "
+              "term", rc == 0 and "term:Quokka" not in refs, terms)
+        check("terms spread: a name in 11 of 100 turns stays",
               refs.get("term:Numbat", {}).get("count") == 11, terms)
+        check("terms spread: a name in 15 of 100 turns stays",
+              refs.get("term:Bandicoot", {}).get("count") == 15, terms)
         rc, o, err = xray("xr-spread8", "--json")
         refs = {r["key"]: r for r in (o or {}).get("refs", [])}
         check("terms spread: a short session keeps a name said in all of "
