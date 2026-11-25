@@ -845,8 +845,12 @@ def main(part):
                   until(lambda: os.path.exists(so) and
                         "run from outside dch to restart this one" in
                         open(so).read(), 15.0))
+            # --send types raw keys: the "!" opens bash mode, as in Claude
+            # Code (#629), and the line runs there, not as a message
             check("run under the agent: nothing typed into it",
-                  typed(s) == ["!run '%s' --restart --all --include-agents" % DCH])
+                  typed(s) == [] and
+                  [e["text"] for e in events(s) if e["ev"] == "bash"] ==
+                  ["run '%s' --restart --all --include-agents" % DCH])
     except Exception:
         traceback.print_exc()
         fails += 1

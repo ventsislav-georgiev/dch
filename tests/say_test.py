@@ -172,6 +172,10 @@ def main():
             check("lite: --all /x is a usage error, nothing typed",
                   r.returncode == 1 and r.stdout == "" and r.stderr and
                   typed(c) == [])
+            r = say("--all", "--", "!x")
+            check("lite: --all !x is a usage error, nothing typed",
+                  r.returncode == 1 and r.stdout == "" and
+                  len(r.stderr.splitlines()) == 1 and typed(c) == [])
             r = say(c, s, "--json", "--", "/model", "m")
             objs = sorted((o["name"] == c, o["reason"]) for o in
                           map(json.loads, r.stdout.splitlines()))
@@ -358,6 +362,41 @@ def main():
               until(lambda: any(e["ev"] == "paste"
                                 for e in events(c2)[n2:]), 5))
         idle(c2)
+
+        # --- a one-line !command is typed as keys: bash mode --------------
+        bs = sess("sbash", "claude")
+        bm = sess("sbmode", "claude", bash=True)
+        up(bs)
+        up(bm)
+        nb = len(events(bs))
+        r = say(bs, "--json", "--", "!", "echo", "hi")
+        check("!command: --json ok",
+              r.returncode == 0 and json.loads(r.stdout or "{}") ==
+              {"name": bs, "result": "ok", "reason": "", "detail": ""})
+        check("!command: arrives as keys (no paste), a bash submit",
+              not any(e["ev"] == "paste" for e in events(bs)[nb:]) and
+              [e["text"] for e in events(bs) if e["ev"] == "bash"] ==
+              [" echo hi"] and typed(bs) == [])
+        r = say(bm, "--json", "--", "!ls")
+        check("composer already in bash mode: skipped/draft, nothing typed",
+              r.returncode == 0 and
+              json.loads(r.stdout or "{}").get("reason") == "draft" and
+              not any(e["ev"] in ("paste", "line", "bash")
+                      for e in events(bm)) and
+              "!ls" not in run("--read", bm).stdout.replace(" ", "")
+              .replace("\xa0", ""))
+        nb = len(events(bs))
+        r = say("--all", "--", "!x")
+        check("--all !x: exit 1, one stderr line, nothing typed",
+              r.returncode == 1 and r.stdout == "" and
+              len(r.stderr.splitlines()) == 1 and len(events(bs)) == nb)
+        r = say(bs, "--", "!x\ny", env=land)
+        check("!text with a control byte pastes, not typed",
+              any(e["ev"] == "paste" for e in events(bs)[nb:]) and
+              not any(e["ev"] == "bash" for e in events(bs)[nb:]))
+        for n in (bs, bm):
+            run("-k", n)
+            names.remove(n)
 
         # --- old master: failed/old_master -------------------------------
         old = os.path.join(sockdir, "old%s.sock" % TAG)
