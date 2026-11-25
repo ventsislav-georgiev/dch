@@ -947,7 +947,7 @@ def test_terms_live():
         # MED-VZ2 (#627): the Mirela row (a name term, no grammar reads it
         # bare) opens its card too: the next row after ERR_LEDGER_SKEW
         mark = len(a.out)
-        a.key(b"j" if not lite else b"jjjj", 0.5, full=True)
+        a.key(b"j", 0.5, full=True)   # lite too: Mirela follows ERR_LEDGER_SKEW
         a.key(b"\r", 0.5, full=True)
         ok = a.wait(b"Mentions: this session ", start=mark)
         settle(a)

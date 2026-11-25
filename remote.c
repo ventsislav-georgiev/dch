@@ -58,6 +58,7 @@
 */
 #ifdef _WIN32
 #include "win/win.h"	/* Winsock, and the sock_* spellings below */
+#define dch_trace(...) ((void)0)	/* dch.c, its sink, is not in the Windows build */
 #else
 #include "dtach.h"
 #include "xray.h"	/* --requests checks a --ref as dch --xray does */
