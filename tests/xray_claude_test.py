@@ -943,7 +943,9 @@ def test_refs():
          {"type": "user", "message": {"content": "next"}},
          {"type": "assistant", "message": {"content": [{"type": "text",
           "text": "Then we met Mirela again. Keep **Shadow Mode** on."}]}}])
-    for what, ref in (("name", "term:Mirela"), ("bold", "term:shadow mode")):
+    # NIT-WA2 (#628): the bold asked as shown, Shadow Mode, matches too
+    for what, ref in (("name", "term:Mirela"), ("bold", "term:shadow mode"),
+                      ("bold as shown", "term:Shadow Mode")):
         r = dch("--xray", "xr-refs", "--ref", ref, "--scope", "session",
                 "--full", "--json")
         ls = ref_lines(r.stdout) or [{}]
@@ -2934,6 +2936,45 @@ def test_mid_turn():
         check("mid-turn: --chapter of the earlier chapter is its own",
               rc == 0 and c and c["title"] == "ask A" and
               c["anchor"] == anc("ask A"), (rc, c, err))
+        # #619: 400 chapters, 350 responses of 2000 bytes JSON writes 6
+        # each (past 4 MiB), the newest 50 shared by a mid-turn sharer;
+        # the same with the sharers as turns of their own gives no copies.
+        # Past the cap the copies go first, so the sources lose no more.
+        big = lambda i: said("\x01" * 1990 + "%04d" % i)
+
+        def evicted(chain):
+            ls = []
+            for i in range(350):
+                if i < 300:
+                    ls += [ask("p%d" % i)] + tool() + [big(i), dur]
+                elif chain:
+                    ls += ([ask("s%d" % i)] + tool() +
+                           [queued("t%d" % i)] + tool() + [big(i), dur])
+                else:
+                    ls += ([ask("s%d" % i)] + tool() + [dur, ask("t%d" % i)] +
+                           tool() + [big(i), dur])
+            with open(tp, "w") as f:
+                f.write("".join(json.dumps(x) + "\n" for x in ls))
+            r = dch("--xray", "xr-mid", "--json")
+            try:
+                ch = json.loads(r.stdout).get("chapters", [])
+                why = json.loads(r.stdout).get("why")
+            except ValueError:
+                ch, why = [], None
+            return (r.returncode, len(ch), why,
+                    sum("response_offset" in c and "response" not in c
+                        and "response_from" not in c for c in ch),
+                    len(r.stdout.encode()) <= 4 << 20,
+                    sum("response_from" in c and "response_offset" in c and
+                        "response" not in c for c in ch))
+        flat, chain = evicted(False), evicted(True)
+        check("mid-turn: past 4 MiB the sharers' copies go first, so "
+              "sharing evicts no source's response; a sharer that lost its "
+              "copy keeps response_from (#619; flat, chain: %s, %s)"
+              % (flat, chain),
+              flat[:5] == (0, 400, "output", flat[3], True) and
+              flat[3] > 0 and chain[:5] == flat[:5] and
+              0 < chain[5] <= 50, (flat, chain))
     finally:
         os.unlink(tp)
 
@@ -4806,9 +4847,9 @@ def test_terms_b():
 
 def test_terms_spread():
     """#624: no name term for the session's own directory (its cwd's
-    basename, any case), nor for a name in more than 3% of the turns and
-    over 10 of them; a name under the share stays, and a short session
-    keeps a name said in every turn."""
+    basename, any case), nor for a name in more than 35% of the turns and
+    over 10 of them (#630: 3% hid the main characters); a name under the
+    share stays, and a short session keeps a name said in every turn."""
     cfg = os.path.join(HOME, ".claude")
 
     def put(name, sid, cwd, turns, say):
@@ -4826,13 +4867,14 @@ def test_terms_spread():
         history(name, sid, cfg, cwd)
         return tp
 
-    # 400 turns: Wombat (the cwd's name) in 2, Quokka in 13 (3.25%),
-    # Numbat in 11 (2.75%)
+    # 100 turns: Wombat (the cwd's name) in 2, Quokka in 36 (36%),
+    # Numbat in 11 and Bandicoot in 15 (the main characters)
     tp = put("xr-spread", "11111111-2222-4333-8444-5555555555ca",
-             "/home/demo/wombat", 400, lambda t:
+             "/home/demo/wombat", 100, lambda t:
              (["we asked Wombat."] if t in (2, 3) else []) +
-             (["we asked Quokka."] if t % 30 == 1 else []) +
-             (["we asked Numbat."] if t % 30 == 2 and t < 330 else []))
+             (["we asked Quokka."] if t <= 36 else []) +
+             (["we asked Numbat."] if t % 9 == 1 and t < 99 else []) +
+             (["we asked Bandicoot."] if t % 6 == 2 and t < 90 else []))
     tq = put("xr-spread8", "11111111-2222-4333-8444-5555555555cb",
              "/home/demo/projs", 8, lambda t: ["we asked Bilby."])
     try:
@@ -4842,10 +4884,12 @@ def test_terms_spread():
         check("terms spread: the session's own directory name, said "
               "mid-sentence in two turns, is no term",
               rc == 0 and "term:Wombat" not in refs, (terms, err))
-        check("terms spread: a name in more than 3% of the turns is no term",
-              rc == 0 and "term:Quokka" not in refs, terms)
-        check("terms spread: a name in under 3% of the turns stays",
+        check("terms spread: a name in more than 35% of the turns is no "
+              "term", rc == 0 and "term:Quokka" not in refs, terms)
+        check("terms spread: a name in 11 of 100 turns stays",
               refs.get("term:Numbat", {}).get("count") == 11, terms)
+        check("terms spread: a name in 15 of 100 turns stays",
+              refs.get("term:Bandicoot", {}).get("count") == 15, terms)
         rc, o, err = xray("xr-spread8", "--json")
         refs = {r["key"]: r for r in (o or {}).get("refs", [])}
         check("terms spread: a short session keeps a name said in all of "
@@ -4855,6 +4899,89 @@ def test_terms_spread():
     finally:
         os.unlink(tp)
         os.unlink(tq)
+
+
+def test_terms_628():
+    """#628: term quality. A one-word bold the prose also says plain is
+    emphasis (VZ3); one-off candidates never push out a listed term nor
+    count in dropped_keys (VZ4); a bold ending a list item is a term, a
+    bold line of its own is not (VZ5); an -ing/-ed name stays unless said
+    lowercase (VZ6); the lowercase set grows past its first slots with no
+    change (VZ7); only a version or a leading count refuses a bold (WA3)."""
+    cfg = os.path.join(HOME, ".claude")
+
+    def put(name, sid, cwd, turns, say):
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+        with open(tp, "w") as f:
+            for t in range(1, turns + 1):
+                f.write(json.dumps({"type": "user", "cwd": cwd,
+                                    "message": {"content": "turn %d" % t}}) +
+                        "\n")
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text": "ok %d, " % t +
+                                 say(t)}]}}) + "\n")
+        history(name, sid, cfg, cwd)
+        return tp
+
+    both = ("We need it **exactly** so. Keep **idempotent** writes. We met "
+            "Alfred in Beijing with Sterling. Then we kept Solving it.\n"
+            "- turn on **shadow mode**\n**rollout plan**\nWe tried **V8 "
+            "isolates**, the **2FA setup**, a **3D view** and the **phase 2 "
+            "rollout**, not **v2.1.0** or **3 tries** now.")
+    ta = put("xr-t628", "11111111-2222-4333-8444-5555555555d1",
+             "/home/demo/projt", 6, lambda t:
+             both if t in (2, 4) else
+             "it is exactly right, and solving it." if t == 3 else "fine")
+    w = lambda i, p: p + "".join(chr(97 + (i // 26 ** k) % 26)
+                                 for k in range(3))
+    tb = put("xr-t628b", "11111111-2222-4333-8444-5555555555d2",
+             "/home/demo/projt", 202, lambda t:
+             ("we asked Mirela." if t in (1, 202) else
+              "we asked Kestrel." if t in (2, 3) else
+              " ".join("we asked V%s." % w(3 * t + k, "or")
+                       for k in range(3)) if t < 140 else
+              "we asked Wibble." if t in (150, 160) else
+              "the wibble ran." if t in (170, 180) else "") +
+             " " + " ".join(w(20 * t + k, "zz") for k in range(20)))
+    try:
+        rc, o, err = xray("xr-t628", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        terms = sorted(k for k in refs if k.startswith("term:"))
+        check("terms 628: a one-word bold also said plain is no term, one "
+              "never said plain is (VZ3)", rc == 0 and
+              "term:exactly" not in refs and "term:idempotent" in refs,
+              (terms, err))
+        check("terms 628: a bold ending a list item is a term, a bold line "
+              "of its own is not (VZ5)", "term:shadow mode" in refs and
+              "term:rollout plan" not in refs, terms)
+        check("terms 628: Alfred, Beijing and Sterling are terms, Solving "
+              "said lowercase is not (VZ6)",
+              all("term:" + n in refs for n in ("Alfred", "Beijing",
+                                                "Sterling")) and
+              "term:Solving" not in refs, terms)
+        check("terms 628: V8 isolates, 2FA setup, 3D view and phase 2 "
+              "rollout are terms, a version and a count are not (WA3)",
+              all("term:" + n in refs for n in ("v8 isolates", "2fa setup",
+                                                "3d view",
+                                                "phase 2 rollout")) and
+              "term:v2.1.0" not in refs and "term:3 tries" not in refs,
+              terms)
+        rc, o, err = xray("xr-t628b", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        check("terms 628: 400 one-off names push out no listed term and "
+              "count in no dropped_keys (VZ4)", rc == 0 and
+              refs.get("term:Kestrel", {}).get("count") == 2 and
+              (o or {}).get("dropped_keys") == 0,
+              (sorted(k for k in refs if k.startswith("term:")),
+               (o or {}).get("dropped_keys"), err))
+        check("terms 628: past 4000 lowercase words a name said lowercase "
+              "as often is still no term (VZ7)", rc == 0 and
+              "term:Wibble" not in refs, err)
+    finally:
+        os.unlink(ta)
+        os.unlink(tb)
 
 
 def test_recall():
@@ -4985,6 +5112,7 @@ def main():
         test_terms()
         test_terms_b()
         test_terms_spread()
+        test_terms_628()
         test_recall()
     finally:
         shutil.rmtree(T, ignore_errors=True)

@@ -915,8 +915,8 @@ word_in(const char *const *v, const char *s, size_t a, size_t b, int icase)
 
 /* N (#460): a capitalised word of 3-32 ASCII letters, its second lowercase
 ** (an acronym, API JSON PR CI HTTP PRs, never is), not at a sentence start,
-** not part of an identifier, path, call, label, count or Title Case run, no
-** -ing or -ed word, not in the stoplist. */
+** not part of an identifier, path, call, label, count or Title Case run,
+** not in the stoplist (an -ing or -ed word: ix_shown, #628). */
 static size_t
 r_name(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
 {
@@ -955,9 +955,6 @@ r_name(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
 	    /* Claude Code's [Image #81] placeholder, a numbered Step #3 */
 	    (j + 2 < n && s[j] == ' ' && s[j + 1] == '#' &&
 	     A_DIG((unsigned char)s[j + 2])) ||
-	    /* a verb or participle a heading capitalises (Solving, Executed) */
-	    (j - i >= 5 && (!memcmp(s + j - 3, "ing", 3) ||
-	                    !memcmp(s + j - 2, "ed", 2))) ||
 	    word_in(stop, s, i, j, 0) || sent_start(s, i))
 		return 0;
 	/* Title Case (a heading, a UI label, "Claude Code"): a capitalised
@@ -1001,7 +998,7 @@ r_bold(const char *s, size_t n, size_t i, uint32_t prev, const char *cwd,
 		"yes", "very", "more", "most", "less", "why", "what", "how", "when",
 		"where", "which", "who", "done", "fixed", "here", "there", "first",
 		"last", "next", "still", "just", "nothing", NULL};
-	size_t a = i + 2, d, k, w;
+	size_t a = i + 2, d, k, w, q;
 	int words = 1, al = 0, allstop = 1;
 	struct xr_span o;
 
@@ -1021,10 +1018,18 @@ r_bold(const char *s, size_t n, size_t i, uint32_t prev, const char *cwd,
 	    !A_ALNUM((unsigned char)s[d - 1]) ||
 	    (d + 2 < n && s[d + 2] == '*'))
 		return 0;
-	/* a label: **Why:** **Next** — text, a line of its own */
+	/* a label: **Why:** **Next** — text, **Why**: a line of its own */
 	for (k = d + 2; k < n && (s[k] == ' ' || s[k] == '\t'); k++)
 		;
-	if (k >= n || s[k] == '\n' || s[k] == '\r' || s[k] == ':' ||
+	for (w = i; w && (s[w - 1] == ' ' || s[w - 1] == '\t'); w--)
+		;
+	/* #628: the line's end refuses only a bold that is the whole line */
+	if (k >= n || s[k] == '\n' || s[k] == '\r')
+	{
+		if (!w || s[w - 1] == '\n' || s[w - 1] == '\r')
+			return 0;
+	}
+	else if (s[k] == ':' ||
 	    (s[k] == '-' && k + 1 < n && s[k + 1] == ' ') ||
 	    (k + 2 < n && !memcmp(s + k, "\xe2\x80", 2) &&
 	     ((unsigned char)s[k + 2] == 0x93 || (unsigned char)s[k + 2] == 0x94)))
@@ -1035,9 +1040,15 @@ r_bold(const char *s, size_t n, size_t i, uint32_t prev, const char *cwd,
 			;
 		if (!word_in(stop, s, k, w, 1))
 			allstop = 0;
-		/* #624: a version or number (**v2.176.0-beta.1**, **3 tries**) */
-		if (A_DIG((unsigned char)s[k]) || ((s[k] | 0x20) == 'v' &&
-		    k + 1 < w && A_DIG((unsigned char)s[k + 1])))
+		/* #624: a version (**v2.176.0-beta.1**, **1.5x**) or a count
+		** (**3 tries**); #628: **V8 isolates**, **2FA setup** and
+		** **phase 2 rollout** stay */
+		for (q = k + ((s[k] | 0x20) == 'v'); q < w && A_DIG((unsigned char)s[q]);
+		     q++)
+			;
+		if ((q > k + ((s[k] | 0x20) == 'v') && q + 1 < w && s[q] == '.' &&
+		     A_DIG((unsigned char)s[q + 1])) ||
+		    (k == a && q == w && A_DIG((unsigned char)s[k])))
 			return 0;
 	}
 	if (allstop || (words == 1 && A_UP((unsigned char)s[a])))
@@ -1171,6 +1182,8 @@ scan_run(struct gscan *g, size_t a, size_t b, int rules, int code, int whole)
 			j++;
 		if (j - i >= 3 && j - i <= 32 && !u_word(prev) && prev != '/' &&
 		    prev != '.' && prev != '-' && prev != '$' && after_ok(s, b, j) &&
+		    /* #628: **word** is said bold, not plain */
+		    !(prev == '*' && j < b && s[j] == '*') &&
 		    !(j + 1 < b && strchr("-./@", s[j]) &&
 		      A_ALNUM((unsigned char)s[j + 1])))
 			g->wfn(g->wctx, s + i, j - i);
@@ -4764,7 +4777,7 @@ struct xr_index
 	uint64_t *drop;		/* dropped keys' hashes, open addressing */
 	struct low *low;	/* #460: lowercase prose words by their
 				** "term:Word" hash, the same way; NULL none */
-	size_t nlow;
+	size_t nlow, lowcap;	/* lowcap: low's slots, grown to XR_DROPSET */
 	uint64_t dropped;
 	uint64_t ord;
 	uint64_t maxturn;	/* #624: the newest turn a hit came from */
@@ -4936,48 +4949,76 @@ ix_touch(struct xr_index *x, size_t k)
 }
 
 /* #460: the lowercase prose words, counted by "term:Word" hash; the set
-** stops at half load (a word past it never demotes a name) */
+** stops at XR_DROPSET / 2 words (a word past it never demotes a name). It
+** starts at 1024 slots and doubles at half load (#628: no 1 MiB a prose) */
 static struct low *
 low_at(const struct xr_index *x, uint64_t h)
 {
 	size_t i;
 
 	h = h ? h : 1;
-	for (i = h % XR_DROPSET; x->low && x->low[i].h; i = (i + 1) % XR_DROPSET)
+	if (!x->low || !x->lowcap)
+		return NULL;
+	for (i = h % x->lowcap; x->low[i].h; i = (i + 1) % x->lowcap)
 		if (x->low[i].h == h)
 			return &x->low[i];
 	return NULL;
+}
+
+/* "term:Word"'s hash for a word w of at most 40 bytes, its first letter up */
+static uint64_t
+low_hash(const char *w, size_t l)
+{
+	char key[48];
+	uint64_t h;
+
+	memcpy(key, "term:", 5);
+	memcpy(key + 5, w, l);
+	if (A_LO((unsigned char)key[5]))
+		key[5] = (char)(key[5] - 32);
+	h = fnv(key, 5 + l);
+	return h ? h : 1;
 }
 
 static void
 ix_word(void *ctx, const char *w, size_t l)
 {
 	struct xr_index *x = ctx;
-	char key[48];
-	uint64_t h;
-	size_t i;
-	struct low *o;
+	uint64_t h = low_hash(w, l);
+	size_t i, k, cap;
+	struct low *o, *v;
 
-	memcpy(key, "term:", 5);
-	memcpy(key + 5, w, l);
-	key[5] = (char)(key[5] - 32);
-	key[5 + l] = '\0';
-	h = fnv(key, 5 + l);
-	h = h ? h : 1;
 	if ((o = low_at(x, h)))
 	{
 		o->n++;
 		return;
 	}
-	if (x->nlow >= XR_DROPSET / 2 ||
-	    (!x->low && !(x->low = calloc(XR_DROPSET, sizeof *x->low))))
+	if (x->nlow >= XR_DROPSET / 2)
 		return;
-	for (i = h % XR_DROPSET; x->low[i].h; i = (i + 1) % XR_DROPSET)
+	if (2 * (x->nlow + 1) > x->lowcap)
+	{
+		cap = x->lowcap ? 2 * x->lowcap : 1024;
+		if (!(v = calloc(cap, sizeof *v)))
+			return;
+		for (k = 0; k < x->lowcap; k++)
+			if (x->low[k].h)
+			{
+				for (i = x->low[k].h % cap; v[i].h; i = (i + 1) % cap)
+					;
+				v[i] = x->low[k];
+			}
+		free(x->low);
+		x->low = v;
+		x->lowcap = cap;
+	}
+	for (i = h % x->lowcap; x->low[i].h; i = (i + 1) % x->lowcap)
 		;
 	x->low[i].h = h;
 	x->low[i].n = 1;
 	x->nlow++;
 }
+
+static int ix_shown(const struct xr_index *x, const struct xr_ent *e);
 
 static struct xr_ent *
 ix_get(struct xr_index *x, const struct xr_span *sp)
@@ -5000,9 +5041,19 @@ ix_get(struct xr_index *x, const struct xr_span *sp)
 		return NULL;
 	if (x->nk[r] == xr_room[r])
 	{
-		/* the room is full: its ref mentioned longest ago goes */
+		/* the room is full: its ref mentioned longest ago goes; in
+		** the name and bold room its oldest one-turn candidate first,
+		** so one-offs never push out a listed term (#628). Only a
+		** listed one counts as dropped */
 		k = x->oldest[r] - 1;
-		ix_drop(x, x->v[k].h);
+		for (i = k + 1; r == XR_CAND && i; i = x->v[i - 1].newer)
+			if (!x->v[i - 1].solid && x->v[i - 1].nturn < 2)
+			{
+				k = i - 1;
+				break;
+			}
+		if (ix_shown(x, &x->v[k]))
+			ix_drop(x, x->v[k].h);
 		ix_unslot(x, k);
 		ix_unlink(x, k);
 		free(x->v[k].key);
@@ -5111,24 +5162,39 @@ xr_index_sink(struct xr_index *x, struct xr_sink *k)
 ** term: kept (a second turn lists it), never written. Nor is a capitalised
 ** word said lowercase in prose as often as capitalised (Edit, edit): a
 ** common word, not a name. */
-/* #624: nor a name in more than 3% of the turns (and over 10 of them:
+/* #624: nor a name in more than 35% of the turns (and over 10 of them:
 ** a short session keeps its names), nor the session's own directory's:
-** said everywhere, it marks nothing (Prosper, Mac, GitHub). Names only;
-** bold phrases are rare enough. */
-#define XR_SPREAD_PCT 3
+** said everywhere, it marks nothing (Prosper in ~/prosper). Names only;
+** bold phrases are rare enough. #630: the share is measured on live
+** sessions: the names in 10-31% of the turns are the session's main
+** characters (Claude, Personio), and Mac and GitHub stay under 16%. */
+#define XR_SPREAD_PCT 35
 #define XR_SPREAD_MIN 10
 static int
 ix_shown(const struct xr_index *x, const struct xr_ent *e)
 {
-	const struct low *o = e->solid ? NULL : low_at(x, e->h);
-	const char *b = strrchr(x->home, '/');
+	const char *b = strrchr(x->home, '/'), *w = e->key + 5;
+	size_t l = strlen(w);
+	const struct low *o = NULL;
 
-	if (!e->solid && e->name &&
+	if (e->solid)
+		return 1;
+	if (e->name)
+		o = low_at(x, e->h);
+	else if (!strchr(w, ' ') && l <= 40)
+		o = low_at(x, low_hash(w, l));
+	if (e->name &&
 	    ((e->nturn > XR_SPREAD_MIN &&
 	      e->nturn * 100 > x->maxturn * XR_SPREAD_PCT) ||
-	     (b && !strcasecmp(b + 1, e->key + 5))))
+	     (b && !strcasecmp(b + 1, w))))
 		return 0;
-	return e->solid || (e->nturn >= 2 && (!o || o->n < e->nunit));
+	/* #628: a one-word bold the prose also says plain is emphasis
+	** (**exactly**); an -ing or -ed name said lowercase at all is a verb a
+	** heading capitalises (Solving), else a name (Beijing, Alfred) */
+	if (o && (!e->name || (l >= 5 && (!strcmp(w + l - 3, "ing") ||
+	                                  !strcmp(w + l - 2, "ed")))))
+		return 0;
+	return e->nturn >= 2 && (!o || o->n < e->nunit);
 }
 
 static size_t
@@ -5733,7 +5799,9 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	size_t bl;
 	FILE *m;
 
-	if (x->stop || (strcmp(h->sp->key, x->key) && !fetch_of(x, h)))
+	/* #628: a bold term matches its key in any case, a name exactly */
+	if (x->stop || (strcmp(h->sp->key, x->key) && !fetch_of(x, h) &&
+	                (h->sp->rule != 'B' || strcasecmp(h->sp->key, x->key))))
 		return;
 	/* light reads a shell's ring oldest first: a newer block's result puts
 	** out the older one's (recency first, #396); why marks it, the stop
@@ -9343,6 +9411,9 @@ pf_build(struct xr_pf *f, const char *key)
 		f->fold = 1;
 		return pf_add(f, h ? h + 3 : b, strlen(h ? h + 3 : b));
 	}
+	/* #628: a bold phrase keys lowercase, asked as shown (Shadow Mode);
+	** shortcut: a one-word bold is found in its asked case only */
+	f->fold = !strncmp(key, "term:", 5) && strchr(t, ' ');
 	if (!strncmp(key, "ticket:", 7) || !strncmp(key, "commit:", 7) ||
 	    !strncmp(key, "term:", 5))
 		return pf_add(f, t, strlen(t));
@@ -10809,19 +10880,26 @@ put_auto(FILE *m, const struct xr_chapter *c)
 	}
 }
 
-/* #615: chapter k's response: its own, else, when later prompts were
-** delivered into its turn, that of the chain's last (the one the turn's
-** end_turn lands in); NULL for none */
+/* #615: the index of chapter k's response: its own, else, when later
+** prompts were delivered into its turn, the chain's last (the one the turn's
+** end_turn lands in); k for none */
+static size_t
+resp_at(const struct xr_chapters *ch, size_t k)
+{
+	const struct xr_chapter *c = xr_chapter_at(ch, k), *e = c;
+	size_t s = k;
+
+	if (!c || c->responded)
+		return k;
+	while (e->cont && s + 1 < ch->n)
+		e = xr_chapter_at(ch, ++s);
+	return e->responded ? s : k;
+}
+
 static const struct xr_chapter *
 resp_src(const struct xr_chapters *ch, size_t k)
 {
-	const struct xr_chapter *c = xr_chapter_at(ch, k), *e = c;
-
-	if (!c || c->responded)
-		return c;
-	while (e->cont && k + 1 < ch->n)
-		e = xr_chapter_at(ch, ++k);
-	return e->responded ? e : c;
+	return xr_chapter_at(ch, resp_at(ch, k));
 }
 
 /* #296: additive too. The response text alone, so the cap can leave it
@@ -10954,7 +11032,8 @@ xr_print(FILE *f, const struct xr_answer *a)
 	char *body = NULL, *head = NULL;
 	size_t bl = 0, hl = 0, k, cut = 0, n = a->ch ? a->ch->n : 0, slack;
 	size_t *at = calloc(n + 1, sizeof *at), *rs = calloc(n + 1, sizeof *rs);
-	size_t r, rb = 0;	/* #296: each chapter's response, their sum */
+	size_t r, rd = 0, rb = 0;	/* #296: each chapter's response, their sum;
+					** rd: how many dropped (rs SIZE_MAX) */
 	uint64_t first = a->ch ? a->ch->total - a->ch->n : 0;
 	FILE *m;
 	int complete = a->complete, rc = 0;
@@ -11038,17 +11117,23 @@ fail:
 	free(body);
 	body = NULL;
 	bl = at[n] + rb;
-	/* 4 MiB: the oldest chapters' responses go first (#296: the offset and
-	** the tool line stay), then refs, in drop's order (each a dropped key;
-	** the first kept one has no comma), then the oldest chapters */
+	/* 4 MiB: the oldest mid-turn sharers' copies of a response go first
+	** (#619: response_from stays), then the oldest chapters' own responses
+	** (#296: the offset and the tool line stay; a source goes only once
+	** every copy of it has), then refs, in drop's order (each a dropped
+	** key; the first kept one has no comma), then the oldest chapters */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
 	rl -= nr > 0;
-	for (r = 0; r < n && bl + rl + slack > xr_lim.out; r++)
-		bl -= rs[r];
-	for (k = 0; k < r && !rs[k]; k++)
-		;
+	for (r = 0; r < 2; r++)	/* r 0: the sharers' copies, 1: the sources' */
+		for (k = 0; k < n && bl + rl + slack > xr_lim.out; k++)
+			if (rs[k] && (resp_at(a->ch, k) == k) == r)
+			{
+				bl -= rs[k];
+				rs[k] = SIZE_MAX;
+				rd++;
+			}
 	for (j = 0; j < nr && bl + rl + slack > xr_lim.out; j++)
 	{
 		rl -= rat[drop[j]] - (j + 1 == nr);
@@ -11057,7 +11142,7 @@ fail:
 	keep = nr - j;
 	while (cut < n && bl - at[cut] + rl + slack > xr_lim.out)
 		cut++;
-	if (cut || keep < nr || k < r)
+	if (cut || keep < nr || rd)
 	{
 		complete = 0;
 		why = "output";
@@ -11102,7 +11187,7 @@ fail:
 		fputs(head, f);
 		for (k = cut; k < n; k++)	/* the first kept one: no comma */
 			put_chapter(f, a->ch, k, first + k + 1,
-			            k > cut, k >= r);
+			            k > cut, rs[k] != SIZE_MAX);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
 		for (k = j = 0; k < nr; k++)	/* j: refs written */

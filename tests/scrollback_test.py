@@ -23,7 +23,7 @@ the real one is attached too. Self-isolating (own XDG_RUNTIME_DIR).
 
 Run:  python3 tests/scrollback_test.py            (uses ./dch)
 """
-import os, sys, time, json, fcntl, struct, termios, socket, select
+import os, pty, sys, time, json, fcntl, struct, termios, socket, select
 import shutil, signal, tempfile, threading, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -191,15 +191,25 @@ class OldMaster:
         os.unlink(self.path)
 
 
+_procs = []  # keep Popen objects alive: stop() reaps by pid, no ResourceWarning
+
+
 def client(args, cols=40, rows=10, env=None):
-    pid, fd = os.forkpty()
-    if pid == 0:
-        # sized before exec: set from the parent, it races the client's
-        # first REDRAW (a 0x0 one, then a WINCH)
-        fcntl.ioctl(0, termios.TIOCSWINSZ, ws(cols, rows))
-        os.execve(DCH, [DCH, "-E"] + args, env or ENV)
-        os._exit(127)
-    return pid, fd
+    # openpty + Popen, no fork from Python (forkpty() fails with EBADF once
+    # a thread exists). Sized on the slave before exec: set from the parent
+    # after, it races the client's first REDRAW (a 0x0 one, then a WINCH).
+    # No preexec_fn (unsafe with threads), so no TIOCSCTTY: the child gets a
+    # new session but no controlling tty; dch only uses fds 0/1/2.
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, ws(cols, rows))
+    try:
+        p = subprocess.Popen([DCH, "-E"] + args, env=env or ENV,
+                             stdin=slave, stdout=slave, stderr=slave,
+                             start_new_session=True)
+    finally:
+        os.close(slave)
+    _procs.append(p)
+    return p.pid, master
 
 
 def pty_read(fd, until, deadline):
@@ -243,7 +253,7 @@ def main():
     # --- an old master (1.38.0 framing) -----------------------------------
     old = OldMaster("sbold")
     pid, fd = client(["-a", "sbold", "--scrollback", "5"])
-    old.start()  # forkpty first: CPython forkpty can fail (EBADF) once a thread exists
+    old.start()
     out = pty_read(fd, b"OLD-MASTER-SCREEN", time.time() + DUE)
     os.write(fd, b"typed")
     wait_for(lambda: any(t == MSG_PUSH for t, _, _ in old.got),

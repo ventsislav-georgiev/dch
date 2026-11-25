@@ -1081,9 +1081,11 @@ t_grammar(void)
 		  "Monday; The fix, Enter, API JSON PR, Go Foo_bar Bar() "
 		  "x.Baz Qux-y", XR_MD | XR_TERMS,
 		  "term:Mirela term:Tailscale term:Prosper" },
+		/* #628: an -ing/-ed name is a span; ix_shown hides it when
+		** the prose says it lowercase (Solving), keeps Beijing */
 		{ "x Solving, Executed, Step 3, Nov 25, the Claude Code app, "
 		  "Ask Mirela: PRs SHAs, then Mirela", XR_MD | XR_TERMS,
-		  "term:Mirela" },
+		  "term:Solving term:Executed term:Mirela" },
 		{ "see [Image #81] and Image #2, ask Mirela", XR_PROSE | XR_TERMS,
 		  "issue:#81 term:Mirela" },
 		{ "ask Mirela\n<system-reminder>\nuse SendMessage, a **tool "
