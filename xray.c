@@ -10809,19 +10809,26 @@ put_auto(FILE *m, const struct xr_chapter *c)
 	}
 }
 
-/* #615: chapter k's response: its own, else, when later prompts were
-** delivered into its turn, that of the chain's last (the one the turn's
-** end_turn lands in); NULL for none */
+/* #615: the index of chapter k's response: its own, else, when later
+** prompts were delivered into its turn, the chain's last (the one the turn's
+** end_turn lands in); k for none */
+static size_t
+resp_at(const struct xr_chapters *ch, size_t k)
+{
+	const struct xr_chapter *c = xr_chapter_at(ch, k), *e = c;
+	size_t s = k;
+
+	if (!c || c->responded)
+		return k;
+	while (e->cont && s + 1 < ch->n)
+		e = xr_chapter_at(ch, ++s);
+	return e->responded ? s : k;
+}
+
 static const struct xr_chapter *
 resp_src(const struct xr_chapters *ch, size_t k)
 {
-	const struct xr_chapter *c = xr_chapter_at(ch, k), *e = c;
-
-	if (!c || c->responded)
-		return c;
-	while (e->cont && k + 1 < ch->n)
-		e = xr_chapter_at(ch, ++k);
-	return e->responded ? e : c;
+	return xr_chapter_at(ch, resp_at(ch, k));
 }
 
 /* #296: additive too. The response text alone, so the cap can leave it
@@ -10954,7 +10961,8 @@ xr_print(FILE *f, const struct xr_answer *a)
 	char *body = NULL, *head = NULL;
 	size_t bl = 0, hl = 0, k, cut = 0, n = a->ch ? a->ch->n : 0, slack;
 	size_t *at = calloc(n + 1, sizeof *at), *rs = calloc(n + 1, sizeof *rs);
-	size_t r, rb = 0;	/* #296: each chapter's response, their sum */
+	size_t r, rd = 0, rb = 0;	/* #296: each chapter's response, their sum;
+					** rd: how many dropped (rs SIZE_MAX) */
 	uint64_t first = a->ch ? a->ch->total - a->ch->n : 0;
 	FILE *m;
 	int complete = a->complete, rc = 0;
@@ -11038,17 +11046,23 @@ fail:
 	free(body);
 	body = NULL;
 	bl = at[n] + rb;
-	/* 4 MiB: the oldest chapters' responses go first (#296: the offset and
-	** the tool line stay), then refs, in drop's order (each a dropped key;
-	** the first kept one has no comma), then the oldest chapters */
+	/* 4 MiB: the oldest mid-turn sharers' copies of a response go first
+	** (#619: response_from stays), then the oldest chapters' own responses
+	** (#296: the offset and the tool line stay; a source goes only once
+	** every copy of it has), then refs, in drop's order (each a dropped
+	** key; the first kept one has no comma), then the oldest chapters */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
 	rl -= nr > 0;
-	for (r = 0; r < n && bl + rl + slack > xr_lim.out; r++)
-		bl -= rs[r];
-	for (k = 0; k < r && !rs[k]; k++)
-		;
+	for (r = 0; r < 2; r++)	/* r 0: the sharers' copies, 1: the sources' */
+		for (k = 0; k < n && bl + rl + slack > xr_lim.out; k++)
+			if (rs[k] && (resp_at(a->ch, k) == k) == r)
+			{
+				bl -= rs[k];
+				rs[k] = SIZE_MAX;
+				rd++;
+			}
 	for (j = 0; j < nr && bl + rl + slack > xr_lim.out; j++)
 	{
 		rl -= rat[drop[j]] - (j + 1 == nr);
@@ -11057,7 +11071,7 @@ fail:
 	keep = nr - j;
 	while (cut < n && bl - at[cut] + rl + slack > xr_lim.out)
 		cut++;
-	if (cut || keep < nr || k < r)
+	if (cut || keep < nr || rd)
 	{
 		complete = 0;
 		why = "output";
@@ -11102,7 +11116,7 @@ fail:
 		fputs(head, f);
 		for (k = cut; k < n; k++)	/* the first kept one: no comma */
 			put_chapter(f, a->ch, k, first + k + 1,
-			            k > cut, k >= r);
+			            k > cut, rs[k] != SIZE_MAX);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
 		for (k = j = 0; k < nr; k++)	/* j: refs written */

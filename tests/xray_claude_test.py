@@ -2934,6 +2934,45 @@ def test_mid_turn():
         check("mid-turn: --chapter of the earlier chapter is its own",
               rc == 0 and c and c["title"] == "ask A" and
               c["anchor"] == anc("ask A"), (rc, c, err))
+        # #619: 400 chapters, 350 responses of 2000 bytes JSON writes 6
+        # each (past 4 MiB), the newest 50 shared by a mid-turn sharer;
+        # the same with the sharers as turns of their own gives no copies.
+        # Past the cap the copies go first, so the sources lose no more.
+        big = lambda i: said("\x01" * 1990 + "%04d" % i)
+
+        def evicted(chain):
+            ls = []
+            for i in range(350):
+                if i < 300:
+                    ls += [ask("p%d" % i)] + tool() + [big(i), dur]
+                elif chain:
+                    ls += ([ask("s%d" % i)] + tool() +
+                           [queued("t%d" % i)] + tool() + [big(i), dur])
+                else:
+                    ls += ([ask("s%d" % i)] + tool() + [dur, ask("t%d" % i)] +
+                           tool() + [big(i), dur])
+            with open(tp, "w") as f:
+                f.write("".join(json.dumps(x) + "\n" for x in ls))
+            r = dch("--xray", "xr-mid", "--json")
+            try:
+                ch = json.loads(r.stdout).get("chapters", [])
+                why = json.loads(r.stdout).get("why")
+            except ValueError:
+                ch, why = [], None
+            return (r.returncode, len(ch), why,
+                    sum("response_offset" in c and "response" not in c
+                        and "response_from" not in c for c in ch),
+                    len(r.stdout.encode()) <= 4 << 20,
+                    sum("response_from" in c and "response_offset" in c and
+                        "response" not in c for c in ch))
+        flat, chain = evicted(False), evicted(True)
+        check("mid-turn: past 4 MiB the sharers' copies go first, so "
+              "sharing evicts no source's response; a sharer that lost its "
+              "copy keeps response_from (#619; flat, chain: %s, %s)"
+              % (flat, chain),
+              flat[:5] == (0, 400, "output", flat[3], True) and
+              flat[3] > 0 and chain[:5] == flat[:5] and
+              0 < chain[5] <= 50, (flat, chain))
     finally:
         os.unlink(tp)
 
