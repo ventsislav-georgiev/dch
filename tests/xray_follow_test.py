@@ -310,6 +310,42 @@ def test_follow_claude():
               got14 and not [p for p in new if p != trace] and
               "late #14" not in tr and "rotated ask" not in tr, new)
 
+        # #615: a prompt delivered into the running turn; when the turn
+        # ends, the earlier chapter is sent again with the turn's response
+        def step(i):
+            return [{"type": "assistant", "message": {"content": [
+                        {"type": "tool_use", "id": i, "name": "Bash",
+                         "input": {"command": "true"}}]}},
+                    {"type": "user", "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": i,
+                         "content": "ok"}]}}]
+        t3 = os.path.join(pdir, sid3 + ".jsonl")
+        with open(t3, "a") as f:
+            f.write("".join(json.dumps(o) + "\n" for o in step("q1") + [
+                {"type": "attachment", "attachment": {
+                    "type": "queued_command", "commandMode": "prompt",
+                    "prompt": "mid ask"}}] + step("q2")))
+        mid = fl.wait(lambda o: "chapter" in o and
+                      o["chapter"]["title"] == "mid ask", frm=k5)
+        time.sleep(0.4)
+        k6 = len(fl.got)
+        with open(t3, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {
+                "stop_reason": "end_turn", "content": [
+                    {"type": "text", "text": "both done"}]}}) + "\n")
+        got = fl.wait(lambda o: "chapter" in o and
+                      o["chapter"]["title"] == "cleared ask #16" and
+                      o["chapter"].get("response") == "both done", frm=k6)
+        b = fl.wait(lambda o: "chapter" in o and
+                    o["chapter"]["title"] == "mid ask" and
+                    o["chapter"].get("response") == "both done", frm=k6)
+        check("follow: a mid-turn prompt's turn end re-sends the earlier "
+              "chapter with the response and response_from (#615)",
+              mid and got and b and
+              got[0]["chapter"].get("response_from") ==
+              b[0]["chapter"]["anchor"] and
+              "response_from" not in b[0]["chapter"], fl.objs(k5))
+
         # the session ends: exit 0
         dch("-k", n)
         try:

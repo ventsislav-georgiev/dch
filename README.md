@@ -1580,7 +1580,11 @@ The corpus:
     names then `+N more`; an edit tool (Edit, MultiEdit and Write; Codex's
     apply_patch) adds its files and lines, as `Edit 3 (2 files, +40 -12),
     Bash 5`. At most 2 MiB of responses is held: past that, the oldest
-    chapters give theirs up (they keep `response_offset`).
+    chapters give theirs up (they keep `response_offset`). A prompt sent
+    while a turn runs (Claude Code delivers it into that turn) starts a
+    chapter of its own; an earlier chapter of that turn with no response of
+    its own shows the turn's `response` and `response_offset`, and adds
+    `response_from`, the anchor of the chapter that holds them (#615).
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2400
   keys, each kind in a room of its own: 300 tickets, 400 issues, 500 pull
   requests, 250 commits, 350 files, 200 URLs and 400 terms, so files,

@@ -81,6 +81,10 @@ struct xr_chapter
 	uint64_t response_offset;
 	size_t response_cut;
 	int responded;
+	int cont;			/* #615: the next chapter is a prompt
+					** delivered into this one's running turn
+					** (queued_command): with no response of
+					** its own it shows the turn's */
 	char *tools;			/* the turn's tool line, or NULL */
 	char *peer;			/* #359: another agent sent the prompt:
 					** its name as a title ("" for none),

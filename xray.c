@@ -1829,6 +1829,7 @@ static const char *const A_SUB[] = { "subtype", "sub_type", 0 };
 static const char *const A_CWD[] = { "cwd", "workingDirectory",
                                      "working_directory", 0 };
 static const char *const A_MESSAGE[] = { "message", 0 };
+static const char *const A_STOP[] = { "stop_reason", 0 };
 static const char *const A_CONTENT[] = { "content", 0 };
 static const char *const A_TEXT[] = { "text", 0 };
 static const char *const A_THINK[] = { "thinking", 0 };
@@ -5864,6 +5865,10 @@ struct xr_claude
 	int turn, lead, bare;	/* bare: the last main block is a compaction
 				** with no summary (mergeSummary's target) */
 	int titled;		/* the open chapter has its prompt */
+	int queued;		/* #615: the prompt being blocked is a
+				** queued_command attachment */
+	int ended;		/* #615: an end_turn or turn_duration since the
+				** open chapter began */
 	const char *harness;	/* the prompt being blocked is harness text:
 				** its summary ("" for none), else NULL */
 	const char *peer;	/* #359: it is another agent's: its name
@@ -5969,8 +5974,12 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 
 	if (!d->turn || (b == B_PROMPT && !d->lead))
 	{
+		/* #615: a prompt delivered into the open turn continues it */
+		if (b == B_PROMPT && d->queued && !d->ended && (x = cur(d)))
+			x->cont = 1;
 		if (!(x = ch_push(&d->ch)))
 			return;
+		d->ended = 0;
 		x->guess = d->turn && !d->sure;
 		d->turn = 1;
 		d->lead = 1;
@@ -7994,6 +8003,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 	char *s;
 
 	c = m >= 0 ? j_get(p, m, A_CONTENT) : -1;
+	if (!ag && m >= 0 && k_streq(p, m, A_STOP, "end_turn"))
+		d->ended = 1;	/* #615 */
 	if (c >= 0 && p->tok[c].kind == JSON_STRING)
 	{
 		if ((s = j_str(p, c, &n)) && !blank(s, n))
@@ -8591,6 +8602,8 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	{
 		char *sub = k_str(&p, 0, A_SUB, NULL);
 
+		if (sub && !strcmp(sub, "turn_duration") && !ag)
+			d->ended = 1;	/* #615 */
 		if (sub && !strcmp(sub, "compact_boundary"))
 			compaction(d, ag, 0);
 		else if (!sub || !listed(noise_sub, sub))
@@ -8623,6 +8636,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 			          injected(&p, a), c = j_get(&p, a, A_PROMPT),
 			    o = peer(&p, a) >= 0 ? peer(&p, a) : peer(&p, 0);
 
+			d->queued = !ag;	/* #615 */
 			if (o >= 0)
 				peer_text(d, &p, o, ag);	/* #359 */
 			/* a list: text and pasted image blocks, as a user's */
@@ -8634,6 +8648,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 					user_text(d, ag, s, n, inj);
 				free(s);
 			}
+			d->queued = 0;
 		}
 	}
 	else
@@ -10385,11 +10400,28 @@ put_auto(FILE *m, const struct xr_chapter *c)
 	}
 }
 
+/* #615: chapter k's response: its own, else, when later prompts were
+** delivered into its turn, that of the chain's last (the one the turn's
+** end_turn lands in); NULL for none */
+static const struct xr_chapter *
+resp_src(const struct xr_chapters *ch, size_t k)
+{
+	const struct xr_chapter *c = xr_chapter_at(ch, k), *e = c;
+
+	if (!c || c->responded)
+		return c;
+	while (e->cont && k + 1 < ch->n)
+		e = xr_chapter_at(ch, ++k);
+	return e->responded ? e : c;
+}
+
 /* #296: additive too. The response text alone, so the cap can leave it
 ** out (its offset and the tool line stay). */
 static void
-put_response(FILE *m, const struct xr_chapter *c)
+put_response(FILE *m, const struct xr_chapters *ch, size_t k)
 {
+	const struct xr_chapter *c = resp_src(ch, k);
+
 	if (!c || !c->response)
 		return;
 	fputs(",\"response\":", m);
@@ -10399,11 +10431,13 @@ put_response(FILE *m, const struct xr_chapter *c)
 		        c->response_cut);
 }
 
-/* resp: with the response text (put_response) */
+/* Chapter k; resp: with the response text (put_response) */
 static void
-put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma,
-            int resp)
+put_chapter(FILE *m, const struct xr_chapters *ch, size_t k, uint64_t i,
+            int comma, int resp)
 {
+	const struct xr_chapter *c = xr_chapter_at(ch, k), *r = resp_src(ch, k);
+
 	fputs(comma ? ",{\"anchor\":" : "{\"anchor\":", m);
 	xr_put_str(m, c->anchor);
 	fprintf(m, ",\"offset\":%llu,\"i\":%llu,\"at\":",
@@ -10419,10 +10453,15 @@ put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma,
 	        c->error ? "true" : "false");
 	put_auto(m, c);
 	if (resp)
-		put_response(m, c);
-	if (c->responded)
+		put_response(m, ch, k);
+	if (r->responded)
 		fprintf(m, ",\"response_offset\":%llu",
-		        (unsigned long long)c->response_offset);
+		        (unsigned long long)r->response_offset);
+	if (r != c)
+	{
+		fputs(",\"response_from\":", m);
+		xr_put_str(m, r->anchor);
+	}
 	if (c->tools)
 	{
 		fputs(",\"tools\":", m);
@@ -10564,11 +10603,11 @@ fail:
 	}
 	for (k = 0; k < n && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
-		put_chapter(m, xr_chapter_at(a->ch, k), first + k + 1, k > 0, 0);
+		put_chapter(m, a->ch, k, first + k + 1, k > 0, 0);
 		at[k + 1] = at[k] + (size_t)ftell(m);
 		if (fseek(m, 0, SEEK_SET) != 0)
 			break;
-		put_response(m, xr_chapter_at(a->ch, k));
+		put_response(m, a->ch, k);
 		rb += rs[k] = (size_t)ftell(m);
 	}
 	if (fclose(m) != 0 || k < n)
@@ -10648,7 +10687,7 @@ fail:
 	{
 		fputs(head, f);
 		for (k = cut; k < n; k++)	/* the first kept one: no comma */
-			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1,
+			put_chapter(f, a->ch, k, first + k + 1,
 			            k > cut, k >= r);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
@@ -10805,7 +10844,7 @@ stab_build(const struct xr_answer *a, struct stab *t)
 		const struct xr_chapter *x = xr_chapter_at(a->ch, k);
 		struct sch *c = &t->c[k];
 
-		put_chapter(m, x, 0, 0, 1);	/* i is display only: not compared */
+		put_chapter(m, a->ch, k, 0, 0, 1);	/* i is display only */
 		if (fflush(m) != 0)
 			break;
 		snprintf(c->anchor, sizeof c->anchor, "%s", x->anchor);
@@ -10943,7 +10982,7 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 		if (chg[nr + k])
 		{
 			fputs("{\"schema\":1,\"chapter\":", f);
-			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1, 0, 1);
+			put_chapter(f, a->ch, k, first + k + 1, 0, 1);
 			fputs("}\n", f);
 		}
 	for (k = 0; k < nr; k++)
