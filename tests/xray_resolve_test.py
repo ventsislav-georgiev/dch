@@ -33,6 +33,9 @@ def check(msg, cond, detail=""):
 
 
 # /tmp, not TMPDIR: a per-user TMPDIR can sit inside some git work tree
+# ASan (scripts/sanitize.sh sets it): a dch run costs ~0.5 s more, so the
+# #522 wall-clock bounds say nothing there; the title/no-title parts stay
+NO_BUDGET = bool(os.environ.get("DCH_TEST_NO_BUDGET"))
 T = os.path.realpath(tempfile.mkdtemp(prefix="xres", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
 HOME = os.path.join(T, "home")
 os.makedirs(HOME)
@@ -1017,12 +1020,14 @@ def test_github(m):
         dt = time.time() - t0
         check("#522 light: gh answering in 0.3 s: the first --ref shows the "
               "title, in < 1 s", len(rv) == 1 and
-              rv[0]["title"] == "Quick enough" and dt < 1, (dt, rv))
+              rv[0]["title"] == "Quick enough" and (NO_BUDGET or dt < 1),
+              (dt, rv))
         t0 = time.time()
         r, ls, rv, lg = q("acme/widgets#701", full=False)
         dt = time.time() - t0
         check("#522 light: gh answering in 2 s: --ref returns in < 1.95 s "
-              "with no resolved line", not rv and dt < 1.95, (dt, rv))
+              "with no resolved line", not rv and (NO_BUDGET or dt < 1.95),
+              (dt, rv))
         ent = os.path.join(ghd, "acme,widgets,701")
         filled = wait_for(lambda: os.path.isfile(ent) and idle(), 10)
         r2, ls2, rv2, lg2 = q("acme/widgets#701", full=False, keep=True)
