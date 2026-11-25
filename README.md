@@ -2813,7 +2813,7 @@ later does nothing to a running session.
 | `DCH_PAUSE_MSG`, `DCH_RESUME_MSG`, `DCH_AGENT_*_MS` | client | see the table | Agent pause/resume text and timeouts of `--include-agents` and `--stop` ([table](#restarting-claude-code-agents)). |
 | `DCH_REVIVE_MSG` | client | built in | The carry-on message `--revive` types ([Bringing sessions back](#bringing-sessions-back)). |
 | `DCH_LOGIN_ENV`, `DCH_LOGIN_ENV_MS` | client | on, `10000` | `--revive` takes your login shell's environment; `0` skips it. |
-| `DCH_DEBUG` | client and master | unset | A path: append a trace there; `1`: `/tmp/dch.<uid>.trace`. |
+| `DCH_DEBUG` | client and master | unset | A path: append a trace there; `1`: `/tmp/dch.<uid>.trace`. The file is created `0600`, never opened through a symlink, and holds no typed input. |
 | `XDG_STATE_HOME` | client and master | `~/.local/state` | Where [history records](#bringing-sessions-back) live, and the X-ray view's `a` choice (`dch/xray-view`). |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | client | `~/.claude`, `~/.codex` | Where dch looks for Claude's and Codex's session records and titles. |
 | `NO_COLOR`, `TERM=dumb` | picker | unset | Draw the [picker](#the-session-picker) without color. |

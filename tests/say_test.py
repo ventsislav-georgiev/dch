@@ -525,6 +525,34 @@ def main():
         run("-k", gs)
         names.remove(gs)
 
+        # --- DCH_DEBUG trace: 0600, no typed bytes, no symlink (#640) ----
+        tr = os.path.join(tmp, "trace.log")
+        mk = "zqx7marker"
+        t1 = sess("tr", "claude", env=dict(DCH_DEBUG=tr))
+        up(t1)
+        say(t1, "--", mk, env=dict(os.environ, DCH_DEBUG=tr))
+        time.sleep(0.5)
+        body = open(tr, errors="replace").read() if os.path.exists(tr) else ""
+        check("trace: file exists, has push lines", "push fd=" in body)
+        check("trace: mode 0600", os.path.exists(tr) and
+              stat.S_IMODE(os.stat(tr).st_mode) == 0o600)
+        check("trace: no typed marker, no last= byte field",
+              mk not in body and "last=" not in body)
+        run("-k", t1)
+        names.remove(t1)
+        tgt = os.path.join(tmp, "target.log")
+        lnk = os.path.join(tmp, "link.log")
+        open(tgt, "w").close()
+        os.symlink(tgt, lnk)
+        t2 = sess("tl", "claude", env=dict(DCH_DEBUG=lnk))
+        up(t2)
+        say(t2, "--", mk, env=dict(os.environ, DCH_DEBUG=lnk))
+        time.sleep(0.5)
+        run("-k", t2)
+        names.remove(t2)
+        check("trace: a symlink at DCH_DEBUG is not followed",
+              os.path.getsize(tgt) == 0)
+
         # --- concurrency: about the slowest session, not the sum ---------
         # Each slow one: two eaten Enters, 3 s apart = 6 s+; five in a row
         # would take 30 s+.
