@@ -6344,8 +6344,14 @@ struct xr_claude
 	int titled;		/* the open chapter has its prompt */
 	int queued;		/* #615: the prompt being blocked is a
 				** queued_command attachment */
-	int ended;		/* #615: an end_turn or turn_duration since the
-				** open chapter began */
+	int ended;		/* #615: since the open chapter began, 1 an
+				** end_turn, 2 a turn_duration */
+	int durs;		/* #620: a turn_duration seen: the turn ends at
+				** one, not at an end_turn (a Stop hook can
+				** block that stop) */
+	uint64_t hold;		/* #620: before any turn_duration, 1 + the ord
+				** of the first chapter of the run of queued
+				** prompts whose link an end_turn withheld */
 	const char *harness;	/* the prompt being blocked is harness text:
 				** its summary ("" for none), else NULL */
 	const char *peer;	/* #359: it is another agent's: its name
@@ -6440,6 +6446,25 @@ cur(struct xr_claude *d)
 }
 
 static void ch_anchor(struct xr_claude *d, char out[48]);
+
+/* #615: a turn_duration ends the turn. #620: the first one shows this
+** transcript marks turn ends: the open run's links an end_turn withheld
+** were a Stop hook's continuation, so they link after all. shortcut: a
+** transcript older Claude Code wrote with no turn_duration, then resumed in
+** a newer one, may link a run of real turn ends too; a typed prompt ends it */
+static void
+turn_end(struct xr_claude *d)
+{
+	struct xr_chapter *x;
+	uint64_t o;
+
+	for (o = d->hold ? d->hold - 1 : d->ch.total; o + 1 < d->ch.total; o++)
+		if ((x = ch_ord(&d->ch, o)))
+			x->cont = 1;
+	d->hold = 0;
+	d->durs = d->ended = 2;
+}
+
 static int ent_hit(struct xr_entries *e, const char *anchor, uint64_t ord);
 
 /* A block on the main thread: turns()'s rule. kind/title for a prompt. */
@@ -6451,9 +6476,17 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 
 	if (!d->turn || (b == B_PROMPT && !d->lead))
 	{
-		/* #615: a prompt delivered into the open turn continues it */
-		if (b == B_PROMPT && d->queued && !d->ended && (x = cur(d)))
-			x->cont = 1;
+		/* #615: a prompt delivered into the open turn continues it;
+		** #620: past an end_turn only when turn_duration marks ends */
+		if (b == B_PROMPT && d->queued && (x = cur(d)))
+		{
+			if (!d->ended || (d->ended == 1 && d->durs))
+				x->cont = 1;
+			else if (d->ended == 1 && !d->hold)
+				d->hold = d->ch.total;
+		}
+		else
+			d->hold = 0;
 		if (!(x = ch_push(&d->ch)))
 			return;
 		d->ended = 0;
@@ -8480,7 +8513,7 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 	char *s;
 
 	c = m >= 0 ? j_get(p, m, A_CONTENT) : -1;
-	if (!ag && m >= 0 && k_streq(p, m, A_STOP, "end_turn"))
+	if (!ag && m >= 0 && k_streq(p, m, A_STOP, "end_turn") && !d->ended)
 		d->ended = 1;	/* #615 */
 	if (c >= 0 && p->tok[c].kind == JSON_STRING)
 	{
@@ -9080,7 +9113,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 		char *sub = k_str(&p, 0, A_SUB, NULL);
 
 		if (sub && !strcmp(sub, "turn_duration") && !ag)
-			d->ended = 1;	/* #615 */
+			turn_end(d);
 		if (sub && !strcmp(sub, "compact_boundary"))
 			compaction(d, ag, 0);
 		else if (!sub || !listed(noise_sub, sub))

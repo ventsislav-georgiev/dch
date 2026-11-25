@@ -2936,6 +2936,41 @@ def test_mid_turn():
         check("mid-turn: --chapter of the earlier chapter is its own",
               rc == 0 and c and c["title"] == "ask A" and
               c["anchor"] == anc("ask A"), (rc, c, err))
+        # #620: a Stop hook blocks an end_turn, the turn goes on and a
+        # prompt is delivered into it. Where the transcript writes
+        # turn_duration (here first at J's end, then before L), the
+        # end_turn ends nothing; with no turn_duration it still does.
+        def stopped(dur_):
+            ls = ([ask("ask J")] + tool() + [said("first stop")] + tool() +
+                  [queued("ask K")] + tool() + [said("k done")] + dur_ +
+                  [ask("ask L")] + tool() + [said("stop again")] + tool() +
+                  [queued("ask M")] + tool() + [said("m done")] + dur_)
+            with open(tp, "w") as f:
+                f.write("".join(json.dumps(x) + "\n" for x in ls))
+            rc, o, err = xray("xr-mid", "--json")
+            ch = {c["title"]: c for c in (o or {}).get("chapters", [])}
+            return rc, ch, o
+        rc, ch, o = stopped([dur])
+        check("mid-turn: past a Stop hook's end_turn the earlier chapter "
+              "still shares the turn's response, before and after the "
+              "first turn_duration (#620)",
+              rc == 0 and list(ch) == ["ask J", "ask K", "ask L", "ask M"] and
+              ch["ask J"].get("response") == "k done" and
+              ch["ask J"].get("response_from") == ch["ask K"]["anchor"] and
+              ch["ask L"].get("response") == "m done" and
+              ch["ask L"].get("response_from") == ch["ask M"]["anchor"] and
+              "response_from" not in ch["ask K"], ch)
+        r = dch("--xray", "xr-mid", "--follow", "--json")
+        ls = ref_lines(r.stdout) or []
+        check("mid-turn: --follow's snapshot carries the same (#620)",
+              r.returncode == 0 and len(ls) == 1 and
+              ls[0] == {"schema": 1, "snapshot": o},
+              (r.returncode, r.stdout[-400:], r.stderr))
+        rc, ch, o = stopped([])
+        check("mid-turn: with no turn_duration an end_turn still ends the "
+              "turn (#620)",
+              rc == 0 and len(ch) == 4 and not any(
+                  "response_from" in c for c in ch.values()), ch)
         # #619: 400 chapters, 350 responses of 2000 bytes JSON writes 6
         # each (past 4 MiB), the newest 50 shared by a mid-turn sharer;
         # the same with the sharers as turns of their own gives no copies.
