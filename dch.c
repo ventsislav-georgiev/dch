@@ -10170,8 +10170,88 @@ pk_group(void *arg, const char *v)
 	snprintf(gs->g[gs->n++].pat, sizeof gs->g->pat, "%s", r);
 }
 
+/* Is regex p too big to compile? glibc's regcomp copies an atom per `+`
+** and per count of `{n,m}`, so stacked or nested repeats grow
+** exponentially: `a++++...` (#616) ate gigabytes. Counts the copies, the
+** atoms of a (group) together; over PK_RECOPIES is too big. */
+#define PK_RECOPIES 1024
+static int
+pk_rebig(const char *p)
+{
+	size_t sum[32], last[32], f, m;	/* per open group: copies, last atom's */
+	char *e;
+	int d = 0;
+
+	sum[0] = last[0] = 0;
+	for (; *p; p++)
+	{
+		f = 0;
+		if (*p == '(')
+		{
+			if (++d == 32)
+				return 1;
+			sum[d] = last[d] = 0;
+			continue;
+		}
+		if (*p == '+')
+			f = 2;
+		else if (*p == '{' && isdigit((unsigned char)p[1]))
+		{	/* {n}, {n,m}: max(n, m) copies; {n,}: n + 1 */
+			f = m = strtoul(p + 1, &e, 10);
+			if (*e == ',' && isdigit((unsigned char)e[1]))
+				m = strtoul(e + 1, &e, 10);
+			else if (*e == ',')
+			{
+				m = f + 1;
+				e++;
+			}
+			/* the loop's p++ steps over the '}', never another */
+			p = *e == '}' ? e : e - 1;
+			f = m > f ? m : f ? f : 1;
+			if (f > PK_RECOPIES)
+				return 1;
+		}
+		if (f)	/* the last atom repeated: f - 1 more copies */
+		{
+			sum[d] += last[d] * (f - 1);
+			last[d] *= f;
+		}
+		else if (*p == '|')
+			last[d] = 0;
+		else if (*p != '*' && *p != '?')
+		{
+			if (*p == ')' && d)
+			{
+				d--;
+				last[d] = sum[d + 1];
+			}
+			else
+			{
+				if (*p == '\\' && p[1])
+					p++;
+				else if (*p == '[')	/* a bracket is one atom */
+				{
+					p += p[1] == '^';
+					p += p[1] == ']';
+					while (p[1] && p[1] != ']')
+						p++;
+					if (!p[1])
+						return 0;	/* regcomp rejects it */
+					p++;
+				}
+				last[d] = 1;
+			}
+			sum[d] += last[d];
+		}
+		if (sum[d] > PK_RECOPIES)
+			return 1;
+	}
+	return 0;
+}
+
 /* The groups: the config's group lines, else sidekick_pattern (default
-** "-qa"; empty: none) as one named Sidekicks; each pattern compiled. */
+** "-qa"; empty: none) as one named Sidekicks; each pattern compiled,
+** one pk_rebig finds too big kept as text. */
 static void
 pk_groups(struct pkgrps *gs)
 {
@@ -10191,8 +10271,8 @@ pk_groups(struct pkgrps *gs)
 	for (k = 0; k < gs->n; k++)
 	{
 		g = &gs->g[k];
-		g->mode = regcomp(&g->re, g->pat, REG_EXTENDED | REG_ICASE |
-		                  REG_NOSUB) == 0 ? 1 : 2;
+		g->mode = !pk_rebig(g->pat) && regcomp(&g->re, g->pat,
+		          REG_EXTENDED | REG_ICASE | REG_NOSUB) == 0 ? 1 : 2;
 		/* a regex every name matches splits nothing: text, as an
 		** invalid one is */
 		if (g->mode == 1 && regexec(&g->re, "", 0, NULL, 0) == 0)
