@@ -760,6 +760,17 @@ def groups():
           "keeps them", tabs(s) == ["Sessions", "History"] and
           "gr-web" in rows(s), s.split("\n")[0])
 
+    # a regex whose repeats multiply past 1024 copies is plain text (#616):
+    # glibc's regcomp copies per {n,m} count, stacked + doubled into GBs
+    # (Web's tab shows the picker has read this config)
+    setcfg("group = Big = gr-api(.{0,99}){0,99}\ngroup = Web = gr-web\n")
+    s = wait_screen("pk13", lambda s: "Web" in tabs(s))
+    check("#616: group = Big = gr-api(.{0,99}){0,99} (9801 copies) is text: "
+          "no Big tab", tabs(s) == ["Sessions", "Web", "History"],
+          s.split("\n")[0])
+    s = to_tab("pk13", "Sessions")
+    check("#616: ... gr-api-qa stays on Sessions", "gr-api-qa" in rows(s), s)
+
     # every session in a group: the picker opens on it, not on empty Sessions
     setcfg("group = Everyone = .\n")
     picker("pk19", "160x30", "NO_COLOR=1", "TERM=xterm-256color")

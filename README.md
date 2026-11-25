@@ -135,9 +135,10 @@ in the config's order, shown only when it has sessions; and **History**.
 A group is a `group = <name> = <regex>` line in the [config
 file](#config-file), one per group: the name (1-32 bytes) before the value's
 first `=`, the regex (at most 255 bytes) after it, both trimmed. The regex is
-a POSIX extended one, case-insensitive; an invalid one, or one that matches
-every name, is matched as plain text. A live session goes to the first group
-whose regex matches its name, alias or harness title (the Claude or Codex
+a POSIX extended one, case-insensitive; an invalid one, one that matches
+every name, or one whose repeats multiply past 1024 copies of an atom
+(`a+++++++++++`, `(x{0,99}){0,99}`), is matched as plain text. A live
+session goes to the first group whose regex matches its name, alias or harness title (the Claude or Codex
 name the row shows), else to Sessions. A line with an empty name or regex, or
 one over its cap, a name of Sessions or History or one an earlier
 group has (either, any case), is skipped and the others still apply; at most 8 groups,
