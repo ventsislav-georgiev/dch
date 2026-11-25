@@ -4222,8 +4222,10 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			unsigned char o[PKT_MAX + FOCUS_CAR];
 			size_t n = focus_drop(p, o, payload, len);
 
-			/* #601: a passive push of only focus reports is not typing */
-			if (!p->passive || n || p->fcar_n)
+			/* #601: a passive push of only focus reports is not typing;
+			** a held ESC [ is none yet either (#636: a report split
+			** across two reads), it counts when it goes in */
+			if (!p->passive || n)
 				p->in_at = ++in_seq;
 			if (n)
 			{
@@ -5033,6 +5035,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 				{
 					push_input(p, p->fcar, p->fcar_n);
 					dch_vt_input_seen(p->fcar, p->fcar_n);
+					p->in_at = ++in_seq;	/* #601: typing after all */
 				}
 				p->fcar_n = 0;
 			}

@@ -145,7 +145,10 @@ def main():
                           (["x", "--all", "--", "hi"], "names and --all"),
                           (["x", "--"], "empty text"),
                           (["x", "--", " ", ""], "blank text"),
-                          (["x", "-q", "--", "hi"], "unknown flag")):
+                          (["x", "-q", "--", "hi"], "unknown flag"),
+                          (["x", "--", "!"], "a bare !"),
+                          (["x", "--", "/"], "a bare /"),
+                          (["x", "--", "!", " "], "a bare ! and a blank")):
             r = say(*args)
             check("usage error (%s): exit 1, stdout empty" % why,
                   r.returncode == 1 and r.stdout == "" and r.stderr)
@@ -441,7 +444,33 @@ def main():
               got.get(nx) == "failed — the message stayed in the composer "
               "through every Enter" and typed(nx) == [] and
               r.returncode == 1)
-        for n in (ea, nx):
+        # a "!" text left behind would run on the person's next Enter (#635)
+        bx = sess("sbnx", "claude", eat_enters=99)
+        bt = sess("sbnt", "claude", key_cap=5)
+        up(bx)
+        up(bt)
+        r = say(bx, "--json", "--", "!", "echo", "left", env=fast)
+        o = json.loads(r.stdout or "{}")
+        check("!text, every Enter eaten: not_submitted, taken back, back to "
+              "an empty prompt", r.returncode == 1 and
+              o.get("reason") == "not_submitted" and
+              "taken back" in o.get("detail", "") and
+              until(lambda: "❯" in run("--read", bx).stdout and
+                    "echoleft" not in run("--read", bx).stdout
+                    .replace(" ", "").replace("\xa0", ""), 5) and
+              not any(e["ev"] == "bash" for e in events(bx)))
+        r = say(bt, "--json", "--", "!", "echo", "left",
+                env=dict(os.environ, DCH_AGENT_LAND_MS="2000"))
+        o = json.loads(r.stdout or "{}")
+        check("!text that never lands whole: not_typed, taken back, back to "
+              "an empty prompt", r.returncode == 1 and
+              o.get("reason") == "not_typed" and
+              "taken back" in o.get("detail", "") and
+              until(lambda: "❯" in run("--read", bt).stdout and
+                    "!echo" not in run("--read", bt).stdout
+                    .replace(" ", "").replace("\xa0", ""), 5) and
+              not any(e["ev"] == "bash" for e in events(bt)))
+        for n in (ea, nx, bx, bt):
             run("-k", n)
             names.remove(n)
 
