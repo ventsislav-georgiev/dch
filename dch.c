@@ -719,9 +719,10 @@ dch_trace(const char *fmt, ...)
 			/* 0600, never through a symlink, only our own regular
 			** file with one link: the trace goes into bug reports
 			** and may sit in a shared /tmp. O_NONBLOCK: a FIFO
-			** with no reader fails (ENXIO) instead of hanging. */
+			** with no reader fails (ENXIO) instead of hanging.
+			** O_NOCTTY: a tty path must not become our ctty. */
 			int fd = open(e, O_WRONLY | O_CREAT | O_APPEND |
-			              O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
+			              O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | O_NOCTTY, 0600);
 			struct stat tst;
 
 			if (fd >= 0 && (fstat(fd, &tst) < 0 ||
