@@ -1594,7 +1594,8 @@ The corpus:
   ticket. In a full room the
   ref whose latest mention is the oldest goes. A ref that went and is
   mentioned again comes back with the mentions since (its `count` starts
-  again). The keys out of the index are counted in `dropped_keys`, exactly up
+  again). The keys out of the index are counted in `dropped_keys` (a name
+  or bold candidate that was never listed is not), exactly up
   to 32768 distinct keys and as a lower bound past that. `[]` for corpus
   `none`. Before 1.62.0 the first 2000 keys seen stayed and every later one
   was dropped.
@@ -1663,7 +1664,11 @@ compact summaries only: never from tool input or output, a notice, a harness
 prompt (a task notification) or a shell's ring, and the view's on-screen
 scan does not look for them. They count against a text block's 128 like
 any ref. `--ref ERR_LEDGER_SKEW` asks for a term; one only a code span makes
-is asked for in its backticks (``--ref '`fooBar`'``).
+is asked for in its backticks (``--ref '`fooBar`'``). `--ref term:<key>` asks
+for a term by its `refs` key, as the view does: `--ref term:Mirela` for a
+name (its case exact), `--ref 'term:shadow mode'` or `--ref 'term:Shadow
+Mode'` for a bold phrase (any case; a one-word bold is found in the case
+asked).
 Since #460 two more kinds are terms, from the same prose, listed only once
 they are said in 2 or more turns (a one-off is emphasis): a capitalised word
 of 3 to 32 ASCII letters whose second letter is lowercase (`Mirela`,
@@ -1672,14 +1677,19 @@ not at a sentence, line, list item, heading, quote or table cell start, not
 part of a path, identifier or call (`Foo_bar`, `x.Baz`, `Bar()`), not
 followed by `:` or a number (`Step 3`, `Nov 25`, `[Image #2]`), not beside
 another capitalised word (Title Case: `Claude Code`, a heading), not an `-ing` or
-`-ed` word of 5+ letters, not in a short stoplist (sentence words such as
+`-ed` word of 5+ letters the prose also says lowercase (`Solving` beside
+`solving`; `Beijing`, `Alfred` stay), not in a short stoplist (sentence words such as
 `The` and `Then`, days and months, keys such as `Enter` and `Ctrl`,
 booleans, the UI words `Preferences`, `Trash` and `Intent`), and said capitalised more often than lowercase in the session's
 prose (`Edit` beside `edit` is a common word); and a `**bold**` phrase of 1
 to 4 words and 2 to 40 printable ASCII characters ending in a letter or
-digit, that is no label, holds no version or number word (`**v2.1.0**`,
-`**3 tries**`; a backticked `v2.1` stays a term) (`**Why:**`, `**Next** — text`, a bold line of its
-own), not stopwords only (`**not**`, `**all**`), not one capitalised word
+digit, that is no label (`**Why:**`, `**Why**:`, `**Next** — text`, a bold
+that is the whole line; `- turn on **shadow mode**` is a term), holds no
+version-shaped word and does not start with a number (`**v2.1.0**`,
+`**1.5x**`, `**3 tries**`; `**V8 isolates**`, `**2FA setup**` and
+`**phase 2 rollout**` are terms, and a backticked `v2.1` stays one), not
+stopwords only (`**not**`, `**all**`), not one word the prose also says
+plain (`**exactly**` beside `exactly`), not one capitalised word
 (that is the name rule's) and holds no other ref (`**PAY-219 rollout**`
 stays the ticket). Neither is taken from harness text: a `<system-reminder>`
 block in a prompt or compact summary (tool lists, hook context). A bold phrase keys lowercase (`**Shadow Mode**` and
@@ -1693,7 +1703,12 @@ name said often but under that share stays: it is a main character and
 leads the list (`Mirela` in 11 of 100 turns, `Mac` in 9% of them).
 Such a name stays in the index, unwritten, as a one-turn name does. These two take
 their own index room (300) and their own 128 a text block, so they never
-push out another ref. A number
+push out another ref. When that room is full its oldest one-turn candidate
+goes first, so one-off capitals never push out a listed term, and such an
+unlisted candidate is not counted in `dropped_keys`. The trade-off of the
+room: a name said once and again only after more than 300 newer one-offs
+(`Mirela` in turns 1 and 202 with 400 one-off capitals between) is lost
+and never listed. A number
 keys as written: `#00012` and `#12` are two refs. A bare `repo#n` needs a repo of at least 3
 characters that starts with a letter, ends with a letter or digit and is not a
 glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
