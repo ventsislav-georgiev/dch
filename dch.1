@@ -1361,7 +1361,10 @@ true and
 the Unicode scalars left out; at most 2 MiB held, past that the oldest
 give theirs up) and
 .B response_offset
-(the byte offset of its line), and one with tool calls has
+(the byte offset of its line); an earlier chapter of a turn a prompt was
+sent into while it ran shows that turn's, with
+.B response_from
+the anchor of the chapter holding it; one with tool calls has
 .B tools
 (one line: calls per tool, most used first, six then
 .BR "+N more" ;

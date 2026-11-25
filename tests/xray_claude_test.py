@@ -2824,6 +2824,99 @@ def test_responses():
         os.unlink(tp)
 
 
+def test_mid_turn():
+    """#615: a prompt delivered into a running turn (a queued_command
+    attachment, no end_turn or turn_duration before it) opens its own
+    chapter; the earlier chapter of that turn shows the turn's response and
+    offset with response_from, the anchor of the chapter holding it."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-555555555615"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    n = [0]
+
+    def ask(t):
+        return {"type": "user", "cwd": "/home/demo/proj",
+                "message": {"content": t}}
+
+    def queued(t):
+        return {"type": "attachment", "attachment": {
+            "type": "queued_command", "commandMode": "prompt", "prompt": t}}
+
+    def tool():
+        n[0] += 1
+        i = "m%d" % n[0]
+        return [{"type": "assistant", "message": {
+                    "stop_reason": "tool_use", "content": [
+                        {"type": "tool_use", "id": i, "name": "Bash",
+                         "input": {"command": "true"}}]}},
+                {"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": i,
+                     "content": "ok"}]}}]
+
+    def said(t):
+        return {"type": "assistant", "message": {
+            "stop_reason": "end_turn", "content": [
+                {"type": "text", "text": t}]}}
+
+    dur = {"type": "system", "subtype": "turn_duration", "durationMs": 9}
+    lines = ([ask("ask A")] + tool() + [queued("ask B")] + tool() +
+             [said("answer both"), dur, ask("ask D")] + tool() +
+             [said("done D"), dur, ask("ask E")] + tool() +
+             [queued("ask F")] + tool() + [queued("ask G")] + tool() +
+             [said("all three"), ask("ask H")] + tool() +
+             [dur, queued("ask I")] + tool() + [said("i done")])
+    raw = [json.dumps(o) + "\n" for o in lines]
+    at = lambda k: len("".join(raw[:k]).encode())
+    with open(tp, "w") as f:
+        f.write("".join(raw))
+    history("xr-mid", sid, cfg)
+    try:
+        rc, o, err = xray("xr-mid", "--json")
+        ch = {c["title"]: c for c in (o or {}).get("chapters", [])}
+        anc = lambda t: ch.get(t, {}).get("anchor")
+        both = at(lines.index(said("answer both")))
+        check("mid-turn: the earlier chapter shows the turn's response, "
+              "its offset and response_from; the later one keeps its own",
+              rc == 0 and list(ch) == ["ask A", "ask B", "ask D", "ask E",
+                                       "ask F", "ask G", "ask H", "ask I"] and
+              ch["ask A"].get("response") == "answer both" and
+              ch["ask A"].get("response_offset") == both and
+              ch["ask A"].get("response_from") == anc("ask B") and
+              ch["ask A"].get("tools") == "Bash 1" and
+              ch["ask B"].get("response") == "answer both" and
+              ch["ask B"].get("response_offset") == both and
+              "response_from" not in ch["ask B"], (rc, ch, err))
+        check("mid-turn: a turn with no mid-turn prompt is unchanged",
+              ch.get("ask D", {}).get("response") == "done D" and
+              "response_from" not in ch["ask D"], ch.get("ask D"))
+        check("mid-turn: a chain of mid-turn prompts all share the response",
+              all(ch.get(t, {}).get("response") == "all three"
+                  for t in ("ask E", "ask F", "ask G")) and
+              ch["ask E"].get("response_from") == anc("ask G") and
+              ch["ask F"].get("response_from") == anc("ask G") and
+              "response_from" not in ch["ask G"], ch)
+        check("mid-turn: a queued prompt after a turn_duration is a new "
+              "turn: the earlier chapter gets nothing",
+              "response" not in ch.get("ask H", {"response": 1}) and
+              "response_from" not in ch["ask H"] and
+              "response_offset" not in ch["ask H"] and
+              ch.get("ask I", {}).get("response") == "i done", ch)
+        r = dch("--xray", "xr-mid", "--follow", "--json")
+        ls = ref_lines(r.stdout) or []
+        check("mid-turn: --follow's snapshot carries the same",
+              r.returncode == 0 and len(ls) == 1 and
+              ls[0] == {"schema": 1, "snapshot": o},
+              (r.returncode, r.stdout[-400:], r.stderr))
+        rc, c, err, _ = chapter("xr-mid", anc("ask A") or "none")
+        check("mid-turn: --chapter of the earlier chapter is its own",
+              rc == 0 and c and c["title"] == "ask A" and
+              c["anchor"] == anc("ask A"), (rc, c, err))
+    finally:
+        os.unlink(tp)
+
+
 def test_follow_history():
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
@@ -4736,6 +4829,7 @@ def main():
         test_peer()
         test_handback_search()
         test_responses()
+        test_mid_turn()
         test_scope()
         test_search_scope()
         test_search_ends_order()
