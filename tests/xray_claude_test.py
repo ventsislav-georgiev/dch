@@ -5045,11 +5045,20 @@ def test_terms_628():
         emph = ("important", "required", "optional", "already", "critical",
                 "instead")
         cwd = "/home/demo/projt"
+        # #643: also a word only in a sh or console fence is code (jitter,
+        # backoff); a quoted one-word argument, a --key=value's value, a
+        # CSS !word and a path's directory are not (already, mandatory,
+        # important, optional, critical)
+        emph += ("mandatory",)
+        fenced = ("jitter", "backoff")
         say = {2: " ".join("This is **%s** for the parser." % w
-                           for w in emph + ("hyperfine",)),
+                           for w in emph + ("hyperfine",) + fenced),
                4: " ".join("Keep it **%s**, as we said." % w
-                           for w in emph + ("hyperfine",)),
-               3: "So %s it is, and hyperfine too." % ", ".join(emph)}
+                           for w in emph + ("hyperfine",) + fenced),
+               3: "So %s it is, and hyperfine too." % ", ".join(emph + fenced),
+               6: "Run it:\n\n```sh\njitter -n 3\n```\n\nor\n\n"
+                  "```console\n$ backoff --max 5\nretrying\n```\n\nand "
+                  "`color: red !important`."}
         with open(tc, "w") as f:
             for t in range(1, 7):
                 f.write(json.dumps({"type": "user", "cwd": cwd, "message": {
@@ -5061,6 +5070,13 @@ def test_terms_628():
                               "name": "Bash", "input": {"command":
                               "hyperfine --required 'make -j8' && git commit -m "
                               "\"important fix\""}})
+                    c.append({"type": "tool_use", "id": "toolu_643a",
+                              "name": "Bash", "input": {"command":
+                              "git commit -m \"already\" && tool "
+                              "--mode=mandatory x && cat src/critical/x.c"}})
+                    c.append({"type": "tool_use", "id": "toolu_643b",
+                              "name": "Read", "input": {"file_path":
+                              "/home/demo/projt/docs/optional/a.md"}})
                 f.write(json.dumps({"type": "assistant", "message": {
                     "content": c}}) + "\n")
         history("xr-t641", "11111111-2222-4333-8444-5555555555d3", cfg, cwd)
@@ -5073,6 +5089,15 @@ def test_terms_628():
               not any("term:" + w in refs for w in emph), (terms, err))
         check("terms 641: a bold said plain and run in a Bash command is a "
               "term (**hyperfine**)", "term:hyperfine" in refs, terms)
+        check("terms 643: a bold said plain and shown in a sh or console "
+              "fence is a term (**jitter**, **backoff**)",
+              "term:jitter" in refs and "term:backoff" in refs, terms)
+        check("terms 643: a quoted one-word Bash argument, a --key=value's "
+              "value, a CSS !important and a path's directory make no code "
+              "(already, mandatory, important, critical, optional)",
+              not any("term:" + w in refs for w in
+                      ("already", "mandatory", "important", "critical",
+                       "optional")), terms)
     finally:
         os.unlink(ta)
         os.unlink(tb)

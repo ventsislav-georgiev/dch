@@ -1357,7 +1357,9 @@ code_term(const char *s, size_t a, size_t b, const char *cwd,
 
 /* #641: each run of 3-32 lowercase letters of code s[0, n) that no letter,
 ** digit or _ touches, nor a - before it (a flag's, --required), to fn, as
-** code (`ripgrep`, /usr/bin/ripgrep) */
+** code (`ripgrep`, /usr/bin/ripgrep). #643: nor a run after ! or = (CSS's
+** !important, --mode=mandatory) or before a / (a path's directory: only its
+** last component is code) */
 static void
 code_words(const char *s, size_t n,
            void (*fn)(void *ctx, const char *w, size_t l, int code), void *ctx)
@@ -1370,8 +1372,9 @@ code_words(const char *s, size_t n,
 			;
 		if (j - i >= 3 && j - i <= 32 &&
 		    (!i || (!A_ALNUM((unsigned char)s[i - 1]) &&
-		            s[i - 1] != '_' && s[i - 1] != '-')) &&
-		    (j == n || (!A_ALNUM((unsigned char)s[j]) && s[j] != '_')))
+		            !strchr("_-!=", s[i - 1]))) &&
+		    (j == n || (!A_ALNUM((unsigned char)s[j]) &&
+		                !strchr("_/", s[j]))))
 			fn(ctx, s + i, j - i, 1);
 		i = j > i ? j : i + 1;
 	}
@@ -1476,6 +1479,45 @@ inline_run(struct gscan *g, size_t a, size_t b, int md)
 		scan_run(g, seg, b, R_PROSE | g->terms, 0, 0);
 }
 
+static void sh_code(const char *c, size_t cl,
+                    void (*fn)(void *ctx, const char *w, size_t l, int code),
+                    void *ctx);
+
+/* #643: with wfn, a fence's body [a, b) of info string sh, bash, shell or
+** zsh is a script's words as code; console: its "$ " lines only (the rest
+** is output). Another fence's words stay unread. */
+static void
+fence_words(struct gscan *g, size_t ls, size_t a, size_t b)
+{
+	const char *s = g->s, *t;
+	size_t i = ls, e, le;
+	int con;
+
+	while (i < a && (s[i] == ' ' || s[i] == '`' || s[i] == '~'))
+		i++;
+	for (e = i; e < a && A_ALNUM((unsigned char)s[e]); e++)
+		;
+	t = s + i;
+	con = e - i == 7 && !memcmp(t, "console", 7);
+	if (!con && !(e - i == 2 && !memcmp(t, "sh", 2)) &&
+	    !(e - i == 3 && !memcmp(t, "zsh", 3)) &&
+	    !(e - i == 4 && !memcmp(t, "bash", 4)) &&
+	    !(e - i == 5 && !memcmp(t, "shell", 5)))
+		return;
+	if (!con)
+	{
+		sh_code(s + a, b - a, g->wfn, g->wctx);
+		return;
+	}
+	for (i = a; i < b; i = le + 1)
+	{
+		for (le = i; le < b && s[le] != '\n'; le++)
+			;
+		if (le - i > 2 && s[i] == '$' && s[i + 1] == ' ')
+			sh_code(s + i + 2, le - i - 2, g->wfn, g->wctx);
+	}
+}
+
 /* Plain or Markdown prose: fences (an unclosed one makes the rest code),
 ** then inline spans (v2.1 2.4, v1 4.3's small scanner). */
 static void
@@ -1500,6 +1542,8 @@ scan_prose(struct gscan *g, size_t n, int md)
 
 				k = ke < n ? ke + 1 : n;
 			}
+			if (g->wfn)
+				fence_words(g, ls, le < n ? le + 1 : n, k);
 			if (k >= n)
 				return;
 			le = line_end(s, n, k);
@@ -7377,21 +7421,21 @@ refs_card(struct xr_claude *d, const struct json_parser *p, int in)
 	free(r.cov);
 }
 
-/* #641: a command's words as code to d's index: words of no blank only (a
-** quoted sentence, a commit message, is prose), no here-doc body */
+/* #641: a command's words as code to fn: unquoted words only (#643: a
+** quoted word, a commit message even of one word, is prose), no here-doc
+** body */
 static void
-ix_cmd(struct xr_claude *d, const char *c, size_t cl)
+sh_code(const char *c, size_t cl,
+        void (*fn)(void *ctx, const char *w, size_t l, int code), void *ctx)
 {
-	struct xr_index *x = ix_of(&d->rk);
 	struct sw w;
 	size_t k;
 
-	if (!x)
-		return;
 	shell_words(c, cl, &w, 0);
 	for (k = 0; w.b && k < w.n && k <= SW_MAX; k++)
-		if (!w.op[k] && !strpbrk(SWD(&w, k), " \t\n"))
-			code_words(SWD(&w, k), strlen(SWD(&w, k)), ix_word, x);
+		if (!w.op[k] && !memchr(c + w.rs[k], '"', w.re[k] - w.rs[k]) &&
+		    !memchr(c + w.rs[k], '\'', w.re[k] - w.rs[k]))
+			code_words(SWD(&w, k), strlen(SWD(&w, k)), fn, ctx);
 	free(w.b);
 }
 
@@ -7422,7 +7466,8 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 		rm_claude(d, &r, a);
 		rm_clip(&r, s, l, XR_TEXT_CAP, XR_CODE);
 		free(r.cov);
-		ix_cmd(d, s, l);
+		if (ix_of(&d->rk))
+			sh_code(s, l, ix_word, ix_of(&d->rk));
 		if (id && (c = rc_push(d, id, RC_BASH)))
 		{
 			c->cl = u8_cut(s, l > XR_BASH_MAX ? XR_BASH_MAX : l);
