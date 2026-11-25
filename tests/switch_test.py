@@ -482,17 +482,9 @@ def main():
             # across that window: any one landing in it made it refused)
             stop = threading.Event()
 
-            # non-blocking: nobody drains the passive client's output, so a
-            # slow (ASan) client blocks on it, stops reading, and a blocking
-            # write here never returned to see stop (nightly 10 min hangs)
-            os.set_blocking(pfd, False)
-
             def focus_burst():
                 while not stop.is_set():
-                    try:
-                        os.write(pfd, b"\033[I")
-                    except BlockingIOError:
-                        time.sleep(0.01)
+                    os.write(pfd, b"\033[I")
 
             burst = threading.Thread(target=focus_burst)
             burst.start()
@@ -501,7 +493,6 @@ def main():
             landed = drain(sfd, 10.0, b"BBB_BRAVO")
             stop.set()
             burst.join()
-            os.set_blocking(pfd, True)
             if "BBB_BRAVO" not in landed or "nesting disabled" in landed:
                 return fail("#601: a passive client's focus report refused "
                             "the active terminal's pick", landed)
