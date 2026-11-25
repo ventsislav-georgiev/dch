@@ -997,7 +997,8 @@ r_bold(const char *s, size_t n, size_t i, uint32_t prev, const char *cwd,
 		"cannot", "before", "after", "now", "new", "one", "same", "also",
 		"yes", "very", "more", "most", "less", "why", "what", "how", "when",
 		"where", "which", "who", "done", "fixed", "here", "there", "first",
-		"last", "next", "still", "just", "nothing", NULL};
+		"last", "next", "still", "just", "nothing", "exactly", "without",
+		"really", NULL};
 	size_t a = i + 2, d, k, w, q;
 	int words = 1, al = 0, allstop = 1;
 	struct xr_span o;
@@ -5182,18 +5183,17 @@ ix_shown(const struct xr_index *x, const struct xr_ent *e)
 		return 1;
 	if (e->name)
 		o = low_at(x, e->h);
-	else if (!strchr(w, ' ') && l <= 40)
-		o = low_at(x, low_hash(w, l));
 	if (e->name &&
 	    ((e->nturn > XR_SPREAD_MIN &&
 	      e->nturn * 100 > x->maxturn * XR_SPREAD_PCT) ||
 	     (b && !strcasecmp(b + 1, w))))
 		return 0;
-	/* #628: a one-word bold the prose also says plain is emphasis
-	** (**exactly**); an -ing or -ed name said lowercase at all is a verb a
-	** heading capitalises (Solving), else a name (Beijing, Alfred) */
-	if (o && (!e->name || (l >= 5 && (!strcmp(w + l - 3, "ing") ||
-	                                  !strcmp(w + l - 2, "ed")))))
+	/* #628: an -ing or -ed name said lowercase at all is a verb a heading
+	** capitalises (Solving), else a name (Beijing, Alfred). #638: a bold is
+	** never demoted by plain sayings (**ripgrep**, ripgrep is faster): r_bold's
+	** stoplist takes emphasis (**exactly**) said plain or not */
+	if (o && l >= 5 && (!strcmp(w + l - 3, "ing") ||
+	                    !strcmp(w + l - 2, "ed")))
 		return 0;
 	return e->nturn >= 2 && (!o || o->n < e->nunit);
 }

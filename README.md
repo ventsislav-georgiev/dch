@@ -1688,8 +1688,9 @@ that is the whole line; `- turn on **shadow mode**` is a term), holds no
 version-shaped word and does not start with a number (`**v2.1.0**`,
 `**1.5x**`, `**3 tries**`; `**V8 isolates**`, `**2FA setup**` and
 `**phase 2 rollout**` are terms, and a backticked `v2.1` stays one), not
-stopwords only (`**not**`, `**all**`), not one word the prose also says
-plain (`**exactly**` beside `exactly`), not one capitalised word
+stopwords only (emphasis such as `**not**`, `**all**`, `**exactly**`,
+`**without**`; a real word stays a term even beside its plain saying:
+`**ripgrep**` beside `ripgrep`), not one capitalised word
 (that is the name rule's) and holds no other ref (`**PAY-219 rollout**`
 stays the ticket). Neither is taken from harness text: a `<system-reminder>`
 block in a prompt or compact summary (tool lists, hook context). A bold phrase keys lowercase (`**Shadow Mode**` and
