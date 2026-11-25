@@ -1121,8 +1121,9 @@ struct gscan
 	size_t count;
 	int stop;
 	int terms;	/* RW or 0: prose's terms (#458) */
-	/* #460: set, no rule runs: each lowercase prose word to wfn */
-	void (*wfn)(void *ctx, const char *w, size_t l);
+	/* #460: set, no rule runs: each lowercase prose word to wfn (#641:
+	** code 1 for a code span's) */
+	void (*wfn)(void *ctx, const char *w, size_t l, int code);
 	void *wctx;
 	size_t n, hs, he;	/* s's length; g_harness's block [hs, he) */
 };
@@ -1187,7 +1188,7 @@ scan_run(struct gscan *g, size_t a, size_t b, int rules, int code, int whole)
 		    !(prev == '*' && j < b && s[j] == '*') &&
 		    !(j + 1 < b && strchr("-./@", s[j]) &&
 		      A_ALNUM((unsigned char)s[j + 1])))
-			g->wfn(g->wctx, s + i, j - i);
+			g->wfn(g->wctx, s + i, j - i, 0);
 		if (j > i)
 		{
 			prev = (unsigned char)s[j - 1];
@@ -1354,8 +1355,29 @@ code_term(const char *s, size_t a, size_t b, const char *cwd,
 	return 1;
 }
 
+/* #641: each run of 3-32 lowercase letters of code s[0, n) that no letter,
+** digit or _ touches to fn, as code (`ripgrep`, /usr/bin/ripgrep) */
+static void
+code_words(const char *s, size_t n,
+           void (*fn)(void *ctx, const char *w, size_t l, int code), void *ctx)
+{
+	size_t i = 0, j;
+
+	while (i < n)
+	{
+		for (j = i; j < n && A_LO((unsigned char)s[j]); j++)
+			;
+		if (j - i >= 3 && j - i <= 32 &&
+		    (!i || (!A_ALNUM((unsigned char)s[i - 1]) && s[i - 1] != '_')) &&
+		    (j == n || (!A_ALNUM((unsigned char)s[j]) && s[j] != '_')))
+			fn(ctx, s + i, j - i, 1);
+		i = j > i ? j : i + 1;
+	}
+}
+
 /* A code span's content: nothing when it holds a newline (2.4), else a term
-** (with terms) or the whole-span rules on its trimmed text. */
+** (with terms) or the whole-span rules on its trimmed text; to wfn its
+** words. */
 static void
 code_span(struct gscan *g, size_t a, size_t b)
 {
@@ -1363,8 +1385,13 @@ code_span(struct gscan *g, size_t a, size_t b)
 	const char *t;
 	struct xr_span sp;
 
-	if (g->wfn || memchr(g->s + a, '\n', n))
+	if (memchr(g->s + a, '\n', n))
 		return;
+	if (g->wfn)
+	{
+		code_words(g->s + a, n, g->wfn, g->wctx);
+		return;
+	}
 	t = trim(g->s + a, &n);
 	ts = (size_t)(t - g->s);
 	if (n && g->terms && code_term(g->s, ts, ts + n, g->cwd, &sp))
@@ -1500,7 +1527,8 @@ grammar(const char *s, size_t n, int mode, int rules, const char *cwd,
 /* #460: each lowercase word of the prose s[0, n) (md: Markdown) to fn */
 static void
 prose_words(const char *s, size_t n, int md,
-            void (*fn)(void *ctx, const char *w, size_t l), void *ctx)
+            void (*fn)(void *ctx, const char *w, size_t l, int code),
+            void *ctx)
 {
 	struct gscan g = { s, NULL, NULL, NULL, 0, 0, 0, fn, ctx, n, 0, 0 };
 
@@ -2698,7 +2726,7 @@ rm_count(void *ctx, const struct xr_span *sp)
 ** many oldest to skip. The pass costs one more scan of a bounded block. */
 static struct xr_index *ix_of(const struct xr_sink *k);
 static void ix_hit(void *ctx, const struct xr_hit *h);
-static void ix_word(void *ctx, const char *w, size_t l);
+static void ix_word(void *ctx, const char *w, size_t l, int code);
 
 static void
 rm_scan(struct remit *r, const char *text, size_t n, int mode)
@@ -4766,6 +4794,7 @@ struct low
 {
 	uint64_t h;
 	uint64_t n;		/* times said */
+	int code;		/* #641: also in a code span, command or path */
 };
 
 struct xr_index
@@ -4983,7 +5012,7 @@ low_hash(const char *w, size_t l)
 }
 
 static void
-ix_word(void *ctx, const char *w, size_t l)
+ix_word(void *ctx, const char *w, size_t l, int code)
 {
 	struct xr_index *x = ctx;
 	uint64_t h = low_hash(w, l);
@@ -4992,7 +5021,8 @@ ix_word(void *ctx, const char *w, size_t l)
 
 	if ((o = low_at(x, h)))
 	{
-		o->n++;
+		o->n += !code;
+		o->code |= code;
 		return;
 	}
 	if (x->nlow >= XR_DROPSET / 2)
@@ -5016,7 +5046,8 @@ ix_word(void *ctx, const char *w, size_t l)
 	for (i = h % x->lowcap; x->low[i].h; i = (i + 1) % x->lowcap)
 		;
 	x->low[i].h = h;
-	x->low[i].n = 1;
+	x->low[i].n = !code;
+	x->low[i].code = code;
 	x->nlow++;
 }
 
@@ -5183,17 +5214,21 @@ ix_shown(const struct xr_index *x, const struct xr_ent *e)
 		return 1;
 	if (e->name)
 		o = low_at(x, e->h);
+	else if (!strchr(w, ' ') && l <= 40 &&
+	         (o = low_at(x, low_hash(w, l))) && o->code)
+		o = NULL;	/* #641: code too (`ripgrep`): a tool's name */
 	if (e->name &&
 	    ((e->nturn > XR_SPREAD_MIN &&
 	      e->nturn * 100 > x->maxturn * XR_SPREAD_PCT) ||
 	     (b && !strcasecmp(b + 1, w))))
 		return 0;
-	/* #628: an -ing or -ed name said lowercase at all is a verb a heading
-	** capitalises (Solving), else a name (Beijing, Alfred). #638: a bold is
-	** never demoted by plain sayings (**ripgrep**, ripgrep is faster): r_bold's
-	** stoplist takes emphasis (**exactly**) said plain or not */
-	if (o && l >= 5 && (!strcmp(w + l - 3, "ing") ||
-	                    !strcmp(w + l - 2, "ed")))
+	/* #628: a one-word bold the prose also says plain is emphasis
+	** (**important**), unless (#641) the session also has it as code (a
+	** code span's, command's or path's word). An -ing or -ed name said
+	** lowercase at all is a verb a heading capitalises (Solving), else a
+	** name (Beijing, Alfred) */
+	if (o && o->n && (!e->name || (l >= 5 && (!strcmp(w + l - 3, "ing") ||
+	                                          !strcmp(w + l - 2, "ed")))))
 		return 0;
 	return e->nturn >= 2 && (!o || o->n < e->nunit);
 }
@@ -7340,6 +7375,24 @@ refs_card(struct xr_claude *d, const struct json_parser *p, int in)
 	free(r.cov);
 }
 
+/* #641: a command's words as code to d's index: words of no blank only (a
+** quoted sentence, a commit message, is prose), no here-doc body */
+static void
+ix_cmd(struct xr_claude *d, const char *c, size_t cl)
+{
+	struct xr_index *x = ix_of(&d->rk);
+	struct sw w;
+	size_t k;
+
+	if (!x)
+		return;
+	shell_words(c, cl, &w, 0);
+	for (k = 0; w.b && k < w.n && k <= SW_MAX; k++)
+		if (!w.op[k] && !strpbrk(SWD(&w, k), " \t\n"))
+			code_words(SWD(&w, k), strlen(SWD(&w, k)), ix_word, x);
+	free(w.b);
+}
+
 /* A tool_use or server_tool_use (3.6's tiers): Bash shows its command, an
 ** edit/read its path, a search its rows, anything else a generic card. */
 static void
@@ -7367,6 +7420,7 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 		rm_claude(d, &r, a);
 		rm_clip(&r, s, l, XR_TEXT_CAP, XR_CODE);
 		free(r.cov);
+		ix_cmd(d, s, l);
 		if (id && (c = rc_push(d, id, RC_BASH)))
 		{
 			c->cl = u8_cut(s, l > XR_BASH_MAX ? XR_BASH_MAX : l);
@@ -7404,6 +7458,8 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 		if ((nl = path_norm(s, l, r.cwd, norm, sizeof norm)) &&
 		    span_key(&sp, XR_FILE, norm, nl, 0) && !rel_file(&sp))
 			rm_hit(&r, &sp, NULL, NULL, NULL);
+		if (ix_of(&d->rk))
+			code_words(s, l, ix_word, ix_of(&d->rk));
 		if (id)
 			(void)rc_push(d, id, RC_OTHER);
 	}

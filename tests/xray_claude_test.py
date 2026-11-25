@@ -4980,7 +4980,11 @@ def test_terms_628():
     ta = put("xr-t628", "11111111-2222-4333-8444-5555555555d1",
              "/home/demo/projt", 6, lambda t:
              both if t in (2, 4) else
-             "it is exactly right, and solving it." if t == 3 else "fine")
+             # #641: ripgrep also in a code span, so its plain saying in
+             # both no longer hides it (a word said plain and never code is
+             # emphasis again)
+             "it is exactly right, and solving it. Run `ripgrep`." if t == 3
+             else "fine")
     w = lambda i, p: p + "".join(chr(97 + (i // 26 ** k) % 26)
                                  for k in range(3))
     tb = put("xr-t628b", "11111111-2222-4333-8444-5555555555d2",
@@ -4992,6 +4996,8 @@ def test_terms_628():
               "we asked Wibble." if t in (150, 160) else
               "the wibble ran." if t in (170, 180) else "") +
              " " + " ".join(w(20 * t + k, "zz") for k in range(20)))
+    tc = os.path.join(cfg, "projects", "-home-demo-projt",
+                      "11111111-2222-4333-8444-5555555555d3.jsonl")
     try:
         rc, o, err = xray("xr-t628", "--json")
         refs = {r["key"]: r for r in (o or {}).get("refs", [])}
@@ -5000,8 +5006,9 @@ def test_terms_628():
               "never said plain is (VZ3)", rc == 0 and
               "term:exactly" not in refs and "term:idempotent" in refs,
               (terms, err))
-        check("terms 638: a one-word bold also said plain is still a term "
-              "(**ripgrep** beside ripgrep)", "term:ripgrep" in refs, terms)
+        check("terms 641: a one-word bold said plain and in a code span is "
+              "a term (**ripgrep**, ripgrep, `ripgrep`)",
+              "term:ripgrep" in refs, terms)
         check("terms 638: emphasis never said plain is no term (**without**, "
               "**exactly**)", "term:without" not in refs and
               "term:exactly" not in refs, terms)
@@ -5031,9 +5038,45 @@ def test_terms_628():
         check("terms 628: past 4000 lowercase words a name said lowercase "
               "as often is still no term (VZ7)", rc == 0 and
               "term:Wibble" not in refs, err)
+        # #641 (QA 1.161.0 LOW-WF2): everyday emphasis bolded in 2 turns
+        # and said plain once is no term; a word also in a Bash command
+        # (unquoted) is, and a quoted sentence's word makes no code
+        emph = ("important", "required", "optional", "already", "critical",
+                "instead")
+        cwd = "/home/demo/projt"
+        say = {2: " ".join("This is **%s** for the parser." % w
+                           for w in emph + ("hyperfine",)),
+               4: " ".join("Keep it **%s**, as we said." % w
+                           for w in emph + ("hyperfine",)),
+               3: "So %s it is, and hyperfine too." % ", ".join(emph)}
+        with open(tc, "w") as f:
+            for t in range(1, 7):
+                f.write(json.dumps({"type": "user", "cwd": cwd, "message": {
+                    "content": "turn %d" % t}}) + "\n")
+                c = [{"type": "text", "text": "ok %d, " % t +
+                      say.get(t, "fine")}]
+                if t == 5:
+                    c.append({"type": "tool_use", "id": "toolu_641",
+                              "name": "Bash", "input": {"command":
+                              "hyperfine 'make -j8' && git commit -m "
+                              "\"important fix\""}})
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": c}}) + "\n")
+        history("xr-t641", "11111111-2222-4333-8444-5555555555d3", cfg, cwd)
+        rc, o, err = xray("xr-t641", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        terms = sorted(k for k in refs if k.startswith("term:"))
+        check("terms 641: emphasis bolded in 2 turns and said plain once is "
+              "no term (important, required, optional, already, critical, "
+              "instead)", rc == 0 and
+              not any("term:" + w in refs for w in emph), (terms, err))
+        check("terms 641: a bold said plain and run in a Bash command is a "
+              "term (**hyperfine**)", "term:hyperfine" in refs, terms)
     finally:
         os.unlink(ta)
         os.unlink(tb)
+        if os.path.exists(tc):
+            os.unlink(tc)
 
 
 def test_recall():
