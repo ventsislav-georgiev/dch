@@ -294,6 +294,23 @@ def main():
               lambda: ev(rc, out, err, secs, held=held, typed=typed(b),
                          screen=screen(b)[-200:]))
 
+        # --- --say of a !command (typed: bash mode). The take-back leaves
+        # no bash mode: Ctrl-U kills the query, a Backspace the bare "!"
+        pr = start("--say", b, "--json", "--", "!", "echo", "hi")
+        held = until(lambda: any(l.startswith("!") and "echo hi" in l
+                                 for l in screen(b).splitlines()))
+        pr.send_signal(signal.SIGTERM)
+        rc, out, err, secs = finish_p(pr)
+        lines = [json.loads(l) for l in out.splitlines() if l.strip()]
+        check("--say of a !command SIGTERMed: `withdrawn`, bash mode left, "
+              "nothing run (%.1f s)" % secs,
+              held and rc == 1 and len(lines) == 1 and
+              lines[0].get("reason") == "withdrawn" and
+              until(lambda: empty(b), 3) and typed(b) == [] and
+              not any(e["ev"] == "bash" for e in events(b)),
+              lambda: ev(rc, out, err, secs, held=held, typed=typed(b),
+                         screen=screen(b)[-200:]))
+
         # --- --run: one line wrapped in a 40-column pane (#128). Its first
         # row, "word00 … word04", squeezes to 30 bytes: under the 32
         w = sess("vnarrow", "claude", size="40x30", eat_enters=99)

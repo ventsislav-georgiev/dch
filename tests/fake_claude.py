@@ -9,7 +9,10 @@ message, queues messages typed while busy, exits on /exit printing the
 word-wraps at the pane's width and keeps a paste's line breaks; Ctrl-U kills
 to the start of the visual row, or the newline before it, as Claude Code
 2.1.318's deleteToLineStart does; Backspace deletes one character. Ctrl-D
-twice within 2s on an empty composer exits as /exit does.
+twice within 2s on an empty composer exits as /exit does. A "!" typed (not
+pasted) into an empty composer enters bash mode, its prefix "!" in place of
+"❯"; Backspace on an empty bash query leaves it; Enter there runs nothing,
+logs bash and leaves it.
 
 State lives in $FAKE_CLAUDE_DIR:
   version           installed version (read at start and by --version)
@@ -48,7 +51,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     (read at start: its MCP servers connect that long after
                     start, the record says idle at once unless
                     MCP_CONNECTION_NONBLOCKING=0 makes it wait; each turn logs mcp, true once they
-                    have)
+                    have), bash (the composer is in bash mode, as a
+                    human left it)
   <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE*,
                     DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
                     cfg, MCP_CONNECTION_NONBLOCKING's value as nonblocking), line (typed), turn (a message taken),
@@ -56,6 +60,7 @@ State lives in $FAKE_CLAUDE_DIR:
                     answered it), enter_eaten, enter_folded, key (typed while a screen
                     knob is up), paste (a paste's start, before lag_ms),
                     exit_prompt (the work it lists), exit_answer (the key),
+                    bash (a bash mode submit, its query),
                     exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
@@ -155,6 +160,7 @@ transcript, queue, draft = [], [], ""
 collapsed, prompt_up, pstart, eaten = False, False, 0, 0
 kill_dialog = False   # dialog_on_kill: a Ctrl-U raised a prompt
 in_paste = False
+bash = False         # bash mode: a typed "!" on an empty composer
 ctrl_d = 0.0         # the first Ctrl-D of an exit's two
 turn_end = 0.0
 dismissed = None     # the screen knob a digit answered
@@ -243,14 +249,17 @@ def paint(c):
                  " ❯ 1. Yes", "   2. No", "", " Esc to cancel"]
     else:
         d = draft or c.get("draft", "")
-        if d:
+        g = "!" if bash or c.get("bash") else "❯"
+        if g == "!" and not d:
+            comp = "!\u00a0"     # Claude Code shows no placeholder there
+        elif d:
             # like Ink: a long paste collapses, a long draft word-wraps
             # at the pane's width under a two-space indent, newlines kept
             if collapsed:
                 d = "[Pasted text #1]"
             st = row_starts(d) + [len(d) + 1]
             w = [d[a:b].rstrip("\n ") for a, b in zip(st, st[1:])]
-            comp = "\r\n".join(["❯ " + w[0]] +
+            comp = "\r\n".join([g + "\u00a0" + w[0]] +
                                  ["  " + l for l in w[1:]])
             # Ink moves the cursor over blanks instead of writing spaces,
             # so ghostty 1.4's dump has CSI C where the spaces were
@@ -435,6 +444,9 @@ while True:
             elif ch == b"\r" and draft and eaten < c.get("eat_enters", 0):
                 eaten += 1
                 log(ev="enter_eaten", text=draft)
+            elif ch == b"\r" and bash:
+                log(ev="bash", text=draft)      # runs nothing
+                draft, bash = "", False
             elif ch == b"\r":
                 collapsed = False
                 # the draft is bytes as latin-1: submit what was typed, UTF-8
@@ -444,6 +456,8 @@ while True:
                 if time.time() - ctrl_d < 2:
                     submit("/exit", c)
                 ctrl_d = time.time()
+            elif ch == b"\x7f" and bash and not draft:
+                bash = False
             elif ch == b"\x7f":
                 draft = draft[:-1]
             elif ch == b"\x15" and (kill_dialog or c.get("dialog_on_kill")):
@@ -453,6 +467,8 @@ while True:
                 draft, collapsed = "", False    # one row: the placeholder
             elif ch == b"\x15":
                 draft = kill_row(draft) + c.get("type_on_kill", "")
+            elif ch == b"!" and not draft and not bash and not in_paste:
+                bash = True
             elif ch >= b" ":
                 draft += ch.decode("latin-1")
     now = time.time()
@@ -475,7 +491,7 @@ while True:
             set_status(want)
     view = (status, len(transcript), len(queue), draft, json.dumps(c),
             prompt_up, collapsed, dismissed, kill_dialog, len(exit_up),
-            torn(c))
+            torn(c), bash)
     if view != last:
         if cont_paints:
             cont_paints -= 1

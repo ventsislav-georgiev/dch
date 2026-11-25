@@ -43,7 +43,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			(void)gate_screen(txt, dim, 1);
 			/* --say's delivery check squeezes the composer row */
 			if ((comp = composer_find(txt, &end)) &&
-			    (sq = squeeze(comp + 3, (size_t)(end - comp - 3),
+			    (sq = squeeze(composer_text(comp),
+			                  (size_t)(end - composer_text(comp)),
 			                  (size_t)-1)))
 				free(sq);
 		}

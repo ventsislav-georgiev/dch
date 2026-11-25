@@ -4070,11 +4070,12 @@ is_rule(const char *l)
 	return strncmp(l, "\xe2\x94\x80", 3) == 0;
 }
 
-/* The composer: the bottom-most row that starts with "❯" (then a space, an
-** NBSP or the end of the row) right under a "─" rule and running down to
-** the next rule, its wrapped rows indented. Returns that row, *end = the
-** closing rule; NULL when there is none. A permission prompt's "❯ 1. Yes"
-** is indented and has no closing rule, so it never reads as one. */
+/* The composer: the bottom-most row that starts with "❯", or "!" in bash
+** mode (then a space, an NBSP or the end of the row) right under a "─" rule
+** and running down to the next rule, its wrapped rows indented. Returns
+** that row, *end = the closing rule; NULL when there is none. A permission
+** prompt's "❯ 1. Yes" is indented and has no closing rule, so it never
+** reads as one. */
 static char *
 composer_find(char *txt, char **end)
 {
@@ -4082,13 +4083,15 @@ composer_find(char *txt, char **end)
 
 	for (ls = txt; ls; prev = ls, ls = nx)
 	{
-		char *l;
+		char *l, *g;
 
 		nx = strchr(ls, '\n');
 		nx = nx ? nx + 1 : NULL;
-		if (!prev || !is_rule(prev) || strncmp(ls, "\xe2\x9d\xaf", 3) ||
-		    !(ls[3] == ' ' || ls[3] == '\n' || ls[3] == '\0' ||
-		      strncmp(ls + 3, "\xc2\xa0", 2) == 0))
+		g = ls + (*ls == '!' ? 1 : 3);
+		if (!prev || !is_rule(prev) ||
+		    (*ls != '!' && strncmp(ls, "\xe2\x9d\xaf", 3)) ||
+		    !(*g == ' ' || *g == '\n' || *g == '\0' ||
+		      strncmp(g, "\xc2\xa0", 2) == 0))
 			continue;
 		for (l = nx; l && !is_rule(l) && (*l == ' ' || *l == '\n'); )
 		{
@@ -7793,7 +7796,11 @@ gate_screen(char *txt, const char *dim, int queue_ok)
 
 	if ((res = screen_modal(txt)) == CG_QUEUED && queue_ok)
 		res = CG_UNKNOWN;
-	if (res == CG_UNKNOWN && (comp = composer_find(txt, &end)))
+	/* bash mode (a "!" prefix) is a human's: a /command would run there */
+	if (res == CG_UNKNOWN && (comp = composer_find(txt, &end)) &&
+	    *comp == '!')
+		res = CG_DRAFT;
+	else if (res == CG_UNKNOWN && comp)
 	{
 		for (c = comp + 3; ; )
 			if (*c == ' ')
@@ -7847,6 +7854,14 @@ squeeze(const char *s, size_t n, size_t cap)
 	return o;
 }
 
+/* Where the composer row's text starts: past the "❯", at a bash mode's "!"
+** (the text typed there starts with it). */
+static char *
+composer_text(char *comp)
+{
+	return comp + (*comp == '!' ? 0 : 3);
+}
+
 /* Did `text` land in the composer? Evidence counts only inside the composer
 ** rows — the transcript above routinely shows "[Pasted text #1 +3 lines]"
 ** and earlier messages: our text, or the placeholder Claude Code collapses
@@ -7867,7 +7882,8 @@ composer_holds_at(const char *path, const char *text)
 		;
 	else if (!(comp = composer_find(txt, &end)))
 		ok = -1;
-	else if ((have = squeeze(comp + 3, (size_t)(end - comp - 3), (size_t)-1)) &&
+	else if ((have = squeeze(composer_text(comp),
+	                         (size_t)(end - composer_text(comp)), (size_t)-1)) &&
 	         (want = squeeze(text, strlen(text), 32)))
 		ok = *want && (strncmp(have, want, strlen(want)) == 0 ||
 		               strncmp(have, "[Pastedtext#", 12) == 0);
@@ -7886,7 +7902,8 @@ composer_holds(const char *path, const char *text)
 
 /* What is left of `text` in the composer, for ty_take_back: 0 nothing
 ** (only the placeholder), 1 a start of it (the rows Ctrl-U has not reached
-** yet, or the "[Pasted text #" chip), -1 anything else: a dialog, no
+** yet, or the "[Pasted text #" chip), 2 only bash mode's bare "!" (a "!"
+** text typed as keys opened it), -1 anything else: a dialog, no
 ** composer, an unreadable screen, or text that is not a start of ours.
 ** Not composer_holds(): its 32-byte prefix misses a first row shorter
 ** than that (#128), which is all that is left before the last Ctrl-U. */
@@ -7901,11 +7918,12 @@ composer_left(const char *path, const char *text)
 	if ((g = gate_screen(txt, dim, 1)) == CG_EMPTY)
 		res = 0;
 	else if (g == CG_DRAFT && (comp = composer_find(txt, &end)) &&
-	         (have = squeeze(comp + 3, (size_t)(end - comp - 3), (size_t)-1)) &&
+	         (have = squeeze(composer_text(comp),
+	                         (size_t)(end - composer_text(comp)), (size_t)-1)) &&
 	         (want = squeeze(text, strlen(text), (size_t)-1)) &&
 	         (strncmp(want, have, strlen(have)) == 0 ||
 	          strncmp(have, "[Pastedtext#", 12) == 0))
-		res = 1;
+		res = *comp == '!' && strcmp(have, "!") == 0 ? 2 : 1;
 	free(have);
 	free(want);
 	free(txt);
@@ -7921,7 +7939,9 @@ composer_left(const char *path, const char *text)
 ** is a start of the text, until the composer is empty: -5. -6 when it
 ** holds anything else (a dialog over it: the keys went to it and the text
 ** sits under it), or text is still there at the deadline (land ms) or
-** after strlen + 2 of them (each kills at least a byte).
+** after strlen + 2 of them (each kills at least a byte). Bash mode's bare
+** "!" left gets a Backspace instead (2.1.322: it leaves bash mode on an
+** empty query), so no bash mode stays behind.
 ** shortcut: an Enter Claude takes only after the signal still sends the
 ** text, read here as taken back; upgrade by watching for the turn. */
 static int
@@ -7929,16 +7949,16 @@ ty_take_back(const char *path, const char *text, long land)
 {
 	long long end = wall_ms() + land;
 	size_t n, max = strlen(text) + 2;
-	int s;
+	int s, left;
 
 	for (n = 0; ; n++)
 	{
-		if ((s = composer_left(path, text)) <= 0)
-			return s == 0 ? -5 : -6;
+		if ((left = composer_left(path, text)) <= 0)
+			return left == 0 ? -5 : -6;
 		if (n == max || wall_ms() >= end ||
 		    (s = control_connect_path(path)) < 0)
 			return -6;
-		send_ctl(s, MSG_PUSH, "\x15", 1);
+		send_ctl(s, MSG_PUSH, left == 2 ? "\x7f" : "\x15", 1);
 		close(s);
 		poll(NULL, 0, AG_POLL_MS / 5);
 	}
@@ -9240,13 +9260,13 @@ say_print(const char *name, int c, int json)
 	fflush(stdout);
 }
 
-/* A '/' text with no control byte is typed as keys (the slash menu opens
-** only on typed keys); a \r, ESC or Ctrl-C in it would be a live key, so
-** any control byte keeps the paste. */
+/* A '/' or '!' text with no control byte is typed as keys (the slash menu
+** and bash mode open only on typed keys); a \r, ESC or Ctrl-C in it would
+** be a live key, so any control byte keeps the paste. */
 static int
 say_raw(const char *t)
 {
-	if (t[0] != '/')
+	if (t[0] != '/' && t[0] != '!')
 		return 0;
 	for (; *t; t++)
 		if ((unsigned char)*t < 0x20 || *t == 0x7f ||
@@ -9321,8 +9341,8 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	if (!names && say_raw(text))
 	{
 		/* a /clear to every agent is one typo away */
-		fprintf(stderr, "dch: --say --all: a /command is not sent to "
-		        "every session; name them\n");
+		fprintf(stderr, "dch: --say --all: a /command or !command is not "
+		        "sent to every session; name them\n");
 		free(text);
 		return 1;
 	}
