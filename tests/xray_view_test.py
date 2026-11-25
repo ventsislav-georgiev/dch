@@ -944,6 +944,18 @@ def test_terms_live():
               text.count("is raised when the ledger") == 2 and rep and
               first and rep.start() < first.start(), text)
         a.key(b"q", 0.3, full=True)
+        # MED-VZ2 (#627): the Mirela row (a name term, no grammar reads it
+        # bare) opens its card too: the next row after ERR_LEDGER_SKEW
+        mark = len(a.out)
+        a.key(b"j" if not lite else b"jjjj", 0.5, full=True)
+        a.key(b"\r", 0.5, full=True)
+        ok = a.wait(b"Mentions: this session ", start=mark)
+        settle(a)
+        text = screen(a, mark)
+        check("card #627: Enter on Mirela opens its card, both mentions",
+              ok and "Mirela" in text and "Fixed #412 for Mirela" in text and
+              "from Mirela" in text, text)
+        a.key(b"q", 0.3, full=True)
         a.key(b"q", 0.3, full=True)
     finally:
         a.close()

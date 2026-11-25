@@ -934,6 +934,27 @@ def test_refs():
           "(%d in %.2fs)" % (len(prog), wall),
           all(l.get("schema") == 1 for l in ls) and
           (prog or wall < 0.5), r.stdout[:600])
+    # MED-VZ2 (#627): a name and a bold phrase are asked for by their term
+    # key (the view's --ref); the card has both mentions (the first as its
+    # definition), exit 0
+    put([{"type": "user", "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [{"type": "text",
+          "text": "Older: we asked Mirela today. Turn on **shadow mode** now."}]}},
+         {"type": "user", "message": {"content": "next"}},
+         {"type": "assistant", "message": {"content": [{"type": "text",
+          "text": "Then we met Mirela again. Keep **Shadow Mode** on."}]}}])
+    for what, ref in (("name", "term:Mirela"), ("bold", "term:shadow mode")):
+        r = dch("--xray", "xr-refs", "--ref", ref, "--scope", "session",
+                "--full", "--json")
+        ls = ref_lines(r.stdout) or [{}]
+        txt = [json.dumps(l["mention"]) for l in ls if "mention" in l]
+        txt += [json.dumps(l["definition"]) for l in ls if "definition" in l]
+        check("term ref: %s %r opens its card: both mentions, exit 0" %
+              (what, ref), r.returncode == 0 and len(txt) >= 2 and
+              any("Older" in t or "Turn on" in t or "asked" in t for t in txt) and
+              any("again" in t or "Keep" in t for t in txt) and
+              ls[-1].get("done") is True,
+              (r.returncode, len(txt), [t[-90:] for t in txt], r.stderr))
     os.unlink(tp)
 
 

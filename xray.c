@@ -1572,6 +1572,18 @@ xr_ref_parse(const char *text, const char *cwd, struct xr_span *out)
 	struct one_span o;
 
 	o.n = 0;
+	/* a term's own key, as the X-ray view sends it (name, bold phrase: no
+	** grammar rule reads them bare): term:<text>, text without outer blanks */
+	if (n > 5 && n - 5 < XR_KEY_MAX && !strncmp(t, "term:", 5) &&
+	    t[5] != ' ' && t[5] != '\t')
+	{
+		memset(out, 0, sizeof *out);
+		out->e = n;
+		out->shape = XR_TERM;
+		out->rule = 'W';
+		memcpy(out->key, t, n);
+		return 1;
+	}
 	/* the trimmed text as its own string: boundaries end where it does */
 	{
 		char *c = malloc(n + 1);
