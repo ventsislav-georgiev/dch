@@ -3736,8 +3736,8 @@ def test_since():
           o and o["partial"] is True and o["more"] is True and
           titles(o) == ["big %d" % k for k in range(44, 24, -1)],
           (r.returncode, r.stdout[:300], r.stderr))
-    # 60 MB: the third round is the whole file (~0.4 s), the 200 ms cap
-    # falls inside it, after the 1 + 4 MB rounds; the cap stops it mid-read
+    # 60 MB: the third round is the whole file (~0.4 s), a cap of half a
+    # whole read falls inside it, after the 1 + 4 MB rounds; the cap stops it mid-read
     # (mtick) and the round before it stands (mstand): partial, not a
     # window half read (partial false) or a round read whole (partial false)
     since_put("xs-h", "51600000-2222-4333-8444-555555555508", [])
@@ -3754,14 +3754,23 @@ def test_since():
                                 "message": {"content": [{
                                     "type": "text", "text": "see #%d %s" % (
                                         2000 + k, pad)}]}}) + "\n")
+    # #617: the cap is half a measured uncapped read, not a fixed 200 ms:
+    # under ASan the 1 + 4 MB rounds alone pass 200 ms, so the cap fell in
+    # the 4 MB round and only the 1 MB round's ~10 turns stood
+    t = time.monotonic()
+    dch("--xray", "xs-h", "--since", "0", "--json",
+        env=dict(ENV, DCH_XRAY_CAPS="0:400000000"))
+    cap = max(1, int((time.monotonic() - t) * 500))
     r = dch("--xray", "xs-h", "--since", "0", "--json",
-            env=dict(ENV, DCH_XRAY_CAPS="0:400000000:200"))
+            env=dict(ENV, DCH_XRAY_CAPS="0:400000000:%d" % cap))
     o = json.loads(r.stdout) if r.returncode == 0 else None
-    check("since: a 200 ms time cap falls inside a 60 MB file's last round: "
-          "partial, the round before it stands (mtick, mstand)",
+    check("since: a time cap of half a whole read falls inside a 60 MB "
+          "file's last round: partial, the round before it stands (mtick, "
+          "mstand)",
           o and o["partial"] is True and o["more"] is True and
           titles(o) == ["tall %d" % k for k in range(599, 579, -1)],
-          (r.returncode, r.stdout[:300], r.stderr))
+          (cap, r.returncode, r.stdout[:300], o and o["partial"],
+           o and o["more"], titles(o) if o else None, r.stderr))
     os.unlink(os.path.join(HOME, ".claude", "projects",
                            key("/home/demo/proj"),
                            "51600000-2222-4333-8444-555555555508.jsonl"))
