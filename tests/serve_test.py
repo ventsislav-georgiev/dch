@@ -173,7 +173,7 @@ def main():
             check("xray serve: --xray <n> %s runs, as local (exit %d)"
                   % (" ".join(x[:12] for x in a), loc.returncode),
                   got == ("ran", loc.returncode, None, loc.stdout,
-                          loc.stderr))
+                          loc.stderr), (got, loc.stdout, loc.stderr))
         for nm in names:
             a = ["--clear", "--json"] if nm[0] == "m" else ["--json"]
             got = ctl1(port, ["--xray", nm] + a)
@@ -644,6 +644,11 @@ def main():
               "WARNING: DCH_SERVE_TEST_LOOPBACK=1" in text(log))
         for n, (key, fxs) in enumerate(sorted(groups.items())):
             cfg = json.loads(key)
+            # ASan (DCH_TEST_NO_BUDGET): 37's --spawn alone can take ~1 s, past
+            # the 800 ms ctl timeout; 38 still ends by the (longer) timeout
+            if os.environ.get("DCH_TEST_NO_BUDGET") and \
+                    "DCH_CTL_TIMEOUT_MS" in cfg["env"]:
+                cfg["env"]["DCH_CTL_TIMEOUT_MS"] = "4000"
             gp, gport, _ = serve(*cfg["args"], e=dict(benv, **cfg["env"]))
             check("golden %s pass against dch serve %s %s"
                   % (", ".join(fx["id"][:2] for fx in fxs),
