@@ -1103,6 +1103,11 @@ t_grammar(void)
 		  "**PAY-219 rollout** and **DCH_TAG** and **one two three four "
 		  "five** and **Prosper** now", XR_MD | XR_TERMS,
 		  "ticket:PAY-219 term:DCH_TAG term:Prosper" },
+		/* #624: no version or number bold, no generic UI word name;
+		** a backtick version stays phase a's */
+		{ "cut **v2.176.0-beta.1** and **3 tries** and **retry budget**, "
+		  "open Preferences, the Trash, an Intent, `v2.1` and Mirela",
+		  XR_MD | XR_TERMS, "term:retry budget term:v2.1 term:Mirela" },
 		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_MD, "" },
 		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_CODE, "" },
 		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_PLAIN, "" },

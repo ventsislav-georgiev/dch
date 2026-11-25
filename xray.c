@@ -934,7 +934,9 @@ r_name(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
 		"Shift", "Cmd", "Command", "Alt", "Option", "Space", "Backspace",
 		"Delete", "Home", "End", "Left", "Right", "Down",
 		"True", "False", "None", "Null", "Next", "New", "MiB", "KiB",
-		"GiB", NULL};
+		"GiB",
+		/* #624: generic UI and heading words */
+		"Preferences", "Trash", "Intent", NULL};
 	size_t j = i + 1, k;
 
 	/* the second letter lowercase: no acronym, nor its plural (PRs) */
@@ -1033,6 +1035,10 @@ r_bold(const char *s, size_t n, size_t i, uint32_t prev, const char *cwd,
 			;
 		if (!word_in(stop, s, k, w, 1))
 			allstop = 0;
+		/* #624: a version or number (**v2.176.0-beta.1**, **3 tries**) */
+		if (A_DIG((unsigned char)s[k]) || ((s[k] | 0x20) == 'v' &&
+		    k + 1 < w && A_DIG((unsigned char)s[k + 1])))
+			return 0;
 	}
 	if (allstop || (words == 1 && A_UP((unsigned char)s[a])))
 		return 0;
@@ -2554,6 +2560,7 @@ rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
 	h.who = r->who;
 	h.tool = r->tool;
 	h.read = r->read;
+	h.cwd = r->cwd;
 	if (title)
 	{
 		h.title = title;
@@ -4715,6 +4722,7 @@ struct xr_ent
 	int room;		/* its room: its shape, or XR_CAND (#460) */
 	int solid;		/* a hit by a rule other than N or B (#460) */
 	uint64_t nturn, lastturn;	/* turns it is mentioned in (#460) */
+	int name;		/* a hit by N, a capitalised name (#624) */
 };
 
 /* #460: the room of name and bold terms first seen as such */
@@ -4747,6 +4755,9 @@ struct xr_index
 	size_t nlow;
 	uint64_t dropped;
 	uint64_t ord;
+	uint64_t maxturn;	/* #624: the newest turn a hit came from */
+	uint64_t homeoff;	/* home's line offset */
+	char home[XR_PATH_MAX + 1];	/* #624: the earliest cwd, "" none */
 	int per_row;
 };
 
@@ -5016,6 +5027,14 @@ ix_hit(void *ctx, const struct xr_hit *h)
 		return;
 	nb = h->sp->rule == 'N' || h->sp->rule == 'B';
 	e->solid |= !nb;
+	e->name |= h->sp->rule == 'N';
+	/* the session's own directory: the cwd of its earliest line read */
+	if (h->cwd && (!x->home[0] || h->off < x->homeoff) &&
+	    strlen(h->cwd) < sizeof x->home)
+	{
+		memcpy(x->home, h->cwd, strlen(h->cwd) + 1);
+		x->homeoff = h->off;
+	}
 	if (h->off >= e->last)
 	{
 		e->last = h->off, e->lastat = h->at, e->lastord = x->ord++;
@@ -5059,6 +5078,8 @@ ix_hit(void *ctx, const struct xr_hit *h)
 	{
 		e->nturn++;
 		e->lastturn = turn;
+		if (turn > x->maxturn)
+			x->maxturn = turn;
 	}
 	if (!e->nrow || e->lastrow != h->row)
 	{
@@ -5078,11 +5099,23 @@ xr_index_sink(struct xr_index *x, struct xr_sink *k)
 ** term: kept (a second turn lists it), never written. Nor is a capitalised
 ** word said lowercase in prose as often as capitalised (Edit, edit): a
 ** common word, not a name. */
+/* #624: nor a name in more than 3% of the turns (and over 10 of them:
+** a short session keeps its names), nor the session's own directory's:
+** said everywhere, it marks nothing (Prosper, Mac, GitHub). Names only;
+** bold phrases are rare enough. */
+#define XR_SPREAD_PCT 3
+#define XR_SPREAD_MIN 10
 static int
 ix_shown(const struct xr_index *x, const struct xr_ent *e)
 {
 	const struct low *o = e->solid ? NULL : low_at(x, e->h);
+	const char *b = strrchr(x->home, '/');
 
+	if (!e->solid && e->name &&
+	    ((e->nturn > XR_SPREAD_MIN &&
+	      e->nturn * 100 > x->maxturn * XR_SPREAD_PCT) ||
+	     (b && !strcasecmp(b + 1, e->key + 5))))
+		return 0;
 	return e->solid || (e->nturn >= 2 && (!o || o->n < e->nunit));
 }
 

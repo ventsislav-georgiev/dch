@@ -1671,15 +1671,22 @@ followed by `:` or a number (`Step 3`, `Nov 25`, `[Image #2]`), not beside
 another capitalised word (Title Case: `Claude Code`, a heading), not an `-ing` or
 `-ed` word of 5+ letters, not in a short stoplist (sentence words such as
 `The` and `Then`, days and months, keys such as `Enter` and `Ctrl`,
-booleans), and said capitalised more often than lowercase in the session's
+booleans, the UI words `Preferences`, `Trash` and `Intent`), and said capitalised more often than lowercase in the session's
 prose (`Edit` beside `edit` is a common word); and a `**bold**` phrase of 1
 to 4 words and 2 to 40 printable ASCII characters ending in a letter or
-digit, that is no label (`**Why:**`, `**Next** — text`, a bold line of its
+digit, that is no label, holds no version or number word (`**v2.1.0**`,
+`**3 tries**`; a backticked `v2.1` stays a term) (`**Why:**`, `**Next** — text`, a bold line of its
 own), not stopwords only (`**not**`, `**all**`), not one capitalised word
 (that is the name rule's) and holds no other ref (`**PAY-219 rollout**`
 stays the ticket). Neither is taken from harness text: a `<system-reminder>`
 block in a prompt or compact summary (tool lists, hook context). A bold phrase keys lowercase (`**Shadow Mode**` and
-`**shadow mode**` are one term) and shows its newest spelling. These two take
+`**shadow mode**` are one term) and shows its newest spelling. Since #624 a
+name is not listed when it is the session's own directory's (the basename of
+the cwd of the earliest line read, any case: `Prosper` in `~/prosper`; an exact
+match, so `ProsperApp` stays), nor when it is said in more than 3% of the
+session's turns and in more than 10 of them (said everywhere, it marks
+nothing: `Mac`, `GitHub`); a session of 10 turns or fewer keeps every name.
+Such a name stays in the index, unwritten, as a one-turn name does. These two take
 their own index room (300) and their own 128 a text block, so they never
 push out another ref. A number
 keys as written: `#00012` and `#12` are two refs. A bare `repo#n` needs a repo of at least 3

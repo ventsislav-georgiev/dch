@@ -4774,6 +4774,59 @@ def test_terms_b():
         os.unlink(tp)
 
 
+def test_terms_spread():
+    """#624: no name term for the session's own directory (its cwd's
+    basename, any case), nor for a name in more than 3% of the turns and
+    over 10 of them; a name under the share stays, and a short session
+    keeps a name said in every turn."""
+    cfg = os.path.join(HOME, ".claude")
+
+    def put(name, sid, cwd, turns, say):
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+        with open(tp, "w") as f:
+            for t in range(1, turns + 1):
+                f.write(json.dumps({"type": "user", "cwd": cwd,
+                                    "message": {"content": "turn %d" % t}}) +
+                        "\n")
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text": "ok %d, " % t +
+                                 " ".join(say(t))}]}}) + "\n")
+        history(name, sid, cfg, cwd)
+        return tp
+
+    # 400 turns: Wombat (the cwd's name) in 2, Quokka in 13 (3.25%),
+    # Numbat in 11 (2.75%)
+    tp = put("xr-spread", "11111111-2222-4333-8444-5555555555ca",
+             "/home/demo/wombat", 400, lambda t:
+             (["we asked Wombat."] if t in (2, 3) else []) +
+             (["we asked Quokka."] if t % 30 == 1 else []) +
+             (["we asked Numbat."] if t % 30 == 2 and t < 330 else []))
+    tq = put("xr-spread8", "11111111-2222-4333-8444-5555555555cb",
+             "/home/demo/projs", 8, lambda t: ["we asked Bilby."])
+    try:
+        rc, o, err = xray("xr-spread", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        terms = sorted(k for k in refs if k.startswith("term:"))
+        check("terms spread: the session's own directory name, said "
+              "mid-sentence in two turns, is no term",
+              rc == 0 and "term:Wombat" not in refs, (terms, err))
+        check("terms spread: a name in more than 3% of the turns is no term",
+              rc == 0 and "term:Quokka" not in refs, terms)
+        check("terms spread: a name in under 3% of the turns stays",
+              refs.get("term:Numbat", {}).get("count") == 11, terms)
+        rc, o, err = xray("xr-spread8", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        check("terms spread: a short session keeps a name said in all of "
+              "its 8 turns", rc == 0 and
+              refs.get("term:Bilby", {}).get("count") == 8,
+              (sorted(refs), err))
+    finally:
+        os.unlink(tp)
+        os.unlink(tq)
+
+
 def test_recall():
     """#479: a ref's other same-project sessions carry their own turns:
     s1 (the project's other session) says #412 in its turns 2 and 3, s2 (another
@@ -4901,6 +4954,7 @@ def main():
         test_many_mentions()
         test_terms()
         test_terms_b()
+        test_terms_spread()
         test_recall()
     finally:
         shutil.rmtree(T, ignore_errors=True)
