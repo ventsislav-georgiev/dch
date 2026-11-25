@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.162.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.163.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1689,8 +1689,11 @@ version-shaped word and does not start with a number (`**v2.1.0**`,
 `**1.5x**`, `**3 tries**`; `**V8 isolates**`, `**2FA setup**` and
 `**phase 2 rollout**` are terms, and a backticked `v2.1` stays one), not
 stopwords only (emphasis such as `**not**`, `**all**`, `**exactly**`,
-`**without**`; a real word stays a term even beside its plain saying:
-`**ripgrep**` beside `ripgrep`), not one capitalised word
+`**without**`), not one word the prose also says plain (`**important**`
+beside `important`) unless the session also has that word as code, in a
+code span, a Bash command's unquoted words or a tool's file path, as tool
+names are (`**ripgrep**` beside `ripgrep` and `` `ripgrep` `` stays a
+term), not one capitalised word
 (that is the name rule's) and holds no other ref (`**PAY-219 rollout**`
 stays the ticket). Neither is taken from harness text: a `<system-reminder>`
 block in a prompt or compact summary (tool lists, hook context). A bold phrase keys lowercase (`**Shadow Mode**` and
