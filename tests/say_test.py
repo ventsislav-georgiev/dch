@@ -566,20 +566,26 @@ def main():
         run("-k", t3)
         names.remove(t3)
 
+        # WG1/WG2: a client call that traces (--spawn), bounded
+        def spawn_traced(base, path):
+            n = "%s%s" % (base, TAG)
+            names.append(n)
+            try:
+                subprocess.run([DCH, "--spawn", n, "--size", "100x30",
+                                "sleep", "60"], capture_output=True,
+                               timeout=10, env=dict(os.environ, DCH_DEBUG=path))
+                ok = True
+            except subprocess.TimeoutExpired:
+                ok = False  # run() kills the child it spawned on timeout
+            run("-k", n, timeout=20)
+            names.remove(n)
+            return ok
+
         # WG1: FIFO at DCH_DEBUG must not hang the client
         ff = os.path.join(tmp, "fifo.log")
         os.mkfifo(ff)
-        p = subprocess.Popen([DCH, "--ls"], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL,
-                             env=dict(os.environ, DCH_DEBUG=ff))
-        try:
-            p.wait(timeout=10)
-            hung = False
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.wait()
-            hung = True
-        check("trace: a FIFO at DCH_DEBUG does not hang dch", not hung)
+        check("trace: a FIFO at DCH_DEBUG does not hang dch",
+              spawn_traced("tf", ff))
 
         # WG2: a hard link at DCH_DEBUG is refused, target untouched
         hl = os.path.join(tmp, "hard.log")
@@ -588,7 +594,7 @@ def main():
             f.write("keep")
         os.chmod(hv, 0o644)
         os.link(hv, hl)
-        run("--ls", env=dict(os.environ, DCH_DEBUG=hl))
+        spawn_traced("th", hl)
         st = os.stat(hv)
         check("trace: a hard link at DCH_DEBUG is not appended/chmodded",
               st.st_size == 4 and stat.S_IMODE(st.st_mode) == 0o644)
