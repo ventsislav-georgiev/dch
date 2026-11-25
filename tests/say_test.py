@@ -553,6 +553,52 @@ def main():
         check("trace: a symlink at DCH_DEBUG is not followed",
               os.path.getsize(tgt) == 0)
 
+        # WG3: marker typed key by key (--send, one char per call)
+        tr = os.path.join(tmp, "trace-keys.log")
+        t3 = sess("tk", "claude", env=dict(DCH_DEBUG=tr))
+        up(t3)
+        for c in "zqx7kk":
+            run("--send", t3, c, env=dict(os.environ, DCH_DEBUG=tr))
+        time.sleep(0.5)
+        body = open(tr, errors="replace").read() if os.path.exists(tr) else ""
+        check("trace: key-by-key typing leaves no marker (and wrote a trace)",
+              "push fd=" in body and "zqx7kk" not in body and "last=" not in body)
+        run("-k", t3)
+        names.remove(t3)
+
+        # WG1/WG2: a client call that traces (--spawn), bounded
+        def spawn_traced(base, path):
+            n = "%s%s" % (base, TAG)
+            names.append(n)
+            try:
+                subprocess.run([DCH, "--spawn", n, "--size", "100x30",
+                                "sleep", "60"], capture_output=True,
+                               timeout=10, env=dict(os.environ, DCH_DEBUG=path))
+                ok = True
+            except subprocess.TimeoutExpired:
+                ok = False  # run() kills the child it spawned on timeout
+            run("-k", n, timeout=20)
+            names.remove(n)
+            return ok
+
+        # WG1: FIFO at DCH_DEBUG must not hang the client
+        ff = os.path.join(tmp, "fifo.log")
+        os.mkfifo(ff)
+        check("trace: a FIFO at DCH_DEBUG does not hang dch",
+              spawn_traced("tf", ff))
+
+        # WG2: a hard link at DCH_DEBUG is refused, target untouched
+        hl = os.path.join(tmp, "hard.log")
+        hv = os.path.join(tmp, "hard.target")
+        with open(hv, "w") as f:
+            f.write("keep")
+        os.chmod(hv, 0o644)
+        os.link(hv, hl)
+        spawn_traced("th", hl)
+        st = os.stat(hv)
+        check("trace: a hard link at DCH_DEBUG is not appended/chmodded",
+              st.st_size == 4 and stat.S_IMODE(st.st_mode) == 0o644)
+
         # --- concurrency: about the slowest session, not the sum ---------
         # Each slow one: two eaten Enters, 3 s apart = 6 s+; five in a row
         # would take 30 s+.

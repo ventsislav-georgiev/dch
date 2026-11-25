@@ -4769,7 +4769,7 @@ may take to end Claude, and the relaunch to show its composer (default
 .B DCH_DEBUG
 Trace to a file (path, or 1 for
 .IR /tmp/dch.<uid>.trace ).
-The file is created mode 0600 and is not opened through a symlink;
+The file is created mode 0600; a symlink, FIFO, hard-linked or foreign file is refused;
 it holds no typed input.
 .SH SEE ALSO
 .BR dtach (1),
