@@ -470,7 +470,17 @@ def main():
                     "!echo" not in run("--read", bt).stdout
                     .replace(" ", "").replace("\xa0", ""), 5) and
               not any(e["ev"] == "bash" for e in events(bt)))
-        for n in (ea, nx, bx, bt):
+        bk = sess("sbk", "claude", key_cap=5, type_on_kill="zzz")
+        up(bk)
+        r = say(bk, "--json", "--", "!", "echo", "left",
+                env=dict(os.environ, DCH_AGENT_LAND_MS="2000"))
+        o = json.loads(r.stdout or "{}")
+        check("!text, take-back stops early: not_typed, told it may be left "
+              "in bash mode", r.returncode == 1 and
+              o.get("reason") == "not_typed" and
+              "bash mode, so clear it before pressing Enter" in
+              o.get("detail", "") and "taken back" not in o.get("detail", ""))
+        for n in (ea, nx, bx, bt, bk):
             run("-k", n)
             names.remove(n)
 

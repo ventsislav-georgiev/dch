@@ -842,6 +842,7 @@ focus_filter(unsigned char *b, int len, int *in, int flush)
 			fpend_n = len - i;
 			memcpy(fpend, b + i, fpend_n);
 			fpend_t = now;
+			dch_trace("client focus hold n=%d", fpend_n);	/* #634 */
 			break;
 		}
 		b[o++] = b[i];
@@ -1563,6 +1564,8 @@ attach_main(int noerror)
 				}
 			}
 
+			dch_trace("client push len=%zd in=%d flush=%d dq=%d "
+			          "held=%d", len, in, flush, dq_due, fpend_n);
 			if (drop_till && (len = drop_o(pkt.u.buf, len)) == 0)
 				goto keys_done;
 			pkt.len = len;

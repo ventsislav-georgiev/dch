@@ -4912,6 +4912,10 @@ def test_terms_spread():
              (["we asked Bandicoot."] if t % 6 == 2 and t < 90 else []))
     tq = put("xr-spread8", "11111111-2222-4333-8444-5555555555cb",
              "/home/demo/projs", 8, lambda t: ["we asked Bilby."])
+    # #637: 12 of the first 20 of 100 turns (12%), then 80 with no ref
+    tr = put("xr-spread12", "11111111-2222-4333-8444-5555555555cc",
+             "/home/demo/projr", 100, lambda t:
+             ["we asked Dingo."] if t <= 20 and t % 5 < 3 else [])
     try:
         rc, o, err = xray("xr-spread", "--json")
         refs = {r["key"]: r for r in (o or {}).get("refs", [])}
@@ -4931,9 +4935,16 @@ def test_terms_spread():
               "its 8 turns", rc == 0 and
               refs.get("term:Bilby", {}).get("count") == 8,
               (sorted(refs), err))
+        rc, o, err = xray("xr-spread12", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        check("terms spread: a name in 12 of 100 turns stays when the "
+              "later 80 carry no ref (#637)", rc == 0 and
+              refs.get("term:Dingo", {}).get("count") == 12,
+              (sorted(refs), err))
     finally:
         os.unlink(tp)
         os.unlink(tq)
+        os.unlink(tr)
 
 
 def test_terms_628():
@@ -4964,7 +4975,8 @@ def test_terms_628():
             "Alfred in Beijing with Sterling. Then we kept Solving it.\n"
             "- turn on **shadow mode**\n**rollout plan**\nWe tried **V8 "
             "isolates**, the **2FA setup**, a **3D view** and the **phase 2 "
-            "rollout**, not **v2.1.0** or **3 tries** now.")
+            "rollout**, not **v2.1.0** or **3 tries** now. Search with "
+            "**ripgrep**, as ripgrep is faster, **without** a cache.")
     ta = put("xr-t628", "11111111-2222-4333-8444-5555555555d1",
              "/home/demo/projt", 6, lambda t:
              both if t in (2, 4) else
@@ -4988,6 +5000,11 @@ def test_terms_628():
               "never said plain is (VZ3)", rc == 0 and
               "term:exactly" not in refs and "term:idempotent" in refs,
               (terms, err))
+        check("terms 638: a one-word bold also said plain is still a term "
+              "(**ripgrep** beside ripgrep)", "term:ripgrep" in refs, terms)
+        check("terms 638: emphasis never said plain is no term (**without**, "
+              "**exactly**)", "term:without" not in refs and
+              "term:exactly" not in refs, terms)
         check("terms 628: a bold ending a list item is a term, a bold line "
               "of its own is not (VZ5)", "term:shadow mode" in refs and
               "term:rollout plan" not in refs, terms)

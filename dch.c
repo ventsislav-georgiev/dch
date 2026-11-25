@@ -9217,11 +9217,12 @@ enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
        SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
        SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_INTERRUPTED, SAY_WITHDRAWN,
        SAY_DRAFT_LEFT, SAY_NOT_FG, SAY_NOT_SUBMITTED_BACK, SAY_NOT_TYPED_BACK,
-       SAY_N };
+       SAY_NOT_SUBMITTED_ARMED, SAY_NOT_TYPED_ARMED, SAY_N };
 static const char *const say_code[] = {
 	"", "not_claude", "self", "prompt", "draft", "no_screen", "no_session",
 	"not_submitted", "not_typed", "old_master", "interrupted", "withdrawn",
 	"draft_left", "not_foreground", "not_submitted", "not_typed",
+	"not_submitted", "not_typed",
 };
 static const char *const say_why[] = {
 	"", "no claude runs in the session", "the session you are in",
@@ -9243,6 +9244,10 @@ static const char *const say_why[] = {
 	"out, bash mode left, nothing run",
 	"the message did not land in the composer whole: taken back out, bash "
 	"mode left, nothing run",
+	"the message stayed in the composer through every Enter: it may be "
+	"left there in bash mode, so clear it before pressing Enter",
+	"the message did not land in the composer whole: it may be left there "
+	"in bash mode, so clear it before pressing Enter",
 };
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
@@ -9309,10 +9314,20 @@ say_type(const char *path, const char *text, int paste)
 	t = ag_type(path, text, paste);
 	/* a "!" text left behind is a loaded shell command: the person's next
 	** Enter runs it with no permission prompt, so take it back (#635).
-	** ty_take_back stops at anything that is not a start of our text. */
-	if ((t == -2 || t == -3) && !paste && *text == '!' &&
-	    ty_take_back(path, text, env_ms("DCH_AGENT_LAND_MS", 30000)) == -5)
-		return t == -3 ? SAY_NOT_SUBMITTED_BACK : SAY_NOT_TYPED_BACK;
+	** ty_take_back stops at anything that is not a start of our text: -6
+	** then says the text may still be armed in bash mode (#639).
+	** shortcut: -3 is a read that still showed the text; an Enter taken
+	** right after leaves the composer empty, so "nothing run" can be wrong
+	** (the signal path's limit); upgrade by watching for the turn. */
+	if ((t == -2 || t == -3) && !paste && *text == '!')
+	{
+		int b = ty_take_back(path, text, env_ms("DCH_AGENT_LAND_MS", 30000));
+
+		if (b == -5)
+			return t == -3 ? SAY_NOT_SUBMITTED_BACK : SAY_NOT_TYPED_BACK;
+		if (b == -6)
+			return t == -3 ? SAY_NOT_SUBMITTED_ARMED : SAY_NOT_TYPED_ARMED;
+	}
 	switch (t)
 	{
 	case 0:
