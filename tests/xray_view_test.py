@@ -791,8 +791,8 @@ def test_said():
 
 TSIDS = ["11111111-2222-4333-8444-5555555555e%d" % k for k in (8, 9)]
 TDEF = "`ERR_LEDGER_SKEW` is raised when the ledger clock drifts past 5 s."
-TREPLY = ("Fixed #412. `ERR_LEDGER_SKEW` no longer fires; covered by "
-          "`test_retry_timeout`, close PAY-219. "
+TREPLY = ("Fixed #412 for Mirela. `ERR_LEDGER_SKEW` no longer fires; "
+          "covered by `test_retry_timeout`, close PAY-219. "
           "Run `--json` or `-v` with `RETRY_MAX=3`, edit `README.md` and "
           "`main.c`, call `parseN()` or `foo(x)`; see `LedgerClock`.")
 
@@ -800,11 +800,13 @@ TREPLY = ("Fixed #412. `ERR_LEDGER_SKEW` no longer fires; covered by "
 def term_lines():
     """Turn 1 defines ERR_LEDGER_SKEW, then says #377 and OLD_FLAG_NAME
     (the rest's group); a tool's output alone says
-    TOOL_ONLY_TERM; turn 2's answer: #412, the two terms, PAY-219."""
+    TOOL_ONLY_TERM; turn 2's answer: #412, the two terms, PAY-219. Both
+    turns name Mirela mid-sentence (#460: a name term)."""
     return (turn("why does the ledger skew", "2026-11-10T10:00:00Z",
                  call("t1", "Bash", {"command": "make check"}),
                  result("t1", "fail: TOOL_ONLY_TERM in tool_only_case"),
-                 at(say(TDEF + " Older: #377 and `OLD_FLAG_NAME`."),
+                 at(say(TDEF + " Older: #377 and `OLD_FLAG_NAME`, from "
+                        "Mirela."),
                     "2026-11-10T10:01:00Z")) +
             turn("fix it", "2026-11-10T11:00:00Z",
                  at(say(TREPLY), "2026-11-10T11:01:00Z")))
@@ -846,7 +848,7 @@ def test_terms():
               (keys, text))
         check("Refs #473: a flag, K=V, call or bare filename in backticks is "
               "no term; a CamelCase name is",
-              "term:LedgerClock" in keys and not [
+              "term:LedgerClock" in keys and "term:Mirela" in keys and not [
                   k for k in keys if k in (
                       "term:--json", "term:-v", "term:RETRY_MAX=3",
                       "term:README.md", "term:main.c", "term:parseN()",
@@ -877,7 +879,8 @@ def test_terms_live():
         for o in term_lines():
             f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) + "\n")
     dch("--spawn", "xv-tv", "/usr/bin/perl", "-e",
-        '$|=1; print "on screen: #412 ERR_LEDGER_SKEW TOOL_ONLY_TERM\\n";'
+        '$|=1; print "on screen: #412 ERR_LEDGER_SKEW Mirela '
+        'TOOL_ONLY_TERM\\n";'
         ' sleep 300')
     pid = until(lambda: json.loads(dch("--cmd", "xv-tv").stdout or "{}")
                 .get("pid"), 5)
@@ -914,6 +917,12 @@ def test_terms_live():
               "reply's group)", ok and -1 not in at_ and at_ == sorted(at_)
               and text.count("ERR_LEDGER_SKEW") == 1 and
               "TOOL_ONLY_TERM" not in text, text)
+        mi = text.find("Mirela")
+        check("Refs #460 (audit gap 2's done-when): Mirela, named "
+              "mid-sentence in two turns, in the on-screen group after "
+              "ERR_LEDGER_SKEW, once (lite: the last reply's group)",
+              text.count("Mirela") == 1 and
+              (at_[5] < mi if lite else at_[2] < mi < at_[3]), text)
         mark = len(a.out)
         # its row: the on-screen group's second (lite: the reply's fifth,
         # LedgerClock's row before it, #473)

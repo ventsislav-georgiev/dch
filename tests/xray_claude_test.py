@@ -4720,6 +4720,60 @@ def test_terms():
         os.unlink(tp)
 
 
+def test_terms_b():
+    """#460 (audit gap 2, phase b): a capitalised word mid-sentence and a
+    short **bold** phrase are terms once they recur in 2+ turns. Not terms:
+    a one-off name or bold, a sentence-initial word, a stopword, a label
+    bold (**Why:**, **Next:** text, - **Options:**), a stopword bold, a
+    capitalised word said lowercase as often (Edit, edit). A bold phrase
+    matches case-insensitively and shows its newest spelling."""
+    sid = "11111111-2222-4333-8444-5555555555c9"
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-projb")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, sid + ".jsonl")
+    say = {2: "**Why:** it drifted. We asked Mirela about the **shadow "
+              "mode** path. Kestrel ran it on Monday.\n- **Options:** two\n"
+              "**Next:** ship it, **not** later. We click Edit to edit it.",
+           3: "One more for Zorblax and a **rare phrase** here.",
+           5: "**Why:** again. Then Mirela said the **Shadow Mode** run is "
+              "green. Kestrel agreed on Monday.\n- **Options:** one\n"
+              "**Next:** done, **not** now. So click Edit and edit."}
+    # harness text in two turns' prompts: a tool list, a bold phrase
+    rem = {t: "\n<system-reminder>\nthe tools: use SendMessage or the "
+              "**deferred tool** list.\n</system-reminder>" for t in (2, 4)}
+    with open(tp, "w") as f:
+        for t in range(1, 7):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/projb",
+                                "timestamp": "2026-11-10T10:%02d:00Z" % t,
+                                "message": {"content": "turn %d" % t +
+                                            rem.get(t, "")}}) +
+                    "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": say.get(t, "ok %d" % t)}]}}) + "\n")
+    history("xr-termsb", sid, cfg, "/home/demo/projb")
+    try:
+        rc, o, err = xray("xr-termsb", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        terms = sorted(k for k in refs if k.startswith("term:"))
+        check("terms b: a name said mid-sentence in two turns is a term",
+              rc == 0 and refs.get("term:Mirela", {}).get("count") == 2,
+              (terms, err))
+        check("terms b: a bold phrase in two turns is a term, matched "
+              "case-insensitively, its newest spelling shown",
+              refs.get("term:shadow mode", {}).get("count") == 2 and
+              refs["term:shadow mode"].get("text") == "Shadow Mode", terms)
+        check("terms b: no one-off name or bold, sentence-initial word, "
+              "stopword, label bold or word said lowercase as often", terms == ["term:Mirela",
+                                                  "term:shadow mode"], terms)
+        check("terms b: a name or bold said only inside <system-reminder> "
+              "harness text, in two turns, is no term",
+              rc == 0 and "term:SendMessage" not in refs and
+              "term:deferred tool" not in refs, terms)
+    finally:
+        os.unlink(tp)
+
+
 def test_recall():
     """#479: a ref's other same-project sessions carry their own turns:
     s1 (the project's other session) says #412 in its turns 2 and 3, s2 (another
@@ -4846,6 +4900,7 @@ def main():
         test_ent_bounds()
         test_many_mentions()
         test_terms()
+        test_terms_b()
         test_recall()
     finally:
         shutil.rmtree(T, ignore_errors=True)
