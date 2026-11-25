@@ -716,13 +716,28 @@ dch_trace(const char *fmt, ...)
 				         (unsigned)getuid());
 				e = path;
 			}
-			trace_fp = fopen(e, "a");
+			/* 0600, never through a symlink, only our own regular
+			** file: the trace goes into bug reports and may sit in
+			** a shared /tmp. */
+			int fd = open(e, O_WRONLY | O_CREAT | O_APPEND |
+			              O_NOFOLLOW | O_CLOEXEC, 0600);
+			struct stat tst;
+
+			if (fd >= 0 && (fstat(fd, &tst) < 0 ||
+			                !S_ISREG(tst.st_mode) ||
+			                tst.st_uid != getuid()))
+			{
+				close(fd);
+				fd = -1;
+			}
+			if (fd >= 0 && (tst.st_mode & 077))
+				(void)!fchmod(fd, 0600);
+			if (fd >= 0 && !(trace_fp = fdopen(fd, "a")))
+				close(fd);
 			if (trace_fp)
 			{
-				/* Don't leak the sink across the master re-exec
-				** into the inner program. ("e"/O_CLOEXEC fopen
-				** mode is a GNU extension, unreliable on macOS.) */
-				fcntl(fileno(trace_fp), F_SETFD, FD_CLOEXEC);
+				/* O_CLOEXEC: don't leak the sink across the
+				** master re-exec into the inner program. */
 				setvbuf(trace_fp, NULL, _IOLBF, 0);
 				dch_trace_fd = fileno(trace_fp);
 			}

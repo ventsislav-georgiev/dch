@@ -538,7 +538,7 @@ auto_allow(void)
 			aa_gone = 0;
 			aa_verify = 1;
 			aa_report(title);
-			dch_trace("auto-allow: answered %s", title);
+			dch_trace("auto-allow: answered (title %zu bytes)", strlen(title));	/* screen text */
 		}
 	}
 	free(id);
@@ -4224,8 +4224,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 
 			/* #634: the held/straight decision, for a CI latency row */
 			dch_trace("push fd=%d passive=%d len=%u in=%zu held=%u "
-			          "last=%02x", p->fd, p->passive, (unsigned)len, n,
-			          (unsigned)p->fcar_n, len ? payload[len - 1] : 0);
+			          "esc=%d", p->fd, p->passive, (unsigned)len, n,
+			          (unsigned)p->fcar_n,
+			          len && payload[len - 1] == 0x1b);	/* no key bytes: the trace is shared */
 			/* #601: a passive push of only focus reports is not typing;
 			** a held ESC [ is none yet either (#636: a report split
 			** across two reads), it counts when it goes in */
