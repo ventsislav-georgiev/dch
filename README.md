@@ -1691,9 +1691,14 @@ version-shaped word and does not start with a number (`**v2.1.0**`,
 stopwords only (emphasis such as `**not**`, `**all**`, `**exactly**`,
 `**without**`), not one word the prose also says plain (`**important**`
 beside `important`) unless the session also has that word as code, in a
-code span, a Bash command's unquoted words or a tool's file path, as tool
-names are (`**ripgrep**` beside `ripgrep` and `` `ripgrep` `` stays a
-term), not one capitalised word
+code span, a Bash command's unquoted words (a quoted word, even one, is
+prose), a `sh`, `bash`, `shell`, `zsh` or `console` fence (console: its `$ `
+lines) or a tool's file path, as tool names are (`**ripgrep**` beside
+`ripgrep` and `` `ripgrep` `` stays a term); a flag (`--required`), a word
+after `!` or `=` (`!important`, `--mode=mandatory`) and a path's directories
+(`docs/optional/a.md`) are no code. Known limit: a code word that is also
+everyday English still lists the bold as a term, such as `echo instead` or a CSS
+value (`display: none`), not one capitalised word
 (that is the name rule's) and holds no other ref (`**PAY-219 rollout**`
 stays the ticket). Neither is taken from harness text: a `<system-reminder>`
 block in a prompt or compact summary (tool lists, hook context). A bold phrase keys lowercase (`**Shadow Mode**` and
