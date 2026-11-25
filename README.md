@@ -1692,8 +1692,8 @@ stopwords only (emphasis such as `**not**`, `**all**`, `**exactly**`,
 `**without**`), not one word the prose also says plain (`**important**`
 beside `important`) unless the session also has that word as code, in a
 code span, a Bash command's unquoted words (a quoted word, even one, is
-prose), a `sh`, `bash`, `shell`, `zsh` or `console` fence (console: its `$ `
-lines) or a tool's file path, as tool names are (`**ripgrep**` beside
+prose), a `sh`, `bash`, `shell`, `zsh`, `console`, `shell-session` or `sh-session` fence (the last
+three: their `$ ` lines) or a tool's file path, as tool names are (`**ripgrep**` beside
 `ripgrep` and `` `ripgrep` `` stays a term); a flag (`--required`), a word
 after `!` or `=` (`!important`, `--mode=mandatory`) and a path's directories
 (`docs/optional/a.md`) are no code. Known limit: a code word that is also

@@ -1495,10 +1495,14 @@ fence_words(struct gscan *g, size_t ls, size_t a, size_t b)
 
 	while (i < a && (s[i] == ' ' || s[i] == '`' || s[i] == '~'))
 		i++;
-	for (e = i; e < a && A_ALNUM((unsigned char)s[e]); e++)
+	for (e = i; e < a && s[e] != ' ' && s[e] != '\t' && s[e] != '\n' &&
+	     s[e] != '\r'; e++)
 		;
 	t = s + i;
-	con = e - i == 7 && !memcmp(t, "console", 7);
+	/* #645: the info word ends at a blank or the line end, so sh-foo is no sh */
+	con = (e - i == 7 && !memcmp(t, "console", 7)) ||
+	      (e - i == 13 && !memcmp(t, "shell-session", 13)) ||
+	      (e - i == 10 && !memcmp(t, "sh-session", 10));
 	if (!con && !(e - i == 2 && !memcmp(t, "sh", 2)) &&
 	    !(e - i == 3 && !memcmp(t, "zsh", 3)) &&
 	    !(e - i == 4 && !memcmp(t, "bash", 4)) &&
