@@ -478,16 +478,36 @@ def main():
             ppid, pfd = spawn_client(["-E", "-a", E, "--passive"],
                                     {"DCH_FOCUS_RESIZE": "0"})
             drain(pfd, 3.0, b"EEE> ")
-            # (the pick is read after its Enter, so reports keep coming
-            # across that window: any one landing in it made it refused)
+            # The pick is read a moment after its Enter: the burst types the
+            # Enter itself, then reports right behind it, 0.2 ms apart, so
+            # one lands in that window (any one there made it refused).
+            # Paced, not a flood (#636): a flood fills the tty queue, and a
+            # lagging client's reads then cut reports at any byte; ESC | [I
+            # is typing (focus_resize off: no client hold rejoins a lone ESC).
+            # Every other report comes as ESC [ | I, as a slow link splits
+            # it: the master holds that ESC [, and it is no typing either.
+            # Blocking writes: a non-blocking pty write can land 2 of the 3
+            # bytes, a broken report that is real input (#618).
             stop = threading.Event()
 
-            # blocking writes on purpose: a non-blocking pty write can land
-            # 2 of the 3 bytes, a broken report that is real input (#618)
             def focus_burst():
                 try:
-                    while not stop.is_set():
+                    os.write(sfd, b"\r")
+                    # each write closes the last one's ESC [, has a whole
+                    # report, and ends in the next ESC [: every push holds
+                    # one, as reads cut after ESC [ by a lagging client do
+                    # (#636); 500 bytes, never a full queue
+                    os.write(pfd, b"\033[")
+                    for _ in range(100):
+                        os.write(pfd, b"I\033[I\033[")
+                    os.write(pfd, b"I")
+                    for _ in range(150):
                         os.write(pfd, b"\033[I")
+                        time.sleep(0.0002)
+                        os.write(pfd, b"\033[")
+                        time.sleep(0.0002)
+                        os.write(pfd, b"I")
+                        time.sleep(0.0002)
                 except OSError:
                     pass	# the client is gone: nothing to report to
 
@@ -501,8 +521,6 @@ def main():
             pdrain = threading.Thread(target=drain_passive, daemon=True)
             pdrain.start()
             burst.start()
-            time.sleep(0.2)
-            os.write(sfd, b"\r")
             landed = drain(sfd, 10.0, b"BBB_BRAVO")
             stop.set()
             burst.join(10.0)
