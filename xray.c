@@ -1356,7 +1356,8 @@ code_term(const char *s, size_t a, size_t b, const char *cwd,
 }
 
 /* #641: each run of 3-32 lowercase letters of code s[0, n) that no letter,
-** digit or _ touches to fn, as code (`ripgrep`, /usr/bin/ripgrep) */
+** digit or _ touches, nor a - before it (a flag's, --required), to fn, as
+** code (`ripgrep`, /usr/bin/ripgrep) */
 static void
 code_words(const char *s, size_t n,
            void (*fn)(void *ctx, const char *w, size_t l, int code), void *ctx)
@@ -1368,7 +1369,8 @@ code_words(const char *s, size_t n,
 		for (j = i; j < n && A_LO((unsigned char)s[j]); j++)
 			;
 		if (j - i >= 3 && j - i <= 32 &&
-		    (!i || (!A_ALNUM((unsigned char)s[i - 1]) && s[i - 1] != '_')) &&
+		    (!i || (!A_ALNUM((unsigned char)s[i - 1]) &&
+		            s[i - 1] != '_' && s[i - 1] != '-')) &&
 		    (j == n || (!A_ALNUM((unsigned char)s[j]) && s[j] != '_')))
 			fn(ctx, s + i, j - i, 1);
 		i = j > i ? j : i + 1;

@@ -5040,7 +5040,8 @@ def test_terms_628():
               "term:Wibble" not in refs, err)
         # #641 (QA 1.161.0 LOW-WF2): everyday emphasis bolded in 2 turns
         # and said plain once is no term; a word also in a Bash command
-        # (unquoted) is, and a quoted sentence's word makes no code
+        # (unquoted) is, and neither a quoted sentence's word nor a flag's
+        # (--required) makes code
         emph = ("important", "required", "optional", "already", "critical",
                 "instead")
         cwd = "/home/demo/projt"
@@ -5058,7 +5059,7 @@ def test_terms_628():
                 if t == 5:
                     c.append({"type": "tool_use", "id": "toolu_641",
                               "name": "Bash", "input": {"command":
-                              "hyperfine 'make -j8' && git commit -m "
+                              "hyperfine --required 'make -j8' && git commit -m "
                               "\"important fix\""}})
                 f.write(json.dumps({"type": "assistant", "message": {
                     "content": c}}) + "\n")
