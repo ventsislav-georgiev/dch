@@ -11,7 +11,7 @@ to the start of the visual row, or the newline before it, as Claude Code
 2.1.318's deleteToLineStart does; Backspace deletes one character. Ctrl-D
 twice within 2s on an empty composer exits as /exit does. A "!" typed (not
 pasted) into an empty composer enters bash mode, its prefix "!" in place of
-"❯"; Backspace on an empty bash query leaves it; Enter there runs nothing,
+"❯"; Backspace on an empty bash query leaves it; Enter there runs only a "run <cmd>",
 logs bash and leaves it.
 
 State lives in $FAKE_CLAUDE_DIR:
@@ -297,6 +297,14 @@ def take(text):
     turn_end = time.time() + ctl().get("turn_ms", 500) / 1000.0
 
 
+def run_cmd(cmd):
+    """A "run <cmd>" line (pasted "!run", or bash mode's "run"): run it"""
+    env = dict(os.environ)
+    env.pop("DCH_SESSION", None)   # leave only ancestry to find us
+    with open(os.path.join(D, SESS + ".run.out"), "w") as f:
+        subprocess.Popen(cmd, shell=True, stdout=f, stderr=f, env=env)
+
+
 def submit(text, c, confirmed=False):
     global exit_up
     log(ev="line", text=text)
@@ -328,11 +336,7 @@ def submit(text, c, confirmed=False):
         log(ev="exit")
         bye(0)
     if text.startswith("!run "):
-        env = dict(os.environ)
-        env.pop("DCH_SESSION", None)   # leave only ancestry to find us
-        with open(os.path.join(D, SESS + ".run.out"), "w") as f:
-            subprocess.Popen(text[5:], shell=True, stdout=f, stderr=f,
-                             env=env)
+        run_cmd(text[5:])
         return
     if status == "busy":
         queue.append(text)
@@ -445,7 +449,9 @@ while True:
                 eaten += 1
                 log(ev="enter_eaten", text=draft)
             elif ch == b"\r" and bash:
-                log(ev="bash", text=draft)      # runs nothing
+                log(ev="bash", text=draft)      # runs only a "run <cmd>"
+                if draft.startswith("run "):
+                    run_cmd(draft[4:])
                 draft, bash = "", False
             elif ch == b"\r":
                 collapsed = False
