@@ -254,8 +254,10 @@ def focus_rows(slow):
         # #585: no second hold on top of attach.c's own (50 ms). The Esc
         # must reach the program before j exists, so a slow reader cannot
         # merge them. Its latency is timed against an active client's Esc
-        # on the same reader, so load cancels: a master hold adds ~50 ms to
-        # the passive one only. Any of 5 tries may pass.
+        # on the same reader: a master hold adds ~50 ms to every passive
+        # try. Load only adds, and a loaded runner's +50..120 ms can land on
+        # either client (#634), so the two floors (fastest of 8 tries each,
+        # order alternated) are compared, not one pair.
         def reads():
             with open(log + ".reads", "rb") as f:
                 return f.read().split()
@@ -264,21 +266,27 @@ def focus_rows(slow):
             n0 = len(reads())
             t0 = time.time()
             os.write(c.fd, b"\033")
-            while time.time() < t0 + DUE and reads()[n0:] != [b"1b"]:
+            # the last mark's .reads line may land after n0 (rec writes the
+            # log first): wait for the lone 1b, not for exactly one line
+            while time.time() < t0 + DUE and b"1b" not in reads()[n0:]:
                 time.sleep(0.001)
             lat = (time.time() - t0) * 1000
-            return lat, fed(c, [b"j"], mark), reads()[n0:]
+            got, rd = fed(c, [b"j"], mark), reads()[n0:]
+            return lat, got, rd[rd.index(b"1b"):] if b"1b" in rd else rd
 
-        for _ in range(5):
-            am, _g, _r = esc_ms(a, b"A")
-            pm, got, rd = esc_ms(p, b"P")
-            if pm <= am + 30 and got == b"\033j" and rd[:1] == [b"1b"]:
-                break
-        check(pm <= am + 30 and got == b"\033j" and rd[:1] == [b"1b"]
+        am, ps = [], []
+        for i in range(8):
+            for c in (a, p) if i % 2 == 0 else (p, a):
+                if c is a:
+                    am.append(esc_ms(a, b"A")[0])
+                else:
+                    ps.append(esc_ms(p, b"P"))
+        pm, got, rd = min(ps)
+        check(pm <= min(am) + 30 and got == b"\033j" and rd[:1] == [b"1b"]
               and not any(x.startswith(b"1b6a") for x in rd),
               "a passive client's lone Esc reaches the program on its own,"
               " not held: passive %.0f ms vs active %.0f ms %r"
-              % (pm, am, rd))
+              % (pm, min(am), rd))
         fed(p, [], b"P")
 
         r = dch("--active", name, "--pid", str(p.pid))

@@ -346,6 +346,32 @@ def test_follow_claude():
               b[0]["chapter"]["anchor"] and
               "response_from" not in b[0]["chapter"], fl.objs(k5))
 
+        # #620: a Stop hook blocks that end_turn, the turn goes on and a
+        # prompt is delivered into it; the first turn_duration links them
+        time.sleep(0.4)
+        k7 = len(fl.got)
+        with open(t3, "a") as f:
+            f.write("".join(json.dumps(o) + "\n" for o in step("q3") + [
+                {"type": "attachment", "attachment": {
+                    "type": "queued_command", "commandMode": "prompt",
+                    "prompt": "hooked ask"}}] + step("q4") + [
+                {"type": "assistant", "message": {
+                    "stop_reason": "end_turn", "content": [
+                        {"type": "text", "text": "hooked done"}]}},
+                {"type": "system", "subtype": "turn_duration",
+                 "durationMs": 9}]))
+        h = fl.wait(lambda o: "chapter" in o and
+                    o["chapter"]["title"] == "hooked ask" and
+                    o["chapter"].get("response") == "hooked done", frm=k7)
+        e = fl.wait(lambda o: "chapter" in o and
+                    o["chapter"]["title"] == "mid ask" and
+                    o["chapter"].get("response") == "hooked done", frm=k7)
+        check("follow: a prompt delivered past a Stop hook's end_turn "
+              "re-sends the earlier chapter with the response and "
+              "response_from at the turn_duration (#620)",
+              h and e and e[0]["chapter"].get("response_from") ==
+              h[0]["chapter"]["anchor"], fl.objs(k7))
+
         # the session ends: exit 0
         dch("-k", n)
         try:

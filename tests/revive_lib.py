@@ -1244,8 +1244,15 @@ def main(part):
                         "where you left them, so pick the next step up from "
                         "your notes and report when the batch is done.")
             nenv = dict(renv, COLUMNS="60", LINES="40")
-            for n, eat, want in (("rtear", 99, ("failed", "not_submitted")),
-                                 ("rtear2", 2, ("ok", ""))):
+            # rtear3/4 (#631): a torn frame up 1.5 s of every 1.9, longer
+            # than AG_GONE_MS, as reads that each land on a torn repaint
+            # see it: no composer that long must not read as sent. A paste
+            # waits up to DCH_AGENT_LAND_MS for a composer: longer than that.
+            for n, eat, want, tear in (
+                    ("rtear", 99, ("failed", "not_submitted"), [120, 200]),
+                    ("rtear2", 2, ("ok", ""), [120, 200]),
+                    ("rtear3", 99, ("failed", "not_submitted"), [1500, 400]),
+                    ("rtear4", 2, ("ok", ""), [1500, 400])):
                 if lite:
                     continue
                 sid = "60660660-0000-4000-8000-%012d" % len(names)
@@ -1253,14 +1260,16 @@ def main(part):
                                 agent=dict(kind="claude", session_id=sid,
                                            name="", cwd=proj, launch=[cl])),
                           os.path.join(recdir8, n + ".json"))
-                setctl(n, eat_enters=eat, tear=[120, 200])
+                setctl(n, eat_enters=eat, tear=tear)
                 r = run("--revive", n, "--no-message", "--json", env=nenv,
                         timeout=120)
                 names.append((n, renv))
                 said = []
 
                 def say_up():
-                    r2 = run("--say", n, "--json", "--", long_msg, env=renv,
+                    r2 = run("--say", n, "--json", "--", long_msg,
+                             env=dict(renv, DCH_AGENT_LAND_MS="6000"
+                                      if tear[0] > 1000 else "1500"),
                              timeout=120)
                     o = (ndjson(r2.stdout) or [{}])[-1]
                     said[:] = [r2, (o.get("result"), o.get("reason"))]
@@ -1276,9 +1285,10 @@ def main(part):
                     time.sleep(1.5)
                 turns = ev(n, "turn", s.get("pid"))
                 check("#606 revive --no-message, then --say of a long wrapped "
-                      "message, %d Enters eaten, repaints read halfway: %s "
+                      "message, %d Enters eaten, repaints read halfway "
+                      "(tear %r): %s "
                       "[rc=%d %r] [revive rc=%d turns=%d %r eaten=%d last=%r]"
-                      % (eat, "/".join(want).strip("/"),
+                      % (eat, tear, "/".join(want).strip("/"),
                          said[0].returncode, said[0].stdout, r.returncode,
                          len(turns), [x.get("text", "")[:60] for x in turns],
                          len(ev(n, "enter_eaten", s.get("pid"))),
