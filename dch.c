@@ -13987,7 +13987,7 @@ xr_codex_answer(const struct xr_cx *x, struct xr_answer *a,
 	}
 	a->corpus = "codex";
 	a->available = 1;
-	a->mentions_only = 1;
+	a->mentions_only = 0;	/* #657: a Codex rollout defines too */
 	a->refs = refs;
 	a->complete = !capped && ch->total == ch->n;
 	a->why = a->complete ? NULL : "range";
@@ -16198,7 +16198,7 @@ xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 	if ((!s->cx || !s->label[0]) && xr_claude_cwd(s->d)[0])
 		snprintf(s->label, sizeof s->label, "%s", xr_claude_cwd(s->d));
 	a->corpus = s->cx ? "codex" : "claude";
-	a->mentions_only = s->cx != NULL;
+	a->mentions_only = 0;	/* #657: a Codex rollout defines too */
 	a->available = 1;
 	a->ch = xr_claude_chapters(s->d);
 	a->refs = s->ix;

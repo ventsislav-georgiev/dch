@@ -221,9 +221,10 @@ def test_live():
         open(trace, "w").close()
         rc, o, err = xray(n, "--json", env=dbg)
         tr = open(trace).read()
-        check("mapped: corpus codex, mentions only, session_id the thread",
+        check("mapped: corpus codex, #657 not mentions only (a rollout "
+              "defines), session_id the thread",
               rc == 0 and o and o["corpus"] == "codex" and
-              o["mentions_only"] is True and o["available"] and
+              o["mentions_only"] is False and o["available"] and
               o["session_id"] == TID and o["live"], (rc, o, err))
         if not o:
             return
@@ -892,6 +893,191 @@ def test_fetch():
         dch("-k", n)
 
 
+TIDD = "019a2222-3333-7444-8555-666677778809"
+TIDL = "019a2222-3333-7444-8555-666677778810"
+CUT = "\n... command output truncated for persistence ...\n"
+
+
+def done(sec, item):
+    """A 0.167 paginated event_msg item_completed (synthetic)."""
+    return line(sec, "event_msg", {"type": "item_completed",
+                                   "thread_id": TIDD, "turn_id": "t1",
+                                   "item": item})
+
+
+def cmd_item(cid, script, out, code, parsed=None):
+    return {"type": "CommandExecution", "id": cid,
+            "command": ["/bin/zsh", "-lc", script], "cwd": "/x",
+            "parsed_cmd": parsed or [{"type": "unknown", "cmd": script}],
+            "source": "agent",
+            "status": "completed" if code == 0 else "failed",
+            "aggregated_output": out, "exit_code": code,
+            "duration": "0.1s"}
+
+
+def exec_call(sec, cid, script):
+    return line(sec, "response_item", {
+        "type": "function_call", "name": "exec_command", "call_id": cid,
+        "arguments": json.dumps({"cmd": script, "yield_time_ms": 1000})})
+
+
+def exec_out(sec, cid, out, code):
+    return line(sec, "response_item", {
+        "type": "function_call_output", "call_id": cid,
+        "output": "Chunk ID: 3e1f\nWall time: 0.1 seconds\n"
+                  "Process exited with code %d\nOriginal token count: 9\n"
+                  "Output:\n%s" % (code, out)})
+
+
+def defs_of(n, ref):
+    r = dch("--xray", n, "--ref", ref, "--scope", "session", "--json")
+    ls = [json.loads(x) for x in r.stdout.splitlines()]
+    return ([x["definition"] for x in ls if "definition" in x],
+            sum(1 for x in ls if "mention" in x), r)
+
+
+def test_defs():
+    """#657: a Codex rollout defines as a Claude transcript's paired tool
+    results do: 0.167's item_completed CommandExecution and McpToolCall
+    (code mode's inner calls only there), a legacy rollout's call_id
+    pairing; a failed command, a patch: none; 64 KiB cut: what is kept."""
+    n = "xx-df"
+    proj = os.path.join(T, "dfproj")
+    pid, marker = spawn(n, proj)
+    big = "# #880 Big output\nkept head\n" + "y" * 200 + CUT + "z" * 200
+    patch = ("*** Begin Patch\n*** Add File: docs/a.md\n"
+             "+# #870 Patch title\n+body\n*** End Patch\n")
+    body = (user(1, "look at #831") +
+            # the turn twice in a paginated rollout: counted once
+            done(1, {"type": "UserMessage", "id": "u1", "content": [
+                {"type": "text", "text": "look at #831"}]}) +
+            exec_call(2, "c1", "gh issue view 831") +
+            done(3, cmd_item("c1", "gh issue view 831",
+                             "# #831 Agent panes\nThe panes show agents.\n",
+                             0)) +
+            exec_out(3, "c1", "# #831 Agent panes\nThe panes show "
+                     "agents.\n", 0) +
+            exec_call(4, "c2", "cat notes.md") +
+            done(5, cmd_item("c2", "cat notes.md",
+                             "# #852 Inside notes\nA note.\n", 0,
+                             [{"type": "read", "cmd": "cat notes.md",
+                               "name": "notes.md", "path": "notes.md"}])) +
+            exec_out(5, "c2", "# #852 Inside notes\nA note.\n", 0) +
+            exec_call(6, "c3", "gh issue view 860") +
+            done(7, cmd_item("c3", "gh issue view 860",
+                             "# #860 Broken\nno such thing\n", 1)) +
+            exec_out(7, "c3", "# #860 Broken\nno such thing\n", 1) +
+            line(8, "response_item", {"type": "custom_tool_call",
+                                      "name": "apply_patch", "call_id": "c4",
+                                      "input": patch}) +
+            done(9, {"type": "FileChange", "id": "c4", "changes": {
+                "docs/a.md": {"type": "add",
+                              "content": "# #870 Patch title\nbody\n"}},
+                "status": "completed"}) +
+            line(9, "response_item", {"type": "custom_tool_call_output",
+                                      "call_id": "c4",
+                                      "output": "Success. Updated: A "
+                                                "docs/a.md\n# #870 Patch "
+                                                "title"}) +
+            exec_call(10, "c5", "gh issue view 880") +
+            done(11, cmd_item("c5", "gh issue view 880", big, 0)) +
+            # code mode: its inner calls only as items
+            line(12, "response_item", {"type": "custom_tool_call",
+                                       "name": "exec", "call_id": "c6",
+                                       "input": "await tools.js({})"}) +
+            done(13, {"type": "McpToolCall", "id": "inner1",
+                      "server": "cua", "tool": "js", "arguments": {},
+                      "status": "completed", "result": {"content": [
+                          {"type": "text",
+                           "text": "# #895 Mcp heading\nfrom js\n"}]}}) +
+            done(13, {"type": "McpToolCall", "id": "inner2",
+                      "server": "cua", "tool": "js", "arguments": {},
+                      "status": "failed", "error": {"message": "boom"},
+                      "result": {"content": [
+                          {"type": "text",
+                           "text": "# #896 Mcp failed\nx\n"}]}}) +
+            done(13, cmd_item("inner3", "gh issue view 897",
+                              "# #897 Inner command\nran inside\n", 0)) +
+            line(14, "response_item", {"type": "custom_tool_call_output",
+                                       "call_id": "c6", "output": "ok"}) +
+            done(15, {"type": "AgentMessage", "id": "a1", "content": [
+                {"type": "Text", "text": "done with #831"}]}) +
+            line(15, "response_item", {"type": "message", "role": "assistant",
+                                       "content": [{"type": "output_text",
+                                                    "text": "done with #831; "
+                                                    "#860, #870 and #896 "
+                                                    "left"}]}))
+    legacy = (user(1, "legacy turn, see #891") +
+              exec_call(2, "l1", "gh issue view 890") +
+              exec_out(3, "l1", "# #890 Legacy paired\nbody\n", 0) +
+              exec_call(4, "l2", "gh issue view 891") +
+              exec_out(5, "l2", "# #891 Legacy failed\nbody\n", 2) +
+              line(6, "response_item", {
+                  "type": "function_call", "name": "shell", "call_id": "l3",
+                  "arguments": json.dumps({"command": ["bash", "-lc",
+                                                       "gh issue view 892"]})}) +
+              line(7, "response_item", {
+                  "type": "function_call_output", "call_id": "l3",
+                  "output": "Exit code: 0\nWall time: 0.2 seconds\nOutput:\n"
+                            "# #892 Old shell\nbody\n"}))
+    try:
+        rollout(TIDD, proj, body)
+        snapshot(TIDD, n, marker)
+        rc, o, err = xray(n, "--json")
+        check("#657 a 0.167 rollout: corpus codex, mentions_only false, one "
+              "turn (item_completed messages never count)",
+              rc == 0 and o and o["corpus"] == "codex" and
+              o["mentions_only"] is False and
+              [c["title"] for c in o["chapters"]] == ["look at #831"],
+              (rc, o and o.get("chapters"), err))
+        keys = {r["key"]: r for r in (o or {}).get("refs", [])}
+        check("#657 --xray: #831, #852, #880, #895, #897 defined; #860, "
+              "#870, #896 not",
+              all(keys.get("issue:#%d" % k, {}).get("defined") is True
+                  for k in (831, 852, 880, 895, 897)) and
+              all(keys.get("issue:#%d" % k, {}).get("defined") is False
+                  for k in (860, 870, 896)),
+              {k: v.get("defined") for k, v in keys.items()})
+        for ref, title, what in (
+                ("#831", "Agent panes", "a command's output (item_completed "
+                 "and its paired response_item: once)"),
+                ("#852", "Inside notes", "a file read (cat, parsed_cmd read)"),
+                ("#880", "Big output", "a 64 KiB middle-cut output's head"),
+                ("#895", "Mcp heading", "a code-mode McpToolCall result"),
+                ("#897", "Inner command",
+                 "a code-mode CommandExecution (item only)")):
+            d, m, r = defs_of(n, ref)
+            check("#657 %s defines %s: one D1 definition, title %r" % (
+                what, ref, title),
+                [(x["rule"], x["title"]) for x in d] == [("D1", title)] and
+                m >= 1, (r.stdout[-700:], r.stderr))
+        for ref, what in (("#860", "a failed command (exit_code 1)"),
+                          ("#896", "a failed McpToolCall (error)"),
+                          ("#870", "a patch (a write, as Claude's Edit)")):
+            d, m, r = defs_of(n, ref)
+            check("#657 %s: mentioned (the answer), never defined (%s)" % (
+                ref, what),
+                  d == [] and m >= 1, (r.stdout[-700:], r.stderr))
+        d, m, r = defs_of(n, "#831")
+        check("#657 #831: item_completed and the output not counted twice "
+              "(the turn, its output's anchor, the answer: 3 mentions)",
+              m == 3, r.stdout[-900:])
+
+        rollout(TIDD, proj, legacy)
+        for ref, want, what in (
+                ("#890", [("D1", "Legacy paired")],
+                 "exec_command paired by call_id, Process exited with code 0"),
+                ("#891", [], "exited with code 2: failed, no definition"),
+                ("#892", [("D1", "Old shell")],
+                 "shell's Exit code: 0 output")):
+            d, m, r = defs_of(n, ref)
+            check("#657 legacy rollout %s: %s" % (ref, what),
+                  [(x["rule"], x["title"]) for x in d] == want and m >= 1,
+                  (r.stdout[-700:], r.stderr))
+    finally:
+        dch("-k", n)
+
+
 def main():
     os.makedirs(os.path.dirname(FAKE))
     b = subprocess.run(["cc", "-o", FAKE, os.path.join(HERE, "fake_codex.c")],
@@ -912,6 +1098,7 @@ def main():
         test_follow()
         test_follow_agent()
         test_fetch()
+        test_defs()
         check("nothing in the Codex dir was ever run", not os.path.exists(RAN))
     finally:
         shutil.rmtree(T, ignore_errors=True)

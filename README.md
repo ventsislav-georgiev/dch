@@ -1242,7 +1242,7 @@ its prompt (in another session of this project: that session's prompt). A shell 
 shows its lines.
 
 The line under the tabs names the corpus: `Shell · last N rows`, `Shell · no
-shell integration · mentions only`, `Codex · mentions only`, `X-ray needs the
+shell integration · mentions only`, `Codex`, `X-ray needs the
 full dch build` (dch-lite), `X-ray is off for shells (xray_ring = 0)`,
 `2 Claude sessions run here; X-ray reads one`, `No Claude session found
 here`, and so on. A shell's line adds "a terminal's own clear-screen key may
@@ -1434,9 +1434,9 @@ The corpus:
   - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
 - **Codex.** A live Codex in the session (the first process named `codex`
   below the session's shell) answers from its rollout: `corpus: "codex"`,
-  always `mentions_only: true` (Prosper's label: "Codex · mentions only").
-  Its chapters are its user turns and compactions, its refs are mentions, and
-  nothing is ever a definition. `session_id` is the Codex thread id.
+  `mentions_only: false` (#657; before it, always `true`, Prosper's label
+  "Codex · mentions only"). Its chapters are its user turns and compactions;
+  its refs are mentions and definitions. `session_id` is the Codex thread id.
   - The thread comes only from Codex's shell snapshots,
     `<CODEX_HOME>/shell_snapshots/<id>.<n>.sh`. Exactly one UUID-named
     snapshot must export the session's `DCH_SESSION` (and its bridge marker,
@@ -1461,10 +1461,30 @@ The corpus:
   - Assistant text uses the prose rules. Tool calls (`function_call`
     arguments, `custom_tool_call` input, `local_shell_call` action) and their
     outputs use the code rules, with the tool clips. Developer messages,
-    reasoning, every `event_msg` (a user turn's twin among them) and any other
-    record type give nothing.
-  - Rollouts are read as Codex 0.151 to 0.167 writes them (a `timestamp`,
-    `type`, `payload` line). `project_label` is the Codex process's cwd, or
+    reasoning, every other `event_msg` (a user turn's and an answer's twins
+    among them, so a turn counts once) and any other record type give
+    nothing.
+  - Definitions (#657) follow the rule for a Claude tool result paired with
+    its call: a shell command's output defines as a `Bash` result does (a
+    file read with `cat` as Claude's `cat`), any other call's output as a
+    generic tool's, and a failed one defines nothing. A patch (`apply_patch`,
+    a `FileChange`) is a write, as Claude's `Edit`: no definition. The source
+    is the `event_msg` `item_completed` record (paginated rollouts):
+    `CommandExecution` (`command`, `aggregated_output`; failed when
+    `exit_code` is not 0) and `McpToolCall` (`result`'s text; failed with an
+    `error` or `isError`). Its `id` is the call's `call_id`, so a call that
+    also has a `response_item` output defines once; code mode's inner calls
+    exist only as these items, and their output gives its mentions too. A
+    rollout without these items (legacy) pairs `function_call` with
+    `function_call_output` by `call_id`; the exit status is the output's
+    `Process exited with code N` (`exec_command`) or `Exit code: N`
+    (`shell`), and the body after its `Output:` line is what defines. Codex
+    cuts a persisted command output past 64 KiB in its middle (`... command
+    output truncated for persistence ...`): the kept head defines as a
+    clipped Claude result does, and D2 (a whole JSON value) is off for it.
+  - Rollouts are read as Codex 0.151 to 0.167.2 writes them (a `timestamp`,
+    `type`, `payload` line; the `item_completed` fields checked against the
+    0.167.2 source). `project_label` is the Codex process's cwd, or
     the rollout's last `cwd` when that cannot be read; file refs resolve
     against the rollout's `cwd`.
   - Nothing in the Codex directory is run or written.

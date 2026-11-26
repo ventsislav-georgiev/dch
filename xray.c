@@ -6389,6 +6389,7 @@ struct rcall
 	char name[128];		/* the call's tool name, for its result's mention (MCP names run long) */
 	uint64_t off;
 	long long at;
+	int cxdone;		/* #657: its Codex item_completed defined it */
 };
 
 struct pend
@@ -7527,7 +7528,8 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 	{
 		refs_card(d, p, in);
 		/* #515: a WebFetch keeps its URL (as cmd) for its result's title */
-		if (id && (c = rc_push(d, id, RC_CARD)) && !strcmp(name, "WebFetch") &&
+		if (id && (c = rc_push(d, id, RC_CARD)) && name &&
+		    !strcmp(name, "WebFetch") &&
 		    (v = j_field(p, in, "url")) >= 0 &&
 		    p->tok[v].kind == JSON_STRING && (s = j_str(p, v, &l)) &&
 		    l <= XR_KEY_MAX && (c->cmd = strdup(s)))
@@ -8755,10 +8757,12 @@ tokens_max(const char *s, size_t n)
 /* ---- Codex: the rollout (7.4, K9) ------------------------------------------- */
 
 /* Rollout lines {"timestamp","type","payload"} as Codex 0.151-0.167 write
-** them (field names checked against real rollouts, 2026-11-11). Only
-** response_item, compacted, session_meta and turn_context are read; every
-** event_msg and any other type gives nothing, so a user turn Codex records
-** twice (the item and its event) counts once. */
+** them (field names checked against real rollouts, 2026-11-11; #657's
+** item_completed against the 0.167.2 source). Only response_item,
+** compacted, session_meta, turn_context and an item_completed's tool items
+** (definitions, cx_done) are read; any other event_msg and type gives
+** nothing, so a user turn Codex records twice (the item and its event)
+** counts once. */
 static const char *const A_PAYLOAD[] = { "payload", 0 };
 static const char *const A_ROLE[] = { "role", 0 };
 static const char *const A_ARGS[] = { "arguments", 0 };
@@ -8827,18 +8831,19 @@ cx_user(struct xr_claude *d, const struct json_parser *p, int pl)
 
 /* #515: a shell call's command (arguments' cmd, or command as a string or
 ** its words joined) kept by call_id, for its output's page title
-** (fetch_def decides) */
+** (fetch_def decides) and #657 its definitions; any other call (q's object
+** o has no command) a generic card's */
 static void
 cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
-              const struct json_parser *q)
+              const struct json_parser *q, int o)
 {
 	char *id = k_str(p, pl, A_CALLID, NULL), *w, *b = NULL;
-	int v = j_field(q, 0, "cmd"), k;
+	int v = j_field(q, o, "cmd"), k;
 	size_t l, bl = 0;
-	struct rcall *c, t;
+	struct rcall *c;
 
 	if (v < 0)
-		v = j_field(q, 0, "command");
+		v = j_field(q, o, "command");
 	if (v >= 0 && q->tok[v].kind == JSON_STRING)
 		b = j_str(q, v, &bl);
 	else if (v >= 0 && q->tok[v].kind == JSON_ARRAY)
@@ -8858,14 +8863,8 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 			}
 			free(w);
 		}
-	memset(&t, 0, sizeof t);
-	t.kind = RC_BASH;
-	t.cmd = b;
-	t.cl = bl;
-	/* a URL to fetch, or a read (#517) */
-	if (id && b && bl <= XR_BASH_MAX &&
-	    (memchr(b, '/', bl) || read_call(&t)) &&
-	    (c = rc_push(d, id, RC_BASH)))
+	if (id && (c = rc_push(d, id, b && !blank(b, bl) ? RC_BASH : RC_CARD)) &&
+	    c->kind == RC_BASH)
 	{
 		c->cmd = b;
 		c->cl = bl;
@@ -8873,6 +8872,91 @@ cx_fetch_call(struct xr_claude *d, const struct json_parser *p, int pl,
 	}
 	free(b);
 	free(id);
+}
+
+/* #657: a Codex output's definitions, under refs_result's rule for a paired
+** tool_result: cmd its shell command (NULL: a generic card's), s its output
+** (NUL-ended). scan: its mentions too (a code-mode call's item, which no
+** response_item carries), else only the spans its output's scan counted. */
+static void
+cx_defs(struct xr_claude *d, const char *cmd, size_t cl, const char *s,
+        size_t n, int failed, int noexit, int d2ok, int scan)
+{
+	struct remit r, cr;
+	struct dsrc ds;
+	size_t bl = clip(s, n, XR_OUTPUT_CAP);
+	char a[48], *body = malloc(bl + 1);
+
+	if (!body)
+		return;
+	memcpy(body, s, bl);
+	body[bl] = '\0';
+	ch_anchor(d, a);
+	rm_claude(d, &r, a);
+	if (scan)
+		rm_scan(&r, body, bl, XR_CODE);
+	else
+	{
+		r.text = body;
+		(void)grammar(body, bl, XR_CODE, R_CODE, r.cwd, cov_span, &r);
+	}
+	memset(&ds, 0, sizeof ds);
+	ds.out = body;
+	ds.ol = bl;
+	ds.failed = failed;
+	ds.noexit = noexit;
+	ds.d2ok = d2ok && n <= XR_D2_MAX;
+	ds.d2out = bl < n ? s : NULL;
+	ds.d2l = n;
+	ds.cwd = r.cwd;
+	memset(&cr, 0, sizeof cr);
+	if (cmd)
+	{
+		ds.bash = 1;
+		ds.cmd = cmd;
+		ds.cl = cl;
+		/* the command's code spans, for a D3 anchor's one mention */
+		rm_claude(d, &cr, a);
+		cr.left = 0;
+		cr.read = NULL;
+		cr.text = cmd;
+		(void)grammar(cmd, cl, XR_CODE, R_CODE, cr.cwd, cov_span, &cr);
+	}
+	defs_emit(&ds, &r, cmd ? &cr : NULL);
+	free(cr.cov);
+	free(r.cov);
+	free(body);
+}
+
+/* #657: a shell output's header (exec_command's "Process exited with code
+** N" or "Process running with session ID N", shell's "Exit code: N", up to
+** its "Output:" line): the body's start, 0 for no header; *ex the exit code
+** (-1 none), *run still running */
+static size_t
+cx_head(const char *s, size_t n, int *ex, int *run)
+{
+	static const char pe[] = "Process exited with code ", ec[] = "Exit code: ";
+	size_t i, e;
+	int k;
+
+	*ex = -1;
+	*run = 0;
+	for (i = 0, k = 0; i < n && k < 8; i = e + 1, k++)
+	{
+		for (e = i; e < n && s[e] != '\n'; e++)
+			;
+		if (e - i == 7 && !memcmp(s + i, "Output:", 7))
+			return e < n ? e + 1 : n;
+		if (e - i > sizeof pe - 1 && !memcmp(s + i, pe, sizeof pe - 1))
+			*ex = atoi(s + i + sizeof pe - 1);
+		else if (e - i > sizeof ec - 1 && !memcmp(s + i, ec, sizeof ec - 1))
+			*ex = atoi(s + i + sizeof ec - 1);
+		else if (!strncmp(s + i, "Process running with session ID ", 32))
+			*run = 1;
+	}
+	*ex = -1;
+	*run = 0;
+	return 0;
 }
 
 /* A Codex output: its mentions, read if its call read (#517), its call's
@@ -8883,16 +8967,129 @@ cx_fetch_out(struct xr_claude *d, const struct json_parser *p, int pl,
 {
 	char *id = k_str(p, pl, A_CALLID, NULL), kb[XR_ID_MAX + 1];
 	struct rcall *c = id ? rc_find(d, id_key(id, kb)) : NULL;
+	size_t h;
+	int ex = -1, run = 0;
 
 	d->read = c ? read_call(c) : NULL;
-	refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
+	/* #657: paired, as a Claude tool_result (refs_result): a write
+	** (apply_patch, RC_OTHER) never defines, and a call its item_completed
+	** defined is not defined twice; a legacy rollout's outputs define here */
+	if (!c || c->kind == RC_OTHER || c->cxdone || !s || !d->rk.hit)
+		refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
+	else
+	{
+		h = c->kind == RC_BASH ? cx_head(s, n, &ex, &run) : 0;
+		refs_text(d, s, h, XR_OUTPUT_CAP, XR_CODE);
+		cx_defs(d, c->kind == RC_BASH ? c->cmd : NULL, c->cl, s + h, n - h,
+		        ex > 0, run, 1, 1);
+	}
 	d->read = NULL;
 	if (c)
 	{
-		if (s)
+		if (s && ex <= 0)	/* a failed command's page is no title */
 			fetch_def(d, c, s, clip(s, n, XR_OUTPUT_CAP));
 		rc_drop(d, c);
 	}
+	free(id);
+}
+
+/* #657: a Codex event_msg item_completed (paginated rollouts, 0.151+): a
+** CommandExecution's aggregated_output (cut in the middle past 64 KiB) and
+** a McpToolCall's result define as a paired Claude result does; a failed
+** one (exit_code not 0, an error) does not. Its id is the call_id: a call a
+** response_item carried has its mentions from that output, and its output
+** defines nothing more. Code-mode calls exist only here. Messages and other
+** items are never read (their response_item counts the turn). */
+static void
+cx_done(struct xr_claude *d, const struct json_parser *p, int pl)
+{
+	static const char *const a_item[] = { "item", 0 },
+	                         *const a_ec[] = { "exit_code", 0 },
+	                         *const a_ao[] = { "aggregated_output", 0 },
+	                         *const a_res[] = { "result", 0 },
+	                         *const a_err[] = { "error", 0 },
+	                         *const a_st[] = { "status", 0 },
+	                         *const a_cmd[] = { "command", 0 },
+	                         *const shells[] = { "sh", "bash", "zsh", 0 };
+	static const char cut[] = "\n... command output truncated for "
+	                          "persistence ...\n";
+	int it = k_obj(p, pl, a_item), v, k, r, n0;
+	char *id, *s = NULL, *b = NULL, *w, kb[XR_ID_MAX + 1];
+	size_t n = 0, bl = 0, l;
+	struct rcall *c, t;
+
+	if (it < 0 || !d->rk.hit)
+		return;
+	id = k_str(p, it, A_ID, NULL);
+	c = id ? rc_find(d, id_key(id, kb)) : NULL;
+	if (k_streq(p, it, A_TYPE, "CommandExecution") &&
+	    (s = k_str(p, it, a_ao, &n)))
+	{
+		/* [shell, -lc, script] its script, else its words joined */
+		v = j_get(p, it, a_cmd);
+		n0 = v >= 0 && p->tok[v].kind == JSON_ARRAY ? v + 1 : -1;
+		for (k = n0, r = 0; k >= 0 && k < p->tok[v].next;
+		     k = p->tok[k].next, r++)
+			;
+		k = -1;
+		if (r == 3 && p->tok[n0].kind == JSON_STRING &&
+		    (w = j_str(p, n0, &l)))
+		{
+			if (in_list(base(w), shells))
+				k = p->tok[n0].next;
+			free(w);
+		}
+		if (k >= 0 && p->tok[k].kind == JSON_STRING &&
+		    (w = j_str(p, k, &l)))
+		{
+			if (l >= 2 && w[0] == '-' && strchr(w, 'c'))
+				b = j_str(p, p->tok[k].next, &bl);
+			free(w);
+		}
+		for (k = n0; !b && k >= 0 && k < p->tok[v].next;
+		     k = p->tok[k].next)
+		{
+			char *nb;
+
+			if (p->tok[k].kind != JSON_STRING || !(w = j_str(p, k, &l)))
+				continue;
+			if (bl + l + 2 <= XR_BASH_MAX && (nb = realloc(b, bl + l + 2)))
+			{
+				b = nb;
+				if (bl)
+					b[bl++] = ' ';
+				memcpy(b + bl, w, l);
+				b[bl += l] = '\0';
+			}
+			free(w);
+		}
+		if (b && bl > XR_BASH_MAX)
+			b[bl = u8_cut(b, XR_BASH_MAX)] = '\0';
+		memset(&t, 0, sizeof t);
+		t.kind = RC_BASH;
+		t.cmd = b;
+		t.cl = bl;
+		d->read = b ? read_call(&t) : NULL;
+		v = j_get(p, it, a_ec);
+		cx_defs(d, b && !blank(b, bl) ? b : NULL, bl, s, n,
+		        (v >= 0 && p->tok[v].kind == JSON_PRIMITIVE &&
+		         atoi(p->text + p->tok[v].start) != 0) ||
+		        k_streq(p, it, a_st, "failed") ||
+		        k_streq(p, it, a_st, "declined"),
+		        v < 0 || j_null(p, v), !find(s, n, cut, 0), !c);
+		d->read = NULL;
+	}
+	else if (k_streq(p, it, A_TYPE, "McpToolCall") &&
+	         (r = k_obj(p, it, a_res)) >= 0 &&
+	         (v = j_get(p, r, A_CONTENT)) >= 0 &&
+	         p->tok[v].kind == JSON_ARRAY && (s = texts(p, v, &n)))
+		cx_defs(d, NULL, 0, s, n,
+		        ((v = j_get(p, it, a_err)) >= 0 && !j_null(p, v)) ||
+		        k_bool(p, r, A_ERR), 0, 1, !c);
+	if (c)
+		c->cxdone = 1;
+	free(b);
+	free(s);
 	free(id);
 }
 
@@ -8912,7 +9109,7 @@ cx_args(struct xr_claude *d, const struct json_parser *p, int pl)
 	    q.tok[0].kind == JSON_OBJECT)
 	{
 		refs_card(d, &q, 0);
-		cx_fetch_call(d, p, pl, &q);
+		cx_fetch_call(d, p, pl, &q, 0);
 	}
 	else
 		refs_text(d, s, n, XR_FIELD_CAP, XR_CODE);
@@ -9109,10 +9306,21 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 	         (s = k_str(p, pl, A_INPUT, &n)))
 	{
 		refs_text(d, s, n, XR_TEXT_CAP, XR_CODE);
+		/* #657: apply_patch a write (Claude's Edit: its result no
+		** definition), any other (code mode's exec) a generic card */
+		if ((r = k_str(p, pl, A_CALLID, NULL)))
+			(void)rc_push(d, r, k_streq(p, pl, A_NAME, "apply_patch") ||
+			              find(s, n, "*** Begin Patch", 0)
+			              ? RC_OTHER : RC_CARD);
+		free(r);
 		free(s);
 	}
 	else if (!strcmp(t, "local_shell_call"))
+	{
 		refs_card(d, p, k_obj(p, pl, A_ACTION));
+		if ((c = k_obj(p, pl, A_ACTION)) >= 0)
+			cx_fetch_call(d, p, pl, p, c);
+	}
 	else if (!strcmp(t, "function_call_output") ||
 	         !strcmp(t, "custom_tool_call_output"))
 	{
@@ -9140,6 +9348,11 @@ cx_line(struct xr_claude *d, const struct json_parser *p)
 		;
 	else if (!strcmp(t, "response_item"))
 		cx_item(d, p, pl);
+	else if (!strcmp(t, "event_msg"))
+	{
+		if (k_streq(p, pl, A_TYPE, "item_completed"))
+			cx_done(d, p, pl);
+	}
 	else if (!strcmp(t, "compacted"))
 	{
 		/* its summary, as a Claude compact summary's (3.6) */
