@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.176.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.177.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -632,6 +632,14 @@ error (`--history` and `--agent-list` take their own).
 | `not_utf8` | revive | The recorded command, cwd or Claude launch had bytes that are not UTF-8, stored as U+FFFD: it would run something else. `--history` still lists it; the detail gives `claude --resume <id>`. |
 | `not_started` | revive | The session did not start (the program cannot be executed: the reason is on stderr). |
 | `launch_unknown` | revive | Revived, but its Claude was not resumed: the launch command is unknown. |
+
+`--stop --json` and `--restart --include-agents --json` result lines end with
+`"agent":"claude"` or `"agent":"codex"`, the agent kind where dch knows it:
+`ok`, `failed`, `interrupted` and `skipped` alike (a Codex's `codex_daemon`,
+`no_thread`, `cwd_unknown` too). A line with no agent (a session running none,
+an error before detection such as `old_master`, `respawn_pending`, `self`,
+`not_claude`) carries `"agent":null`: the key is never left out. Plain
+`--restart` and every other verb are unchanged.
 
 A typical agent loop:
 

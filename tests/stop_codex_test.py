@@ -154,6 +154,9 @@ def main():
               j.get("result") == "ok", (r.returncode, r.stdout, r.stderr))
         check("idle: the pause message pasted, Tab, then /quit and Enter",
               sent_pause_then_quit(k), k)
+        check("idle: --stop's final line says \"agent\":\"codex\"",
+              j.get("agent") == "codex" and '"agent":"codex"}' in r.stdout,
+              r.stdout)
         check("idle: --stop reports the exit line's thread id",
               j.get("session_id") == T1, j)
         check("idle: the note names the snapshot's id it overrode",
@@ -232,7 +235,8 @@ def main():
             time.sleep(0.5)
             check("%s: --stop skipped/codex_daemon, nothing typed" % base,
                   r.returncode == 0 and j.get("result") == "skipped" and
-                  j.get("reason") == "codex_daemon" and keys(d) == [] and
+                  j.get("reason") == "codex_daemon" and
+                  j.get("agent") == "codex" and keys(d) == [] and
                   run("--read", n).returncode == 0, (r.stdout, keys(d)))
             r = run("--restart", n, "--include-agents", "--json")
             j = final(r)
@@ -301,6 +305,7 @@ def main():
         check("no id: --stop skipped/no_thread, nothing typed, still runs",
               r.returncode == 0 and j.get("result") == "skipped" and
               j.get("reason") == "no_thread" and j.get("detail") == NOTH and
+              j.get("agent") == "codex" and
               keys(d) == [] and run("--read", n).returncode == 0 and
               not (rec(n) or {}).get("end"), (r.stdout, r.stderr, keys(d)))
         run("-k", n)
@@ -340,6 +345,7 @@ def main():
               pr.returncode == 1 and j.get("result") == "interrupted" and
               "the pause message cannot be taken back from codex and still "
               "runs once its turn ends" in j.get("detail", "") and
+              j.get("agent") == "codex" and
               "/quit" not in "".join(keys(d)), (out, err))
         run("-k", n)
 
