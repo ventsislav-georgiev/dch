@@ -1,7 +1,7 @@
 # Process this file with autoconf to produce a configure script.
 # dch is a fork of dtach (C)Copyright 2004-2016 Ned T. Crigler, GPL-2.0-or-later.
 # Original attribution preserved in source headers, README, and COPYING.
-AC_INIT(dch, 1.174.0, https://github.com/ventsislav-georgiev/dch/issues)
+AC_INIT(dch, 1.175.0, https://github.com/ventsislav-georgiev/dch/issues)
 AC_PREREQ(2.60)
 AC_CONFIG_SRCDIR(dch.c)
 AC_CONFIG_HEADER(config.h)
@@ -100,41 +100,6 @@ AC_CHECK_HEADERS(fcntl.h sys/select.h sys/socket.h sys/time.h)
 AC_CHECK_HEADERS(sys/ioctl.h sys/resource.h pty.h termios.h util.h)
 AC_CHECK_HEADERS(libutil.h stropts.h)
 AC_HEADER_TIME
-
-# libzstd decodes Codex's compressed rollouts for X-ray (#656). The static
-# archive is preferred, so a release binary needs no libzstd at run time:
-# the compiler's own search path first, then Homebrew's zstd keg. Without
-# libzstd dch still builds; a .jsonl.zst rollout is then unavailable.
-dch_zstd=no
-for dch_zp in "" /opt/homebrew/opt/zstd /usr/local/opt/zstd; do
-	if test -z "$dch_zp"; then
-		dch_za=`$CC -print-file-name=libzstd.a 2>/dev/null`
-		dch_zi=
-	else
-		dch_za=$dch_zp/lib/libzstd.a
-		dch_zi=-I$dch_zp/include
-	fi
-	test -f "$dch_za" || continue
-	AC_MSG_CHECKING([for static libzstd at $dch_za])
-	dch_zold_cflags=$CFLAGS
-	dch_zold_libs=$LIBS
-	CFLAGS="$CFLAGS $dch_zi"
-	LIBS="$dch_za $LIBS"
-	AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <zstd.h>]],
-		[[return ZSTD_isError(ZSTD_decompressStream(0, 0, 0));]])],
-		[dch_zstd=static], [CFLAGS=$dch_zold_cflags; LIBS=$dch_zold_libs])
-	AC_MSG_RESULT([$dch_zstd])
-	test $dch_zstd = static && break
-done
-if test $dch_zstd = no; then
-	AC_CHECK_HEADER([zstd.h],
-		[AC_CHECK_LIB([zstd], [ZSTD_decompressStream],
-			[dch_zstd=shared; LIBS="-lzstd $LIBS"])])
-fi
-if test $dch_zstd != no; then
-	AC_DEFINE([HAVE_ZSTD], [1],
-		[Define if libzstd decodes compressed Codex rollouts])
-fi
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST

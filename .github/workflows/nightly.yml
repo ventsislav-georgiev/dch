@@ -25,13 +25,6 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install zstd (Codex's .jsonl.zst rollouts, #656)
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install zstd
-          else
-            sudo apt-get update -q && sudo apt-get install -y -q libzstd-dev
-          fi
       - name: Build and test under ASan + UBSan
         run: |
           if [ "${{ matrix.variant }}" = "lite" ]; then
@@ -46,13 +39,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install zstd (Codex's .jsonl.zst rollouts, #656)
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install zstd
-          else
-            sudo apt-get update -q && sudo apt-get install -y -q libzstd-dev
-          fi
       - name: Fuzz
         run: CC=clang FUZZ_ARTIFACTS=$PWD/fuzz-artifacts scripts/fuzz.sh 60
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.174.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.175.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -348,18 +348,13 @@ note and the default).
 A `DCH_TEST_TIMES` that is neither empty nor `0` prints each row group's seconds, longest first, before the
 counts.
 
-**Dependencies:** a C compiler (`clang` or `gcc`) and `autoconf`, plus
-libzstd (optional) for X-ray over Codex's compressed rollouts.
-- macOS: `xcode-select --install` (clang + make) + `brew install autoconf zstd`.
-- Debian/Ubuntu: `sudo apt install build-essential autoconf libzstd-dev`.
+**Dependencies:** a C compiler (`clang` or `gcc`) and `autoconf`.
+- macOS: `xcode-select --install` (clang + make) + `brew install autoconf`.
+- Debian/Ubuntu: `sudo apt install build-essential autoconf`.
 
-`./configure` links libzstd's static archive when it finds one (the
-compiler's search path, then Homebrew's `zstd` keg), else `-lzstd`. The
-release binaries and bottles carry it statically and need no libzstd at
-run time; the Homebrew formulas depend on `zstd` for source builds. Without
-libzstd dch still builds and runs: an ended Codex whose rollout Codex has
-compressed (`.jsonl.zst`) then answers `corpus: "none"`, `reason:
-"compressed"`.
+zstd's decoder, for X-ray over Codex's compressed rollouts, is vendored
+(`vendor/zstd`, its version and checksum in `vendor/zstd/README`) and
+compiled into dch: no system libzstd at build or run time.
 
 ## Install with an agent
 
@@ -1468,7 +1463,7 @@ The corpus:
     symlinked day directory or file is not followed); otherwise the answer is
     `corpus: "none"` with the id. It is opened and read like a Claude Code
     transcript, with the same limits.
-  - A `.zst` rollout is decoded (libzstd, streamed, at most 1 GiB out) once
+  - A `.zst` rollout is decoded (zstd, streamed, at most 1 GiB out) once
     into a private copy, `$TMPDIR/dch-zst-<uid>/` (0700, files 0600, named
     by the `.zst`'s device, inode, size and mtime), and that copy is read.
     The copy is reused, so chapter anchors hold from one query to the
@@ -1478,8 +1473,7 @@ The corpus:
     used ones past 4. A bad or truncated
     frame gives what decoded before it with `complete: false`, `why:
     "corrupt"`, or, when nothing decoded, `corpus: "none"`, `reason:
-    "corrupt"`; a copy cut at 1 GiB has `why: "range"`. A build without
-    libzstd answers `reason: "compressed"`. `--ref` and `--search` print
+    "corrupt"`; a copy cut at 1 GiB has `why: "range"`. `--ref` and `--search` print
     `dch: the Codex rollout is <reason>` before `no x-ray corpus`.
 - **Ended Codex** (#656). A History record that kept a Codex thread id and
   `CODEX_HOME` (`"codex":{"thread_id","home"}`, #655) answers from that
@@ -1594,8 +1588,8 @@ The corpus:
 - **None.** An ended or History shell (`reason: "ended"`), dch-lite
   (`"lite"`), `xray_ring 0` (`"off"`), a Claude session whose transcript is
   gone, or a Codex with no thread id or rollout (`reason: null`); a Codex
-  whose only rollout is a `.zst` this build cannot decode (`"compressed"`)
-  or a `.zst` that decodes to nothing (`"corrupt"`). An ended Codex whose
+  whose only rollout is a `.zst` that decodes to nothing (`"corrupt"`). An
+  ended Codex whose
   History record has no thread id answers as an ended shell (`reason:
   "ended"`).
   - **`claudes`.** Only while a shell's ring is paused for an agent: how many

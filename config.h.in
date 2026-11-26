@@ -102,9 +102,6 @@
 /* Define to 1 if you have the <util.h> header file. */
 #undef HAVE_UTIL_H
 
-/* Define if libzstd decodes compressed Codex rollouts */
-#undef HAVE_ZSTD
-
 /* Define to the address where bug reports for this package should be sent. */
 #undef PACKAGE_BUGREPORT
 

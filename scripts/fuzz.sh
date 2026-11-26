@@ -41,10 +41,8 @@ CF="-g -O1 -fno-omit-frame-pointer $SAN -fsanitize=fuzzer-no-link"
 ./configure --disable-hardening CC="$CC" CFLAGS="$CF" "$@" >/dev/null
 vt_objs=$(sed -n 's/^VT_OBJS = //p' Makefile)
 vt_libs=$(sed -n 's/^VT_LIBS = //p' Makefile)
-# configure's LIBS: libzstd when it found one (#656), dch.o calls it
-libs=$(sed -n 's/^LIBS = //p' Makefile)
 CF="$CF -I. -Ivendor/libghostty-vt/include"
-make attach.o master.o serve.o rframe.o remote.o bridge.o json.o picker.o xview.o ring.o xray.o xcmd.o xmem.o cargv.o $vt_objs >/dev/null
+make attach.o master.o serve.o rframe.o remote.o bridge.o json.o picker.o xview.o ring.o xray.o xcmd.o xmem.o cargv.o zstddeclib.o $vt_objs >/dev/null
 # dch.c has main(); the targets bring libFuzzer's.
 $CC $CF -Dmain=dch_main -c dch.c -o dch.o
 
@@ -56,7 +54,7 @@ ringld=
 rc=0
 for t in $targets; do
 	ld=
-	com="rframe.o bridge.o json.o picker.o xview.o ring.o xray.o xcmd.o xmem.o cargv.o"
+	com="rframe.o bridge.o json.o picker.o xview.o ring.o xray.o xcmd.o xmem.o cargv.o zstddeclib.o"
 	case $t in
 	json)  objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
 	frames|modes) objs="attach.o dch.o serve.o remote.o" ;;  # includes master.c
@@ -67,12 +65,12 @@ for t in $targets; do
 	       ld=$ringld ;;
 	xray|xref|xchapter|xsearch|xcmd|xmem) objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
 	xcut)  objs="attach.o master.o dch.o serve.o remote.o"  # includes picker.c, xray.c, xview.c
-	       com="rframe.o bridge.o json.o ring.o xcmd.o xmem.o cargv.o" ;;
+	       com="rframe.o bridge.o json.o ring.o xcmd.o xmem.o cargv.o zstddeclib.o" ;;
 	*)     objs="attach.o master.o serve.o remote.o" ;; # includes dch.c
 	esac
 	$CC $CF -Dmain=dch_main -fsanitize=fuzzer -o "fuzz_$t" \
 		"tests/fuzz/fuzz_$t.c" $objs $com \
-		$vt_objs $vt_libs $libs $ld
+		$vt_objs $vt_libs $ld
 	mkdir -p "corpus/$t"
 	cp "$src/tests/fuzz/corpus/$t"/* "corpus/$t/" 2>/dev/null || :
 	echo "fuzz_$t: ${secs}s"

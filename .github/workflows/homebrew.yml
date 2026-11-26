@@ -112,11 +112,6 @@ jobs:
               end
             end
 
-            # X-ray decodes Codex's .jsonl.zst rollouts (#656). Bottles link
-            # libzstd statically; a source build or a Linux bottle built
-            # without libzstd.a uses this one.
-            depends_on "zstd"
-
             conflicts_with "dch-lite", because: "both install a dch binary"
 
             def install
@@ -153,11 +148,6 @@ jobs:
                 satisfy { OS::Linux::Glibc.system_version >= Version.new("2.17") }
               end
             end
-
-            # X-ray decodes Codex's .jsonl.zst rollouts (#656). Bottles link
-            # libzstd statically; a source build or a Linux bottle built
-            # without libzstd.a uses this one.
-            depends_on "zstd"
 
             conflicts_with "dch", because: "both install a dch binary"
 

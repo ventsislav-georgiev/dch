@@ -1,0 +1,7 @@
+# zstd vendored source (vendor/zstd): xxhash intrinsics named *_key read
+# as generic API keys. Third-party code, checked by its pinned sha256.
+[extend]
+useDefault = true
+
+[allowlist]
+paths = ['''^vendor/zstd/''']
