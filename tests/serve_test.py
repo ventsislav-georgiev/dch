@@ -100,10 +100,12 @@ def main():
               (["--ref", "#1", "--ref", "#2", "--json"], "--ref twice"),
               (["--json", "--ref"], "--ref needs a value"),
               (["--follow", "--ref", "#1", "--json"],
-               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--ref, --search, --tasks, --memory, --questions, --follow, "
+               "--chapter and "
                "--clear exclude each other"),
               (["--clear", "--chapter", "a", "--json"],
-               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--ref, --search, --tasks, --memory, --questions, --follow, "
+               "--chapter and "
                "--clear exclude each other"),
               (["--clear", "--full", "--json"],
                "--scope, --full and --budget-ms come with --ref"),
@@ -131,22 +133,26 @@ def main():
               (["--ref", "#1", "--scope", "", "--json"], "bad scope"),
               (["--ref", "#1", "--scope", "none", "--json"], "bad scope"),
               (["--search", "a", "--ref", "#1", "--json"],
-               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--ref, --search, --tasks, --memory, --questions, --follow, "
+               "--chapter and "
                "--clear exclude each other"),
               (["--search", "ab", "--search", "cd", "--json"],
                "--search twice"),
               (["--json", "--search"], "--search needs a value"),
               (["--memory", "--memory", "--json"], "--memory twice"),
               (["--tasks", "--memory", "--json"],
-               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--ref, --search, --tasks, --memory, --questions, --follow, "
+               "--chapter and "
                "--clear exclude each other"),
               (["--memory"], "--xray needs --json (the view is "
                "client-side only)"),
               (["--tasks", "--memory", "--clear", "--follow", "--json"],
-               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--ref, --search, --tasks, --memory, --questions, --follow, "
+               "--chapter and "
                "--clear exclude each other"),
               (["--memory", "--search", "ab", "--json"],
-               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--ref, --search, --tasks, --memory, --questions, --follow, "
+               "--chapter and "
                "--clear exclude each other"),
               (["--memory", "--scope", "session", "--json"],
                "--scope, --full and --budget-ms come with --ref"),

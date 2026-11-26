@@ -324,6 +324,9 @@ const struct dch_conf config_keys[] = {
 	/* #405: a ref the transcripts do not define, from a command */
 	{ "define_command", 0, "", NULL,
 	  "X-ray's definition of a ref from a command; empty: none" },
+	/* #652: open questions (--questions), from a command only */
+	{ "questions_command", 0, "", NULL,
+	  "X-ray's open questions from a command; empty: none" },
 	/* #507: #N, o/r#N and issue/pull URLs resolved by gh (read-only) */
 	{ "xray_github", 1, "true", NULL,
 	  "X-ray looks up GitHub issues and pull requests with gh" },
@@ -3006,6 +3009,8 @@ usage(void)
 	    "                                             as one JSON object;\n"
 	    "  dch --xray <n> --tasks --json              the session's task list\n"
 	    "                                             as JSON lines;\n"
+	    "  dch --xray <n> --questions --json          questions_command's open\n"
+	    "                                             questions as JSON lines;\n"
 	    "                                             <n> as host:name runs\n"
 	    "                                             on that host's dch serve\n"
 	    "  dch --xray host:name --requests --json     one warm connection: X-ray\n"
@@ -13791,6 +13796,24 @@ xr_since_one(const char *path, const struct stat *st, int codex,
 	return rc < 0 ? xr_failed() : xr_out_exit(rc == 0);
 }
 
+/* DCH_SESSION_HARNESS and DCH_SESSION_ALIAS: what --ls-json prints as
+** "harness" and "alias" for session ("" when none or not live). Called only
+** when a command is about to run. */
+static void
+xr_names(const char *session, char *harness, char *alias, size_t cap)
+{
+	struct slist sl = {0};
+
+	harness[0] = alias[0] = '\0';
+	slist_push(&sl, session);
+	load_aliases(&sl);
+	load_harness_names(&sl);
+	load_codex_names(&sl);
+	snprintf(harness, cap, "%s", sl.harness[0] ? sl.harness[0] : "");
+	snprintf(alias, cap, "%s", sl.alias[0] ? sl.alias[0] : "");
+	slist_free(&sl);
+}
+
 /* #405: a ref no file read defined: the user's define_command (their own
 ** dch config only), run with the ref as written (the --ref text, a peer's
 ** through dch serve; #411) as its last word and DCH_REF, X-ray's key text
@@ -13812,13 +13835,15 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 {
 	struct xcmd_result res;
 	struct stat st;
-	char cmd[1024], warn[XCMD_WARN_MAX] = "", ref[260];
+	char cmd[1024], warn[XCMD_WARN_MAX] = "", ref[260], hn[600] = "",
+	     an[600] = "";
 	/* a session cwd not known or gone (an ended session's worktree):
 	** HOME */
 	struct xcmd_ctx c = { cmd, session, label[0] == '/' &&
 	                      stat(label, &st) == 0 && S_ISDIR(st.st_mode)
 	                      ? label : getenv("HOME"), agent, asid,
-	                      ref, xr_shape_name[sp->shape], xr_span_text(sp) };
+	                      ref, xr_shape_name[sp->shape], xr_span_text(sp),
+	                      hn, an };
 	int set, d0 = xr_scan_defs(sc);
 
 	if (xr_scan_cancelled(sc))
@@ -13834,6 +13859,7 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 	else if (set > 0 && cmd[0])
 	{
 		xr_scan_lead(sc);
+		xr_names(session, hn, an, sizeof hn);
 		if (xcmd_rows(XCMD_DEFINE, &c, xr_cmd_def, sc, &res) == 0)
 			snprintf(warn, sizeof warn, "%s", res.warn[0] ? res.warn
 			         : "define_command: no definition printed");
@@ -14666,7 +14692,7 @@ xr_tkc_row(const char *line, void *arg)
 	if (!k->n++)
 	{
 		fputs("{\"schema\":1", k->o);
-		if (k->kind == XCMD_TASK)	/* --memory's header has neither */
+		if (k->kind != XCMD_MEMORY)	/* --memory's header has neither */
 		{
 			fputs(",\"session\":", k->o);
 			xr_put_str(k->o, k->session);
@@ -14698,12 +14724,14 @@ xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
 	struct xcmd_result res;
 	struct xr_tkc k = { kind, session, sid, &res, 0, o };
 	char cmd[1024];
-	const char *what = kind == XCMD_TASK ? "tasks_command" : "memory_command";
+	const char *what = kind == XCMD_TASK ? "tasks_command" : kind ==
+	                   XCMD_QUESTION ? "questions_command" : "memory_command";
+	char hn[600], an[600];
 	int set;
 	/* a session cwd not known: HOME, never the querying process's (a
 	** dch serve ctl's is the peer's choice) */
 	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
-	                      agent, asid, NULL, NULL, NULL };
+	                      agent, asid, NULL, NULL, NULL, hn, an };
 
 	warn[0] = '\0';
 	if ((set = dch_config_get(what, cmd, sizeof cmd)) < 0)
@@ -14711,6 +14739,7 @@ xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
 		         "over 1023 bytes)", what);
 	if (set <= 0 || !cmd[0])
 		return 0;
+	xr_names(session, hn, an, sizeof hn);
 	if (xcmd_rows(kind, &c, xr_tkc_row, &k, &res) == 0)
 	{
 		snprintf(warn, cap, "%s", res.warn);
@@ -14731,12 +14760,22 @@ xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
 	return 1;
 }
 
+/* --questions (#652): questions_command's answer, else (no command, no
+** row, a failure: its warn) source "none" and no row; no built-in list */
+static int
+xr_qs_none(const char *session, const char *sid, const char *warn)
+{
+	return xr_out_exit(xr_tasks_print(stdout, NULL, session, sid, 0,
+	                                  warn) == 0);
+}
+
 /* --tasks: the user's tasks_command first (#321), whatever the session;
 ** else a Claude session's transcript (live or ended), a live Codex's
 ** rollout, as --chapter finds them (none found: no corpus); a shell, live
-** or ended, keeps no task list: source "none". */
+** or ended, keeps no task list: source "none". kind XCMD_QUESTION
+** (--questions): the same session, command and header, xr_qs_none after. */
 static int
-xr_tasks_q(const struct xr_target *t)
+xr_list_q(const struct xr_target *t, enum xcmd_kind kind)
 {
 	struct ring_snap rs;
 	struct cmd_info ci;
@@ -14750,10 +14789,12 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		snprintf(cwd, sizeof cwd, "%s",
 		         t->rec->acwd[0] ? t->rec->acwd : t->rec->cwd);
-		if (xr_cmd(stdout, XCMD_TASK, t->name, t->rec->sid, cwd,
+		if (xr_cmd(stdout, kind, t->name, t->rec->sid, cwd,
 		           t->rec->sid[0] ? "claude" : "", t->rec->sid, warn,
 		           sizeof warn, &rc))
 			return rc;
+		if (kind == XCMD_QUESTION)
+			return xr_qs_none(t->name, t->rec->sid, warn);
 		return t->rec->sid[0] ? xr_tasks_claude(t->rec->acfg, t->rec->sid,
 		                                        t->name, warn)
 		       : xr_out_exit(xr_tasks_print(stdout, NULL, t->name, "",
@@ -14772,9 +14813,11 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		if (c.cwd[0])
 			snprintf(cwd, sizeof cwd, "%s", c.cwd);
-		if (xr_cmd(stdout, XCMD_TASK, t->name, c.sid, cwd, "claude", c.sid,
+		if (xr_cmd(stdout, kind, t->name, c.sid, cwd, "claude", c.sid,
 		           warn, sizeof warn, &rc))
 			return rc;
+		if (kind == XCMD_QUESTION)
+			return xr_qs_none(t->name, c.sid, warn);
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn)
 		              : xr_tasks_none(t->name, c.sid, warn);
@@ -14783,9 +14826,11 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		if (xc.cwd[0])
 			snprintf(cwd, sizeof cwd, "%s", xc.cwd);
-		if (xr_cmd(stdout, XCMD_TASK, t->name, xc.tid, cwd, "codex", xc.tid,
+		if (xr_cmd(stdout, kind, t->name, xc.tid, cwd, "codex", xc.tid,
 		           warn, sizeof warn, &rc))
 			return rc;
+		if (kind == XCMD_QUESTION)
+			return xr_qs_none(t->name, xc.tid, warn);
 		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
 		                                 &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
@@ -14794,11 +14839,16 @@ xr_tasks_q(const struct xr_target *t)
 	/* the ring's header for the session_id, as the other forms give it */
 	if (ring_fetch(t->sock, &rs, NULL, NULL) == -1)
 		return xr_no_session();
-	if (xr_cmd(stdout, XCMD_TASK, t->name, rs.sid, cwd, "", "", warn,
+	if (xr_cmd(stdout, kind, t->name, rs.sid, cwd, "", "", warn,
 	           sizeof warn, &rc))
 		return rc;
-	return xr_out_exit(xr_tasks_print(stdout, NULL, t->name, rs.sid, 0,
-	                                  warn) == 0);
+	return xr_qs_none(t->name, rs.sid, warn);
+}
+
+static int
+xr_tasks_q(const struct xr_target *t)
+{
+	return xr_list_q(t, XCMD_TASK);
 }
 
 /* --memory (#322): a Claude session's memory directory (beside its
@@ -17046,7 +17096,7 @@ xray_main(int argc, char **argv)
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL, *search = NULL, *since = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
-	int requests = 0, tasks = 0, memory = 0, nogh = 0;
+	int requests = 0, tasks = 0, memory = 0, nogh = 0, questions = 0;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -17110,6 +17160,8 @@ xray_main(int argc, char **argv)
 			tasks = 1;
 		else if (!strcmp(argv[k], "--memory") && !memory)
 			memory = 1;
+		else if (!strcmp(argv[k], "--questions") && !questions)
+			questions = 1;
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
@@ -17121,7 +17173,8 @@ xray_main(int argc, char **argv)
 			           !strcmp(argv[k], "--requests") ||
 			           !strcmp(argv[k], "--no-github") ||
 			           !strcmp(argv[k], "--tasks") ||
-			           !strcmp(argv[k], "--memory")) ? " twice"
+			           !strcmp(argv[k], "--memory") ||
+			           !strcmp(argv[k], "--questions")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -17153,7 +17206,7 @@ xray_main(int argc, char **argv)
 	}
 	/* --since (#516): a recap of its own, --json only */
 	if (since && (ref || search || chapter || clear || follow || tasks ||
-	              memory || scope || full || budget))
+	              memory || questions || scope || full || budget))
 	{
 		fputs("dch: bad usage: --since takes --json only\n", stderr);
 		return 2;
@@ -17180,6 +17233,18 @@ xray_main(int argc, char **argv)
 		        : search ? "--search" : "--tasks");
 		return 2;
 	}
+	/* --questions (#652): one-shot only; --follow carries no questions
+	** block (shortcut: a client polls; upgrade with a block [2] in xr_follow
+	** when one needs the stream) */
+	if (questions && (ref || search || chapter || clear || tasks || memory ||
+	                  follow))
+	{
+		fprintf(stderr, "dch: bad usage: --questions and %s\n",
+		        ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
+		        : clear ? "--clear" : tasks ? "--tasks" : memory ? "--memory"
+		        : "--follow (it carries --tasks and --memory only)");
+		return 2;
+	}
 	if (follow && (ref || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --follow and %s\n",
@@ -17203,7 +17268,7 @@ xray_main(int argc, char **argv)
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
 		    budget || search || tasks || memory || since ||
-		    nogh)
+		    nogh || questions)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -17317,7 +17382,7 @@ xray_main(int argc, char **argv)
 	q.txt = search && !json && !name_routes_remote(n);
 	/* the view (#175): `--xray <n>` alone */
 	if (!json && (ref || chapter || clear || follow || (search && !q.txt) ||
-	              tasks || memory || since))
+	              tasks || memory || questions || since))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
@@ -17352,6 +17417,7 @@ xray_main(int argc, char **argv)
 		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t, tasks, memory)
 		     : chapter ? xr_chapter(&t, chapter)
 		     : tasks ? xr_tasks_q(&t)
+		     : questions ? xr_list_q(&t, XCMD_QUESTION)
 		     : memory ? xr_memory(&t)
 		     : xr_json(&t, ref || search || since ? &q : NULL, 0);
 	hrec_free(r, nr);

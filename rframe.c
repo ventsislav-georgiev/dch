@@ -663,7 +663,8 @@ xray_since(const char *s, long long now)
 ** flags in any order, each once: --json, required (the view is the
 ** client's own, as --requests is); one of --follow, --ref <text>,
 ** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
-** (#322), --since <time> (#516) and --clear, but --follow takes --tasks and
+** (#322), --questions (#652), --since <time> (#516) and --clear, but
+** --follow takes --tasks and
 ** --memory (#446);
 ** --scope with --ref or --search (#501), --full
 ** and --budget-ms only with --ref, as --no-github (#518). A value is the next element even when it
@@ -680,11 +681,11 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	                                   "--full", "--ref", "--chapter",
 	                                   "--scope", "--budget-ms", "--search",
 	                                   "--tasks", "--memory", "--since",
-	                                   "--no-github" };
+	                                   "--no-github", "--questions" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
 	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256,
 	       X_TASKS = 512, X_MEMORY = 1024, X_SINCE = 2048,
-	       X_NOGH = 4096 };
+	       X_NOGH = 4096, X_QUESTIONS = 8192 };
 	const char *val[12] = { NULL };
 	unsigned seen = 0, k, one;
 	int i;
@@ -697,9 +698,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 13 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 14 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 13)
+		if (k == 14)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -720,7 +721,7 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 		}
 	}
 	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
-	              X_TASKS | X_MEMORY | X_SINCE);
+	              X_TASKS | X_MEMORY | X_SINCE | X_QUESTIONS);
 	if (seen & X_FOLLOW)	/* the stream carries them (#446) */
 		one &= ~(unsigned)(X_TASKS | X_MEMORY);
 	if (!(seen & X_JSON))
@@ -732,7 +733,8 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 		return ctl_no(why, cap, "--since takes --json only");
 	if (one & (one - 1))
 		return ctl_no(why, cap, "--ref, --search, --tasks, --memory, "
-		              "--follow, --chapter and --clear exclude each other");
+		              "--questions, --follow, --chapter and --clear "
+		              "exclude each other");
 	/* --scope goes with --search too (#498, #501) */
 	if (seen & (X_FULL | X_BUDGET) && !(seen & X_REF))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "

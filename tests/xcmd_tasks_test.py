@@ -121,7 +121,8 @@ ENVS = script("envs.py", r'''
 import json, os, sys
 print(json.dumps({"title": "Env list"}))
 for k in ("DCH_SESSION", "DCH_SESSION_CWD", "DCH_AGENT",
-          "DCH_AGENT_SESSION_ID", "DCH_ROWS_MAX"):
+          "DCH_AGENT_SESSION_ID", "DCH_ROWS_MAX", "DCH_SESSION_HARNESS",
+          "DCH_SESSION_ALIAS"):
     print(json.dumps({"id": k, "title": "<%s>" % os.environ.get(k, "UNSET"),
                       "status": "in_progress"}))
 print(json.dumps({"id": "cwd", "title": "<%s>" % os.getcwd()}))
@@ -230,10 +231,10 @@ def main():
           ls[0]["session"] == "xt-ended" and ls[0]["session_id"] == SID and
           ls[0]["partial"] is False, (rc, out[:600], err))
     check("rows: only the command's rows, canonical, then done, no warn",
-          len(ls) == 9 and "Built-in task" not in out and
+          len(ls) == 11 and "Built-in task" not in out and
           ls[1]["task"]["status"] == "active" and
           ls[1]["task"]["label"] == "in_progress" and
-          ls[-1] == {"done": True, "count": 7, "dropped": 0}, out[-600:])
+          ls[-1] == {"done": True, "count": 9, "dropped": 0}, out[-600:])
     check("rows: an ended Claude's environment (session, agent, its id)",
           got.get("DCH_SESSION") == "<xt-ended>" and
           got.get("DCH_AGENT") == "<claude>" and
@@ -244,6 +245,43 @@ def main():
           got.get("cwd") == "<%s>" % PROJ, got)
     check("rows: argv as the config line splits it, no shell",
           got.get("argv") == "<one arg two>", got)
+
+    # --- DCH_SESSION_HARNESS / DCH_SESSION_ALIAS: always set -----------------
+    ENV["DCH_SESSION_HARNESS"] = "bogus-h"	# inherited, must not leak
+    ENV["DCH_SESSION_ALIAS"] = "bogus-a"
+    rc, out, ls, err = tasks("xt-ended")
+    g = seen(ls)
+    check("names: none known -> both set and empty, the caller's replaced",
+          g.get("DCH_SESSION_HARNESS") == "<>" and
+          g.get("DCH_SESSION_ALIAS") == "<>" and "bogus" not in out, g)
+    sock = os.path.join(T, "dch-%d" % os.getuid())
+    with open(os.path.join(sock, "xt-ended.sock.alias"), "w") as f:
+        f.write("my alias\n")
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sdir, exist_ok=True)
+    penv = dict(os.environ, DCH_SESSION="xt-ended")
+    # not a platform binary: macOS hides its env from other processes
+    proc = subprocess.Popen([PY, "-c", "import time; time.sleep(60)"],
+                            env=penv,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        with open(os.path.join(sdir, "%d.json" % proc.pid), "w") as f:
+            json.dump({"pid": proc.pid, "sessionId": "x", "cwd": "/",
+                       "name": "perf-1"}, f, separators=(",", ":"))
+        time.sleep(0.5)
+        rc, out, ls, err = tasks("xt-ended")
+        g = seen(ls)
+        check("names: alias sidecar and harness record -> both values",
+              g.get("DCH_SESSION_HARNESS") == "<perf-1>" and
+              g.get("DCH_SESSION_ALIAS") == "<my alias>" and
+              "bogus" not in out, ({k: v for k, v in g.items() if "NAME" in k or "HARN" in k or "ALIAS" in k}, err))
+    finally:
+        proc.kill()
+        proc.wait()
+        os.unlink(os.path.join(sdir, "%d.json" % proc.pid))
+        os.unlink(os.path.join(sock, "xt-ended.sock.alias"))
+        del ENV["DCH_SESSION_HARNESS"], ENV["DCH_SESSION_ALIAS"]
 
     # --- the header comes at the first row, before the command ends ------
     slow = script("slow.sh", "echo '{\"title\":\"Slow\"}'\n"
@@ -413,7 +451,7 @@ for k in range(50001):
         check("shell with a command: source command, its rows",
               rc == 0 and ls and ls[0]["source"] == "command" and
               ls[0]["session_id"] == sls[0]["session_id"] and
-              ls[-1]["count"] == 7, (out[:500], err))
+              ls[-1]["count"] == 9, (out[:500], err))
         check("shell: no agent, the session's cwd",
               got.get("DCH_AGENT") == "<>" and
               got.get("DCH_AGENT_SESSION_ID") == "<>" and
