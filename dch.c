@@ -9339,7 +9339,7 @@ restart_agents(int force, const char *only, int json)
 ** own, so --all costs the slowest session, not the sum (ag_type alone may
 ** take ~25 s). A Codex session (#658) goes through the same gate and
 ** typing, its composer read by codex_composer_find, every text pasted, and
-** Tab in place of Enter while busy (say_type). */
+** Tab in place of Enter but for a "/" text (say_type). */
 
 /* Outcomes; from SAY_NO_SESSION on they are failures. */
 enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
@@ -9440,21 +9440,12 @@ say_type(const char *path, const char *text, int paste)
 	default:
 		return SAY_NO_SCREEN;
 	}
+	/* Codex: Tab, which queues into a running turn where Enter would steer
+	** it, and submits on an idle composer as Enter does (spec A5); so no
+	** busy read, which streaming would fool. A "/" text keeps Enter: the
+	** slash popup takes Tab. */
 	if (ty_codex && *text != '/')
-	{
-		/* busy: Enter would steer the running turn, Tab queues it for
-		** its end, as Claude's Enter does (spec A5). A "/" text keeps
-		** Enter: the slash popup takes Tab. shortcut: the busy row is
-		** hidden while an answer streams, so Enter steers then; upgrade
-		** by reading the rollout's last task event. */
-		int novt;
-		char *f = screen_tail(path, &novt);
-
-		if (f && det_match(det_working, sizeof(det_working) /
-		                   sizeof(det_working[0]), f))
-			ty_key = "\t";
-		free(f);
-	}
+		ty_key = "\t";
 	t = ag_type(path, text, paste);
 	/* a "!" text left behind is a loaded shell command: the person's next
 	** Enter runs it with no permission prompt, so take it back (#635).

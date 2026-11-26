@@ -3,8 +3,10 @@
 A native `codex` (tests/fake_codex.c) runs tests/fake_codex_tui.py, which
 paints Codex 0.167's screens (parity spec A1-A5) and logs every key it reads.
 HOME and the runtime dir are temporary; no real Codex runs. Covers: idle
-composer (pasted, then Enter: sent), busy (pasted, then Tab: queued, never
-Enter, which would steer the turn), a "!" text (pasted, so no shell mode),
+composer (pasted, then Tab, which submits there: sent), busy and streaming
+(the busy row hidden) (pasted, then Tab: queued, never Enter, which would
+steer the turn), a "!" text (pasted, so no shell mode, then Tab), a "/"
+text (pasted, then Enter: the slash popup takes Tab),
 an approval dialog (skipped/prompt, no key), no composer and the side
 conversation's composer (skipped/no_screen, no key). On dch-lite every Codex
 session is skipped/no_screen with nothing typed, as for Claude.
@@ -77,7 +79,7 @@ def main():
                        check=True, capture_output=True,
                        env=dict(os.environ, FAKE_CODEX_DIR=d))
         want = {"idle": "Ask Codex", "busy": "to interrupt)",
-                "dialog": "Press enter to confirm", "none": "Loading",
+                "dialog": "Press enter to confirm", "none": "Loading", "stream": "Streaming",
                 "side": "follow-up"}[mode]
         if not lite:
             until(lambda: want in run("--read", n).stdout)
@@ -115,7 +117,8 @@ def main():
                   j.get("reason") == "no_screen", j)
             check("lite: nothing typed", keys(d) == [], keys(d))
             return
-        # idle: pasted, then Enter as a later push (spec A4), sent
+        # idle: pasted, then Tab as a later push (spec A4): Tab submits an
+        # idle composer as Enter does (A5), sent
         n, d = sess("idle", "idle")
         rc, j = say(n, "hello codex")
         k = keys(d)
@@ -124,18 +127,35 @@ def main():
               j)
         check("idle: the text arrived as one bracketed paste",
               "\x1b[200~hello codex\x1b[201~" in k, k)
-        check("idle: then Enter on its own, no Tab",
-              k[-1:] == ["\r"] and "\t" not in "".join(k), k)
+        check("idle: then Tab on its own, no Enter",
+              k[-1:] == ["\t"] and "\r" not in "".join(k), k)
         check("idle: the composer is empty again, the text in history",
               until(lambda: "› hello codex" in run("--read", n).stdout),
               run("--read", n).stdout)
         # a "!" text is pasted too: no shell mode in Codex
         rc, j = say(n, "!", "ls")
         k2 = keys(d)[len(k):]
-        check("idle '!': pasted whole, then Enter, sent",
+        check("idle '!': pasted whole, then Tab, sent",
               rc == 0 and j.get("result") == "ok" and
-              "\x1b[200~! ls\x1b[201~" in k2 and k2[-1:] == ["\r"],
+              "\x1b[200~! ls\x1b[201~" in k2 and k2[-1:] == ["\t"],
               (j, k2))
+        # a "/" text keeps Enter: Codex's slash popup takes Tab
+        rc, j = say(n, "/status")
+        k3 = keys(d)[len(k) + len(k2):]
+        check("idle '/': pasted, then Enter, no Tab, sent",
+              rc == 0 and j.get("result") == "ok" and
+              "\x1b[200~/status\x1b[201~" in k3 and k3[-1:] == ["\r"] and
+              "\t" not in "".join(k3), (j, k3))
+
+        # streaming: the busy row hidden, the plain composer, fresh output
+        # (spec A2): still Tab, so the message queues instead of steering
+        n, d = sess("stream", "stream")
+        rc, j = say(n, "when you are done")
+        k = keys(d)
+        check("streaming: sent, pasted, then Tab, never Enter",
+              rc == 0 and j.get("result") == "ok" and
+              "\x1b[200~when you are done\x1b[201~" in k and
+              k[-1:] == ["\t"] and "\r" not in "".join(k), (j, k))
 
         # busy: Tab queues for the turn's end; Enter would steer it
         n, d = sess("busy", "busy")

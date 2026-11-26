@@ -3,12 +3,13 @@ tests/fake_codex.c under FAKE_CODEX_TUI. Strings from the parity spec, A1-A5.
 
 $FAKE_CODEX_DIR/mode holds the screen: idle (the empty composer), busy (the
 same plus the Working row), dialog (an exec approval), none (no composer),
-side (the side conversation's composer). Every read from the terminal is
+side (the side conversation's composer), stream (an answer streaming: no
+busy row, the plain composer, fresh output; Tab queues there). Every read from the terminal is
 appended to $FAKE_CODEX_DIR/keys.log as one JSON string per line. A paste
 fills the composer; Enter submits it (shown as history), Tab queues it while
 busy (shown under "Queued follow-up inputs"); a dialog takes no input.
 """
-import json, os, select, sys, termios, tty
+import json, os, select, sys, time, tty
 
 D = os.environ["FAKE_CODEX_DIR"]
 DIM, OFF = "\x1b[2m", "\x1b[0m"
@@ -59,7 +60,8 @@ def main():
         m = mode()
         if m == "exit":
             return
-        st = (m, draft, len(hist), len(queued))
+        st = (m, draft, len(hist), len(queued),
+              int(time.time() * 10) if m == "stream" else 0)
         if st != last:
             paint(m, draft, hist, queued)
             last = st
@@ -85,7 +87,7 @@ def main():
                 hist.append(draft)
                 draft, buf = "", buf[1:]
             elif buf[0] == "\t" and draft:
-                (queued if m == "busy" else hist).append(draft)
+                (queued if m in ("busy", "stream") else hist).append(draft)
                 draft, buf = "", buf[1:]
             else:
                 if buf[0] >= " ":
