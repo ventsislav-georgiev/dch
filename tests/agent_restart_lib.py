@@ -202,6 +202,29 @@ def main(part):
                   "no_screen" and
                   all(o.get("phase") == "master" for o in objs
                       if o["name"] != n))
+            # #673: a Codex and a shell get a final line too
+            cxb = subprocess.run(["cc", "-o", os.path.join(bindir, "codex"),
+                                  os.path.join(HERE, "fake_codex.c")],
+                                 capture_output=True)
+            d = os.path.join(tmp, "cxdir")
+            os.makedirs(d, exist_ok=True)
+            os.environ["FAKE_CODEX_DIR"] = d
+            xn = sess("litex", "codex", "--no-daemon")
+            del os.environ["FAKE_CODEX_DIR"]
+            sn = sess("lites", "sh")
+            time.sleep(0.5)
+            r = restart_all("--json")
+            fin = agent_finals(ndjson(r.stdout))
+            got = {k: ((fin.get(v) or {}).get("result"),
+                       (fin.get(v) or {}).get("reason"),
+                       (fin.get(v) or {}).get("agent"))
+                   for k, v in (("c", n), ("x", xn), ("s", sn))}
+            check("lite: --all --json, one final per session: Claude and "
+                  "Codex skipped/no_screen, the shell skipped/not_claude/null",
+                  cxb.returncode == 0 and got == {
+                      "c": ("skipped", "no_screen", "claude"),
+                      "x": ("skipped", "no_screen", "codex"),
+                      "s": ("skipped", "not_claude", None)})
             r = run("--restart", "--all")
             check("lite: no note without --include-agents",
                   "agents:" not in r.stdout)
