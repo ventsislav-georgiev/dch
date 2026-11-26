@@ -545,6 +545,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "new sessions: statusline links, no OSC 8 into pipes (#122)" hyperlink_env_test.py
     pyrun "--say messages Claude sessions (busy too), gated" say_test.py
     pyrun "--say types into Codex: Enter idle, Tab busy, never a dialog (#658)" say_codex_test.py
+    pyrun "--stop / --include-agents pause, /quit and resume a Codex (#659)" stop_codex_test.py
     pyrun "--run into a Claude session goes through the gate (#112)" run_agent_test.py
     pyrun "--say/--run/--revive stop safely on a signal (#126)" verb_signal_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
@@ -1374,6 +1375,9 @@ pyrun "the --xray answer's claudes and the view's line for it, local and over a 
 # a live Codex's rollout (#160, 7.4): the one-UUID mapping, the seam, --ref,
 # --follow; its ring-pause part skips itself without the mirror
 pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex_test.py
+# an ended Codex's rollout through its History record (#656): plain, .zst,
+# the _<rollout-id> name, .jsonl over .zst, a corrupt .zst
+pyrun "xray: an ended Codex's rollout via History, .jsonl.zst too" xray_codex_ended_test.py
 # --memory (#322): memories and instruction files, Claude and Codex, serve
 pyrun "xray --memory: memories, instruction files, Claude, Codex, serve" xray_memory_test.py
 # the file window's guard (#178): QA's repro with FAKE files, local and over

@@ -115,17 +115,21 @@ def main():
         shutil.copy2(os.path.abspath(DCH), codex_host)
 
         # dch sessions to resolve against.
-        for name in ("hn-named", "hn-derived", "hn-codex-old",
+        for name in ("hn-named", "hn-derived",
                      "hn-codex-empty", "hn-codex-wrong", "hn-codex-stale",
                      "hn-codex-malformed", "hn-inherited", "hn-esc",
-                     "hn-spaced", "hn-nul"):
+                     "hn-spaced", "hn-nul", "hn-osc", "hn-bidi", "hn-long"):
             subprocess.run([DCH, "--spawn", name, "sleep", "60"], check=True)
         # A Codex TUI runs under its session's master: that is what makes
         # its snapshot its own (#083).
-        for name in ("hn-codex", "hn-codex-shared"):
+        # hn-codex-inh (#665) also inherits a parent Codex's thread ID.
+        for name in ("hn-codex", "hn-codex-shared", "hn-codex-old",
+                     "hn-codex-inh"):
             subprocess.run([DCH, "--spawn", name, codex_host, "--wait", name,
                             "--state", "done", "--timeout", "60000"],
-                           check=True)
+                           check=True,
+                           env=dict(os.environ, CODEX_THREAD_ID="codex-parent")
+                           if name == "hn-codex-inh" else None)
 
         p1 = spawn_env_proc("hn-named", "hn-named")
         procs.append(p1)
@@ -155,25 +159,30 @@ def main():
                             CODEX_THREAD_ID="codex-wrong")
         p7 = spawn_env_proc("hn-codex-malformed", "hn-codex-malformed",
                             CODEX_THREAD_ID="codex-malformed")
-        p8 = spawn_env_proc("hn-codex-old", "hn-codex-old",
-                            executable=codex, CODEX_THREAD_ID="codex-old")
         p9 = spawn_env_proc("hn-inherited", "hn-inherited",
                             CODEX_THREAD_ID="codex-inherited")
-        procs.extend((p4, p5, p6, p7, p8, p9))
+        procs.extend((p4, p5, p6, p7, p9))
         # #661: the record is parsed as JSON: escapes decoded, \" kept,
         # spaced "name" : form matched, \u0000 is refused by the parser.
         for sess, raw in (
                 ("hn-esc", r'{"pid":%d,"name":"caf\u00e9 \"q\" \u001b[0m"}'),
                 ("hn-spaced", '{"pid":%d, "name" : "spaced x" }'),
-                ("hn-nul", r'{"pid":%d,"name":"ab\u0000cd"}')):
+                ("hn-nul", r'{"pid":%d,"name":"ab\u0000cd"}'),
+                ("hn-osc", r'{"pid":%d,"name":"t\u001b]0;pwned\u0007\u001b[2Jx"}'),
+                ("hn-bidi", r'{"pid":%d,"name":"a\u202eb\u2067c\u0085d"}'),
+                ("hn-long", '{"pid":%d,"name":"' + "\u00e9" * 750 + '"}')):
             pe = spawn_env_proc(sess, sess)
             procs.append(pe)
             with open(os.path.join(sessdir, "%d.json" % pe.pid), "w") as f:
                 f.write(raw % pe.pid)
         write_codex_snapshot(home, "codex-live", "hn-codex")
         write_codex_snapshot(home, "codex-foreign", "hn-codex-shared")
+        write_codex_snapshot(home, "codex-old", "hn-codex-old")
+        write_codex_snapshot(home, "codex-own", "hn-codex-inh")
         write_codex_index(home, [
             {"id": "codex-live", "thread_name": "my-codex"},
+            {"id": "codex-own", "thread_name": "own-codex"},
+            {"id": "codex-parent", "thread_name": "parent-codex"},
             {"id": "codex-old", "thread_name": "old-codex"},
             {"id": "codex-inherited", "thread_name": "not-codex"},
             {"id": "codex-empty", "thread_name": ""},
@@ -186,7 +195,14 @@ def main():
         check("named harness session resolved",
               sl.get("hn-named", {}).get("harness") == "my-claude")
         check("escaped name decoded (u00e9, \\\", ESC)",
-              sl.get("hn-esc", {}).get("harness") == 'caf\u00e9 "q" \x1b[0m')
+              sl.get("hn-esc", {}).get("harness") == 'caf\u00e9 "q"  [0m')
+        check("controls become spaces in --ls-json",
+              sl.get("hn-osc", {}).get("harness") == "t ]0;pwned  [2Jx")
+        check("bidi/C1 controls replaced by one space each",
+              sl.get("hn-bidi", {}).get("harness") == "a b c d")
+        lng = sl.get("hn-long", {}).get("harness", "")
+        check("1500-byte name cut at a UTF-8 boundary, not dropped",
+              0 < len(lng.encode()) <= 1000 and lng.strip("\u00e9") == "")
         check("spaced \"name\" : record matched",
               sl.get("hn-spaced", {}).get("harness") == "spaced x")
         check("NUL in name: record rejected by the parser, no name",
@@ -197,14 +213,22 @@ def main():
               sl.get("hn-codex", {}).get("harness") == "my-codex")
         check("shared-daemon snapshot names no session",
               sl.get("hn-codex-shared", {}).get("harness") == "")
-        check("older Codex env ID resolved",
+        check("Codex snapshot thread resolved (no env ID)",
               sl.get("hn-codex-old", {}).get("harness") == "old-codex")
+        check("inherited env thread ID ignored: own snapshot thread named",
+              sl.get("hn-codex-inh", {}).get("harness") == "own-codex")
         check("inherited Codex ID on non-Codex process skipped",
               sl.get("hn-inherited", {}).get("harness") == "")
         plain = subprocess.run([DCH, "-ls"], env=dict(os.environ, HOME=home),
                                capture_output=True, text=True).stdout
         check("plain list shows Codex title and real name",
               "my-codex (hn-codex)" in plain)
+        plain_osc = [l for l in plain.splitlines() if "hn-osc" in l]
+        check("-ls row for the escape name has no ESC/BEL",
+              plain_osc and "\x1b" not in plain_osc[0] and
+              "\x07" not in plain_osc[0])
+        check("-ls output has no bidi override",
+              "\u202e" not in plain and "\u2067" not in plain)
         picker = picker_output(home)
         check("picker shows Codex title and real name",
               "my-codex" in picker and "hn-codex" in picker)

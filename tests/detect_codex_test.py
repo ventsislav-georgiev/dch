@@ -141,6 +141,34 @@ ROWS = [
 """ + FOOT + """
   ↑/↓ scroll  pgup/pgdn/⌃b/⌃f/⌃u/⌃d page  q close""",
      True, "working"),
+    # #664 WN1: an answer row that starts with a dialog's phrase (its
+    # indent stripped) above the idle composer is transcript, not a dialog
+    ("dialog phrases quoted at row start above the composer", """\
+• Codex asks before it runs anything in a new folder:
+  Trust this folder? before anything runs.
+  Hooks need review comes next when hooks changed, and each approval says
+  Press enter to confirm or esc to cancel at the bottom.
+
+› Ask Codex to do anything
+  ? for shortcuts                                       100% context left""",
+     False, "idle"),
+    # #664 WN2: pager-like words on screen do not hide a live approval
+    ("live approval below pager-like text", """\
+• The pager footer reads pgup/pgdn/⌃b/⌃f page  q close at its bottom.
+  Would you like to run the following command?
+  $ rm -rf build
+› 1. Yes, proceed (y)
+  2. No, and tell Codex what to do differently (esc)
+
+""" + FOOT, False, "blocked"),
+    # #664 NIT-WN1: " to interrupt)" outside the busy row's shape
+    ("interrupt hint quoted in normal rows", """\
+• Press the key shown (ctrl+g to interrupt) to stop a turn.
+  The busy row ends in (3s • ctrl+g to interrupt)
+
+› Ask Codex to do anything
+  ? for shortcuts                                       100% context left""",
+     10, "idle"),
 ]
 
 
@@ -159,7 +187,7 @@ def main():
     try:
         subprocess.run([DCH, "--spawn", "cdx", "--size", "100x30", "sh"],
                        check=True, capture_output=True, timeout=20)
-        run("--run", "cdx", "stty -echo")
+        run("--run", "cdx", "stty -echo; PS1=")
         if run("--read", "cdx").returncode == 3:
             print("PASS (skipped: dch-lite has no screen mirror)")
             return 0
@@ -167,8 +195,10 @@ def main():
             f = os.path.join(tmp, "s%d" % i)
             with open(f, "w", encoding="utf-8") as fh:
                 fh.write(screen + "\n")
-            run("--run", "cdx", "printf '\\033c'; cat '%s'; echo sent_%d"
-                % (f, i))
+            # the marker alone on the top row, no prompt: the screen's own
+            # last row stays the last one (the pager rule anchors to it)
+            run("--run", "cdx", "printf '\\033c\\n'; cat '%s'; "
+                "printf '\\033[1;92Hsent_%d'" % (f, i))
             run("--wait", "cdx", "--match", "sent_%d" % i, "--timeout", "5000")
             t = (time.time() if fresh is True else
                  946684800 if fresh is False else  # 2000-01-01

@@ -1901,6 +1901,38 @@ cx_names(DIR *d, size_t w, unsigned char *bits)
 
 #define CX_HAS(b, v) ((b)[(v) / 8] & (1u << ((v) % 8)))
 
+/* name's stem length (up to ".jsonl", then nothing or ".zst") when the stem
+** ends "-<tid>" or "-<tid>_<rollout-id>" (Codex's reverted threads); else 0 */
+static size_t
+cx_stem(const char *name, const char *tid, size_t tl)
+{
+	size_t n = strlen(name), p;
+
+	if (n > 4 && !strcmp(name + n - 4, ".zst"))
+		n -= 4;
+	if (n < tl + 8 || strncmp(name + n - 6, ".jsonl", 6))
+		return 0;
+	n -= 6;
+	for (p = 1; p + tl <= n; p++)
+		if (name[p - 1] == '-' && !memcmp(name + p, tid, tl) &&
+		    (p + tl == n || (name[p + tl] == '_' && p + tl + 1 < n)))
+			return n;
+	return 0;
+}
+
+/* A .zst whose plain .jsonl is beside it (stem length n): Codex reads the
+** plain one first, and so does X-ray (the pair is one hit, never two) */
+static int
+cx_plain(int dfd, const char *zst, size_t n)
+{
+	char plain[NAME_MAX + 1];
+	struct stat s;
+
+	return snprintf(plain, sizeof plain, "%.*s.jsonl", (int)n, zst) <
+	       (int)sizeof plain && fstatat(dfd, plain, &s, AT_SYMLINK_NOFOLLOW) == 0
+	       && S_ISREG(s.st_mode);
+}
+
 int
 xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
                 struct stat *st)
@@ -1948,18 +1980,17 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				    !(dd = cx_dir(dirfd(md), ds)))
 					continue;
 				days++;
-				/* "<any>-<tid>.jsonl", a regular file, not a link; ours and
-				** not group- or world-writable, as a snapshot (QA 1.55.0
-				** NIT-6) */
+				/* "<any>-<tid>[_<rollout-id>].jsonl[.zst]" (#656), a regular
+				** file, not a link; ours and not group- or world-writable,
+				** as a snapshot (QA 1.55.0 NIT-6) */
 				while ((de = readdir(dd)) && hits < 2)
 				{
-					size_t n = strlen(de->d_name);
+					size_t n = cx_stem(de->d_name, tid, tl);
 					int dfd = dirfd(dd);
 
 					/* dfd < 0: dirfd() failing, as in cx_dir */
-					if (n < tl + 7 || de->d_name[n - tl - 7] != '-' ||
-					    memcmp(de->d_name + n - tl - 6, tid, tl) ||
-					    strcmp(de->d_name + n - 6, ".jsonl") || dfd < 0 ||
+					if (!n || dfd < 0 ||
+					    (de->d_name[n + 6] && cx_plain(dfd, de->d_name, n)) ||
 					    fstatat(dfd, de->d_name, &s,
 					            AT_SYMLINK_NOFOLLOW) < 0 ||
 					    !S_ISREG(s.st_mode) || s.st_uid != getuid() ||
@@ -8930,16 +8961,16 @@ cx_defs(struct xr_claude *d, const char *cmd, size_t cl, const char *s,
 
 /* #657: a shell output's header (exec_command's "Process exited with code
 ** N" or "Process running with session ID N", shell's "Exit code: N", up to
-** its "Output:" line): the body's start, 0 for no header; *ex the exit code
-** (-1 none), *run still running */
+** its "Output:" line): the body's start, 0 for no header; *bad an exit code
+** other than 0 (#664: -1 too), *run still running */
 static size_t
-cx_head(const char *s, size_t n, int *ex, int *run)
+cx_head(const char *s, size_t n, int *bad, int *run)
 {
 	static const char pe[] = "Process exited with code ", ec[] = "Exit code: ";
 	size_t i, e;
 	int k;
 
-	*ex = -1;
+	*bad = 0;
 	*run = 0;
 	for (i = 0, k = 0; i < n && k < 8; i = e + 1, k++)
 	{
@@ -8948,13 +8979,13 @@ cx_head(const char *s, size_t n, int *ex, int *run)
 		if (e - i == 7 && !memcmp(s + i, "Output:", 7))
 			return e < n ? e + 1 : n;
 		if (e - i > sizeof pe - 1 && !memcmp(s + i, pe, sizeof pe - 1))
-			*ex = atoi(s + i + sizeof pe - 1);
+			*bad = atoi(s + i + sizeof pe - 1) != 0;
 		else if (e - i > sizeof ec - 1 && !memcmp(s + i, ec, sizeof ec - 1))
-			*ex = atoi(s + i + sizeof ec - 1);
+			*bad = atoi(s + i + sizeof ec - 1) != 0;
 		else if (!strncmp(s + i, "Process running with session ID ", 32))
 			*run = 1;
 	}
-	*ex = -1;
+	*bad = 0;
 	*run = 0;
 	return 0;
 }
@@ -8968,7 +8999,7 @@ cx_fetch_out(struct xr_claude *d, const struct json_parser *p, int pl,
 	char *id = k_str(p, pl, A_CALLID, NULL), kb[XR_ID_MAX + 1];
 	struct rcall *c = id ? rc_find(d, id_key(id, kb)) : NULL;
 	size_t h;
-	int ex = -1, run = 0;
+	int bad = 0, run = 0;
 
 	d->read = c ? read_call(c) : NULL;
 	/* #657: paired, as a Claude tool_result (refs_result): a write
@@ -8978,15 +9009,15 @@ cx_fetch_out(struct xr_claude *d, const struct json_parser *p, int pl,
 		refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
 	else
 	{
-		h = c->kind == RC_BASH ? cx_head(s, n, &ex, &run) : 0;
+		h = c->kind == RC_BASH ? cx_head(s, n, &bad, &run) : 0;
 		refs_text(d, s, h, XR_OUTPUT_CAP, XR_CODE);
 		cx_defs(d, c->kind == RC_BASH ? c->cmd : NULL, c->cl, s + h, n - h,
-		        ex > 0, run, 1, 1);
+		        bad, run, 1, 1);
 	}
 	d->read = NULL;
 	if (c)
 	{
-		if (s && ex <= 0)	/* a failed command's page is no title */
+		if (s && !bad)	/* a failed command's page is no title */
 			fetch_def(d, c, s, clip(s, n, XR_OUTPUT_CAP));
 		rc_drop(d, c);
 	}

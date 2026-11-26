@@ -30,6 +30,9 @@
 #include <libproc.h>
 #include <sys/sysctl.h>
 #endif
+#ifdef HAVE_ZSTD
+#include <zstd.h>	/* Codex's compressed rollouts (#656) */
+#endif
 #ifdef __linux__
 #include <sys/inotify.h>	/* --xray --follow's tail (#136) */
 #else
@@ -1627,24 +1630,34 @@ proc_argv(long pid)
 	return v;
 }
 
+/* The executable path of process pid (Linux: "… (deleted)" once replaced);
+** 0, or -1. */
 static int
-proc_is_codex(long pid)
+proc_exe(long pid, char *path, size_t sz)
 {
-	char path[4096];
-	const char *base;
 #ifdef __APPLE__
-	if (proc_pidpath((int)pid, path, sizeof(path)) <= 0)
-		return 0;
+	return proc_pidpath((int)pid, path, (uint32_t)sz) > 0 ? 0 : -1;
 #else
 	char proc[64];
 	ssize_t n;
 
 	snprintf(proc, sizeof(proc), "/proc/%ld/exe", pid);
-	n = readlink(proc, path, sizeof(path) - 1);
+	n = readlink(proc, path, sz - 1);
 	if (n <= 0)
-		return 0;
+		return -1;
 	path[n] = '\0';
+	return 0;
 #endif
+}
+
+static int
+proc_is_codex(long pid)
+{
+	char path[4096];
+	const char *base;
+
+	if (proc_exe(pid, path, sizeof path) < 0)
+		return 0;
 	base = strrchr(path, '/');
 	base = base ? base + 1 : path;
 	return strcmp(base, "codex") == 0 ||
@@ -1822,7 +1835,7 @@ load_harness_record(const char *path, const char *body, size_t body_len,
                     void *arg)
 {
 	struct slist *sl = arg;
-	char sess[600], cb[256], nm[1024], src[32], *endp;
+	char sess[600], cb[256], nm[8192], src[32], *endp;
 	const char *base = strrchr(path, '/'), *cn;
 	long pid;
 	int i;
@@ -1836,8 +1849,25 @@ load_harness_record(const char *path, const char *body, size_t body_len,
 	     !strcmp(src, "derived")) ||
 	    dch_json_string(body, "name", nm, sizeof nm) != 0 || !nm[0])
 		return 0;
-	for (char *c = nm; *c; c++)
-		if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
+	/* body < 8192, so the decoded name always fits nm. Controls, C1 and
+	** bidi controls become one space each (terminal escape injection). */
+	{
+		char *o = nm;
+		for (const unsigned char *c = (unsigned char *)nm; *c;)
+		{
+			if (*c < 0x20 || *c == 0x7f) { *o++ = ' '; c++; }
+			else if (c[0] == 0xc2 && c[1] >= 0x80 && c[1] <= 0x9f)
+			{ *o++ = ' '; c += 2; }
+			else if ((c[0] == 0xe2 && c[1] == 0x80 && c[2] >= 0xaa &&
+			          c[2] <= 0xae) ||
+			         (c[0] == 0xe2 && c[1] == 0x81 && c[2] >= 0xa6 &&
+			          c[2] <= 0xa9))
+			{ *o++ = ' '; c += 3; }
+			else *o++ = (char)*c++;
+		}
+		*o = '\0';
+		if (o - nm > 1000) nm[dch_utf8_trim(nm, 1000)] = '\0';
+	}
 	if (proc_dch_session(pid, sess, sizeof sess) != 0) return 0;
 	cn = canon_name(sess, cb, sizeof cb);
 	for (i = 0; i < sl->n; i++)
@@ -2128,8 +2158,8 @@ dch_codex_snapshot_id(const char *home, const char *sess, const char *marker,
 }
 
 /* The thread the Codex at pid runs, and the CODEX_HOME it runs under (its
-** own, else its HOME's .codex), for the history record (#655): its env's
-** thread id, else its shell snapshot's. 0 with both set, else -1 and
+** own, else its HOME's .codex), for the history record (#655): its shell
+** snapshot's thread id. 0 with both set, else -1 and
 ** neither touched. */
 int
 dch_codex_thread(long pid, char *id, size_t idsz, char *home, size_t homesz)
@@ -2147,12 +2177,11 @@ dch_codex_thread(long pid, char *id, size_t idsz, char *home, size_t homesz)
 	if (proc_env_value(pid, "DCH_NATIVE_BRIDGE_ID", mk, sizeof mk) == 0 &&
 	    mk[0])
 		marker = mk;
-	if ((proc_env_value(pid, "CODEX_THREAD_ID", t, sizeof t) != 0 ||
-	     !dch_codex_id_ok(t)) &&
-	    (proc_env_value(pid, "CODEX_SESSION_ID", t, sizeof t) != 0 ||
-	     !dch_codex_id_ok(t)) &&
-	    (proc_dch_session(pid, sess, sizeof sess) != 0 ||
-	     dch_codex_snapshot_id(h, sess, marker, t, sizeof t, 1) != 0))
+	/* Not CODEX_THREAD_ID/CODEX_SESSION_ID from its env: a Codex never
+	** starts with its own id there, so one is always inherited (a parent
+	** Codex's tool shell ran dch), another thread (#662). */
+	if (proc_dch_session(pid, sess, sizeof sess) != 0 ||
+	    dch_codex_snapshot_id(h, sess, marker, t, sizeof t, 1) != 0)
 		return -1;
 	if (strlen(t) >= idsz || strlen(h) >= homesz)
 		return -1;
@@ -2188,10 +2217,9 @@ load_codex_pid(long pid, void *arg)
 	    mk[0])
 		marker = mk;
 	if (target < 0 ||
-	    (proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
-	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0 &&
-	     dch_codex_snapshot_id(codexdir, sess, marker, id, sizeof(id), 0) !=
-	         0) ||
+	    /* snapshot only: an env thread ID is inherited from a parent Codex */
+	    dch_codex_snapshot_id(codexdir, sess, marker, id, sizeof(id), 0) !=
+	        0 ||
 	    dch_codex_thread_name(codexdir, id, title, sizeof(title)) != 0)
 		return 0;
 	for (char *c = title; *c; c++)
@@ -3913,7 +3941,9 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 ** A leading '^' on s1 makes a line rule: only a line that starts with s1
 ** (after leading blanks) and contains s2 (if any) matches — the footer
 ** itself, not prose that quotes it. Any length: while background agents run, the
-** footer runs to the screen width. */
+** footer runs to the screen width. A leading '$' on s1 makes a last-row
+** rule: the last non-blank line contains s1 and s2. An s2 led by '$' must
+** end its line, after a " (" on it (a busy row's parenthesis). */
 struct det_rule
 {
 	const char *s1, *s2;
@@ -3923,7 +3953,7 @@ struct det_rule
 static const struct det_rule det_suppress[] = {
 	{ "showing detailed transcript", 0 },              /* claude ctrl-o */
 	{ "pgup/pgdn to", "q to quit" },                   /* codex pager   */
-	{ "pgup/pgdn/", "close" },                  /* codex 0.167 pager */
+	{ "$pgup/pgdn/", "close" },     /* codex 0.167 pager, its footer */
 };
 /* Waiting on a human. Checked before working: a stale spinner must not
 ** mask a live permission prompt. */
@@ -3954,15 +3984,29 @@ static const struct det_rule det_blocked[] = {
 /* Busy right now (footer hints; spinner handled separately). */
 static const struct det_rule det_working[] = {
 	{ "esc to interrupt", 0 },                 /* claude,codex,opencode */
-	{ " to interrupt)", 0 },          /* codex, remapped interrupt key */
+	{ "^\xe2\x80\xa2 ", "$ to interrupt)" },  /* codex busy row, any key */
 	{ "ctrl+c to interrupt", 0 },                      /* opencode      */
 };
 
-/* Line rule r ('^' s1) against the lines of hay. */
+/* Does [p, q) contain s? */
+static int
+det_in(const char *p, const char *q, const char *s)
+{
+	size_t n = strlen(s);
+
+	for (; (size_t)(q - p) >= n; p++)
+		if (!memcmp(p, s, n))
+			return 1;
+	return 0;
+}
+
+/* Line rule r ('^' or '$' s1) against the lines of hay. */
 static int
 det_line(const struct det_rule *r, const char *hay)
 {
-	const char *p = hay, *e, *nl, *q, *s1 = r->s1 + 1;
+	const char *p = hay, *e, *nl, *q, *s1 = r->s1 + 1, *s2 = r->s2;
+	size_t n;
+	int m, last = 0;
 
 	while (*p)
 	{
@@ -3976,17 +4020,25 @@ det_line(const struct det_rule *r, const char *hay)
 		while (q > p && (q[-1] == ' ' || q[-1] == '\t' ||
 		                 q[-1] == '\r'))
 			q--;
-		if (!strncmp(p, s1, strlen(s1)) && !r->s2)
-			return 1;
-		if (!strncmp(p, s1, strlen(s1)))
-			for (q = p; q < e; q++)
-				if (!strncmp(q, r->s2, strlen(r->s2)))
-					return 1;
+		if (p < q)
+		{
+			m = *r->s1 == '^' ? !strncmp(p, s1, strlen(s1))
+			                  : det_in(p, q, s1);
+			if (m && s2 && *s2 == '$')
+				m = (n = strlen(s2 + 1)) <= (size_t)(q - p) &&
+				    !memcmp(q - n, s2 + 1, n) &&
+				    det_in(p, q - n, " (");
+			else if (m && s2)
+				m = det_in(p, q, s2);
+			if (m && *r->s1 == '^')
+				return 1;
+			last = m;
+		}
 		if (!nl)
 			break;
 		p = nl + 1;
 	}
-	return 0;
+	return last && *r->s1 == '$';
 }
 
 static int
@@ -3994,7 +4046,8 @@ det_match(const struct det_rule *t, size_t n, const char *hay)
 {
 	size_t i;
 	for (i = 0; i < n; i++)
-		if (t[i].s1[0] == '^' ? det_line(&t[i], hay) :
+		if (t[i].s1[0] == '^' || t[i].s1[0] == '$' ?
+		    det_line(&t[i], hay) :
 		    strstr(hay, t[i].s1) &&
 		    (!t[i].s2 || strstr(hay, t[i].s2)))
 			return 1;
@@ -4175,15 +4228,63 @@ composer_find(char *txt, char **end)
 	return comp;
 }
 
-/* A blocker phrase on folded screen text. Claude Code's composer gives
-** way to a live prompt or form, so with a composer on screen only the
-** rows below it count: text above it is transcript, and a reply quoting
-** "Do you want to proceed?" is not a prompt. No composer (a dialog,
-** another harness): the whole text counts. */
+/* Codex's composer (#658, spec A1): the bottom-most row starting "› "
+** (blanks before it allowed), its wrapped rows indented two, up to the
+** footer ("context left", "for shortcuts") or the first row that is not
+** one. Returns the "›", *end where it ends; NULL none. An approval list's
+** "› 1. Yes" matches too: callers check for dialogs first. */
+static char *
+codex_composer_find(char *txt, char **end)
+{
+	char *ls, *nx, *comp = NULL, *g;
+	size_t w;
+
+	for (ls = txt; ls; ls = nx)
+	{
+		nx = strchr(ls, '\n');
+		nx = nx ? nx + 1 : NULL;
+		g = ls + strspn(ls, " ");
+		if (strncmp(g, "\xe2\x80\xba ", 4) == 0)
+			comp = g;
+	}
+	if (!comp)
+		return NULL;
+	for (ls = comp; (nx = strchr(ls, '\n')); ls = nx)
+	{
+		char keep;
+		int stop;
+
+		nx++;
+		w = strcspn(nx, "\n");
+		keep = nx[w];
+		nx[w] = '\0';	/* the row alone, for strstr */
+		stop = strncmp(nx, "  ", 2) || !nx[strspn(nx, " ")] ||
+		       strstr(nx, "context left") || strstr(nx, "for shortcuts");
+		nx[w] = keep;
+		if (stop)
+			break;
+	}
+	*end = nx ? nx : ls + strlen(ls);
+	return comp;
+}
+
+/* A blocker phrase on folded screen text. Claude Code's composer ("❯")
+** and Codex's ("› ", not a dialog's "› 1." option) give way to a live
+** prompt or form, so with a composer on screen only the rows below it
+** count: text above it is transcript, and a reply quoting "Do you want to
+** proceed?" is not a prompt. No composer (a dialog, another harness): the
+** whole text counts. */
 static int
 det_blocker(char *fold)
 {
-	char *end, *from = composer_find(fold, &end) ? end : fold;
+	char *end, *c, *from = fold;
+
+	if (composer_find(fold, &end))
+		from = end;
+	else if ((c = codex_composer_find(fold, &end)) &&
+	         !(c[4] >= '0' && c[4] <= '9' &&
+	           c[4 + strspn(c + 4, "0123456789")] == '.'))
+		from = end;
 
 	return det_match(det_blocked,
 	                 sizeof(det_blocked) / sizeof(det_blocked[0]), from);
@@ -7373,6 +7474,9 @@ json_final(const char *name, const char *xk, const char *xv,
 /* A --stop that ended `name` and found no record of it (DCH_NO_HISTORY,
 ** a failed write) promises no --revive: its ok line says so instead (L1,
 ** #067). 1 when it printed that line. */
+/* The agent word in --stop's lines: "codex" while ag_say reports one. */
+static const char *stop_who = "claude";
+
 static int
 stop_ok_norec(const char *name, const char *sid, int json)
 {
@@ -7385,8 +7489,9 @@ stop_ok_norec(const char *name, const char *sid, int json)
 	    lstat(p, &st) == 0)
 		return 0;
 	snprintf(d, sizeof d, "no session record kept, so dch --revive cannot "
-	         "bring it back%s%s", *sid ? "; resume by hand: claude --resume "
-	         : "", sid);
+	         "bring it back%s%s%s%s", *sid ? "; resume by hand: " : "",
+	         *sid ? stop_who : "", !*sid ? "" : strcmp(stop_who, "codex") == 0
+	         ? " resume " : " --resume ", sid);
 	if (json)
 		json_final(name, NULL, NULL, "ok", "", d, sid);
 	else
@@ -7413,13 +7518,15 @@ stop_print(const char *name, const char *res, const char *code,
 		json_final(name, NULL, NULL, res, code, detail, sid);
 	else if (strcmp(res, "ok") != 0)
 		/* the id, once known, on every line: it may be all that is left */
-		printf("%s: %s — %s%s%s%s\n", name, res, detail,
-		       *sid && !strstr(detail, sid) ? " (claude " : "",
+		printf("%s: %s — %s%s%s%s%s%s\n", name, res, detail,
+		       *sid && !strstr(detail, sid) ? " (" : "",
+		       *sid && !strstr(detail, sid) ? stop_who : "",
+		       *sid && !strstr(detail, sid) ? " " : "",
 		       *sid && !strstr(detail, sid) ? sid : "",
 		       *sid && !strstr(detail, sid) ? ")" : "");
 	else
-		printf("%s: stopped (%s%s%s%s%s%s)%s%s\n",
-		       name, *sid ? "claude " : "", aname, *sid && *aname ? " " : "",
+		printf("%s: stopped (%s%s%s%s%s%s%s)%s%s\n",
+		       name, *sid ? stop_who : "", *sid ? " " : "", aname, *sid && *aname ? " " : "",
 		       sid, *sid ? "; " : "", hint, *detail ? " " : "", detail);
 	fflush(stdout);
 }
@@ -7625,7 +7732,27 @@ struct agent
 	long mpid;		/* the master, to wait out its exit */
 	struct dch_agent ag;	/* probed right before /exit */
 	const char *res, *code;	/* the result, when not by failed/step */
+	/* #659: the agent is a --no-daemon Codex (cpid): /quit, its exit
+	** line's `codex resume <id>`, relaunched `codex resume <id> -C cwd
+	** <resume message>`; scr: its last screen's hash, for the settle */
+	int codex;
+	unsigned long scr;
+	char cwd[PATH_MAX];
+	const char *rmsg;	/* the resume message: a Codex's PROMPT */
 };
+#define AG_WHO(a)  ((a)->codex ? "codex" : "claude")
+#define AG_QUIT(a) ((a)->codex ? "/quit" : "/exit")
+#define AG_RCMD(a) ((a)->codex ? "codex resume" : "claude --resume")
+
+/* The typing mode for agent a (one run mixes Claudes and Codexes): a
+** Codex's composer and gate; sub: its messages submit with Tab, which
+** queues into a busy Codex where Enter would steer (spec A5). */
+static void
+ag_mode(const struct agent *a, int sub)
+{
+	ty_codex = a->codex;
+	ty_key = a->codex && sub ? "\t" : NULL;
+}
 
 #endif /* HAVE_LIBGHOSTTY_VT */
 
@@ -7845,50 +7972,14 @@ screen_modal(const char *txt)
 	             det_blocker(fold)))
 		res = CG_DIALOG;
 	else if (fold && (strstr(fold, "press up to edit queued messages") ||
-	                  strstr(fold, "ctrl+enter to send now")))
+	                  strstr(fold, "ctrl+enter to send now") ||
+	                  /* Codex's queue and steer blocks (spec A5) */
+	                  (ty_codex &&
+	                   (strstr(fold, "queued follow-up inputs") ||
+	                    strstr(fold, "messages to be submitted")))))
 		res = CG_QUEUED;
 	free(fold);
 	return res;
-}
-
-/* Codex's composer (#658, spec A1): the bottom-most row starting "› "
-** (blanks before it allowed), its wrapped rows indented two, up to the
-** footer ("context left", "for shortcuts") or the first row that is not
-** one. Returns the "›", *end where it ends; NULL none. An approval list's
-** "› 1. Yes" matches too: callers check for dialogs first. */
-static char *
-codex_composer_find(char *txt, char **end)
-{
-	char *ls, *nx, *comp = NULL, *g;
-	size_t w;
-
-	for (ls = txt; ls; ls = nx)
-	{
-		nx = strchr(ls, '\n');
-		nx = nx ? nx + 1 : NULL;
-		g = ls + strspn(ls, " ");
-		if (strncmp(g, "\xe2\x80\xba ", 4) == 0)
-			comp = g;
-	}
-	if (!comp)
-		return NULL;
-	for (ls = comp; (nx = strchr(ls, '\n')); ls = nx)
-	{
-		char keep;
-		int stop;
-
-		nx++;
-		w = strcspn(nx, "\n");
-		keep = nx[w];
-		nx[w] = '\0';	/* the row alone, for strstr */
-		stop = strncmp(nx, "  ", 2) || !nx[strspn(nx, " ")] ||
-		       strstr(nx, "context left") || strstr(nx, "for shortcuts");
-		nx[w] = keep;
-		if (stop)
-			break;
-	}
-	*end = nx ? nx : ls + strlen(ls);
-	return comp;
 }
 
 /* Is the Claude Code screen at `path` safe to type into? Positive evidence
@@ -8272,12 +8363,14 @@ is_uuid(const char *u)
 	return 1;
 }
 
-/* The id from the LAST `--resume <uuid>` in the exit tail. The tail is raw
+/* The id from the LAST `<key> <uuid>` (`--resume`, Codex's `codex resume`)
+** in the exit tail. The tail is raw
 ** pty bytes: Ink dims the line and may style the id apart from the command,
 ** and a narrow pane hard-wraps it, so escapes and control bytes (CR/LF) go
 ** first and a split or wrapped id reads whole. */
 static int
-resume_id(const unsigned char *t, size_t n, char *out, size_t outsz)
+resume_id(const unsigned char *t, size_t n, const char *key, char *out,
+          size_t outsz)
 {
 	char *p = malloc(n + 1), *q, *hit = NULL;
 	size_t i = 0, k = 0;
@@ -8292,9 +8385,9 @@ resume_id(const unsigned char *t, size_t n, char *out, size_t outsz)
 		else
 			p[k++] = (char)t[i++];
 	p[k] = '\0';
-	for (q = p; (q = strstr(q, "--resume")); q += 8)
+	for (q = p; (q = strstr(q, key)); q += strlen(key))
 	{
-		char *u = q + 8;
+		char *u = q + strlen(key);
 
 		while (*u == ' ')
 			u++;
@@ -8394,6 +8487,38 @@ claude_installed(const char *tok, const char *mpath, const char *mcwd,
 	return 0;
 }
 
+/* A Codex's report line in its own words: the shared steps' texts name
+** Claude's (`claude --resume`, /exit, claude). In place, cut at cap. */
+static void
+ag_codex_words(char *d, size_t cap)
+{
+	static const char *const w[][2] = {
+		{ "claude --resume", "codex resume" }, { "/exit", "/quit" },
+		{ "with --resume", "with codex resume" }, { "claude", "codex" },
+	};
+	char out[2048];
+	const char *p = d;
+	size_t o = 0, i, l;
+
+	while (*p && o + 1 < sizeof out)
+	{
+		for (i = 0; i < 4 && strncmp(p, w[i][0], strlen(w[i][0])); i++)
+			;
+		if (i == 4)
+		{
+			out[o++] = *p++;
+			continue;
+		}
+		if (o + (l = strlen(w[i][1])) >= sizeof out)
+			break;
+		memcpy(out + o, w[i][1], l);
+		o += l;
+		p += strlen(w[i][0]);
+	}
+	out[o] = '\0';
+	snprintf(d, cap, "%s", out);
+}
+
 /* One report line per agent; done = it reached a terminal state. */
 static DCH_PRINTF(3, 4) void
 ag_say(struct agent *a, int failed, const char *fmt, ...)
@@ -8405,6 +8530,9 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(d, sizeof d, fmt, ap);
 	va_end(ap);
+	if (a->codex)
+		ag_codex_words(d, sizeof d);
+	stop_who = AG_WHO(a);
 	if (a->stop && strcmp(res, "ok") == 0 &&
 	    stop_ok_norec(a->name, a->id[0] ? a->id : a->sid, a->json))
 		;
@@ -8419,6 +8547,7 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 		printf("%s: %s%s\n", a->name, failed ? "NOT restarted — " : "", d);
 		fflush(stdout);
 	}
+	stop_who = "claude";
 	a->step = AG_DONE;
 }
 
@@ -8431,7 +8560,7 @@ ag_type_resume(struct agent *a, const char *resume)
 	int t;
 
 	if (!a->exit_ans)
-		return ag_type(a->path, resume, 1);
+		return ag_type(a->path, resume, 1);	/* ty_key: ag_mode */
 	if (!(m = malloc(strlen(resume) + sizeof a->work + 120)))
 		return -1;
 	sprintf(m, "%s At exit, Claude Code stopped background work that was "
@@ -8447,6 +8576,7 @@ ag_type_resume(struct agent *a, const char *resume)
 static const char *
 ag_resume(struct agent *a, const char *resume)
 {
+	ag_mode(a, 1);
 	if (claude_gate(a->path) != CG_EMPTY)
 		return "NOT typed";
 	switch (ag_type_resume(a, resume))
@@ -8527,20 +8657,28 @@ ag_quiet(const struct agent *a, int st)
 static int
 ag_relaunch(struct agent *a)
 {
-	char **nv;
-	int nc, st;
+	char **nv = NULL, *m = NULL;
+	int nc = 0, st;
 
-	nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
+	/* Codex: the resume message goes as its PROMPT, nothing typed */
+	if (!a->codex)
+		nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
+	else if ((m = strdup(a->rmsg)) &&
+	         (nv = calloc((size_t)a->argc + 7, sizeof *nv)))
+		nc = dch_codex_resume(a->argv, a->argc, a->tok, a->id, a->cwd, m,
+		                      nv);
 	st = nv ? respawn_req(a->path, 'a', nv, nc) : -3;
 	free(nv);
+	free(m);
 	if (st == DCH_ST_OK || ag_quiet(a, st))
 	{
 		a->step = AG_START;
 		return 0;
 	}
 	respawn_req(a->path, 'c', NULL, 0);
-	ag_say(a, 1, "relaunch with --resume %s was refused (%d); "
-	       "session ended", a->id, st);
+	ag_say(a, 1, a->codex ? "relaunch with codex resume %s was refused "
+	       "(%d); session ended" : "relaunch with --resume %s was refused "
+	       "(%d); session ended", a->id, st);
 	return 1;
 }
 
@@ -8548,12 +8686,14 @@ ag_relaunch(struct agent *a)
 ** would end the session with no hold, so take it back out. The report's
 ** suffix. */
 static const char *
-exit_back(const char *path)
+exit_back(const char *path, const char *quit)
 {
-	if (!composer_holds(path, "/exit"))
+	if (!composer_holds(path, quit))
 		return "";
-	return ty_take_back(path, "/exit", env_ms("DCH_AGENT_LAND_MS", 30000))
-	       == -5 ? "; /exit taken back out of the composer"
+	return ty_take_back(path, quit, env_ms("DCH_AGENT_LAND_MS", 30000))
+	       == -5 ? (quit[1] == 'q' ? "; /quit taken back out of the composer"
+	                          : "; /exit taken back out of the composer")
+	             : quit[1] == 'q' ? "; /quit may still sit in the composer"
 	             : "; /exit may still sit in the composer";
 }
 
@@ -8565,12 +8705,14 @@ ag_read_id(struct agent *a, const struct cmd_info *ci)
 {
 	char tid[64];
 
-	if (resume_id(ci->tail, ci->tail_len, tid, sizeof tid) < 0)
+	if (resume_id(ci->tail, ci->tail_len, a->codex ? "codex resume"
+	              : "--resume", tid, sizeof tid) < 0)
 	{
 		snprintf(a->id, sizeof a->id, "%s", a->sid);
 		snprintf(a->note + strlen(a->note), sizeof a->note -
-		         strlen(a->note), " (no resume line in the exit output; "
-		         "used the session record's id)");
+		         strlen(a->note), a->codex ? " (no resume line in the exit "
+		         "output; used the thread id seen live)" : " (no resume line"
+		         " in the exit output; used the session record's id)");
 	}
 	else
 	{
@@ -8617,7 +8759,7 @@ ag_exited(struct agent *a, const char *step_s)
 			respawn_req(a->path, 'c', NULL, 0);
 			ag_say(a, 1, "/exit did not end claude within %s; hold "
 			       "cancelled, claude left running (session %s)%s%s",
-			       step_s, a->sid, a->note, exit_back(a->path));
+			       step_s, a->sid, a->note, exit_back(a->path, AG_QUIT(a)));
 		}
 		cmd_info_free(&ci);
 		return a->step == AG_DONE;
@@ -8687,7 +8829,7 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 		respawn_req(a->path, 'c', NULL, 0);
 		if (kill((pid_t)a->cpid, 0) == 0)
 			stop_mark(a->path, NULL, 1);
-		why = exit_back(a->path);	/* before the resume message */
+		why = exit_back(a->path, AG_QUIT(a));	/* before the resume message */
 		ag_say(a, 1, "/exit did not end claude within %s%s%s; resume "
 		       "message %s", step_s, a->note, why, ag_resume(a, resume));
 		return 1;
@@ -8736,7 +8878,7 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	cmd_info_free(&ci);
 	snprintf(a->ag.sid, sizeof a->ag.sid, "%s", a->id);
 	json_phase(a->name, "ending", a->json);
-	if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
+	if ((why = stop_end(a->name, a->path, a->mpid, a->codex ? NULL : &a->ag)))
 	{
 		a->code = "end_failed";
 		ag_say(a, 1, "claude quit (claude --resume %s), but %s", a->id,
@@ -8747,6 +8889,93 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	a->code = "";
 	ag_say(a, 0, "%s", a->note[0] ? a->note + 1 : "");
 	return 0;
+}
+
+/* Is the Codex of a provably idle on this read (#659)? Its empty main
+** composer (gate: no dialog, draft, queue or steer block), no busy row
+** (` to interrupt)`, spec A2), and the screen the same as the last read:
+** a streaming answer hides the busy row but repaints. Held for the settle
+** by the caller. shortcut: screen only, no rollout task_complete read;
+** a turn silent between tool calls with its busy row hidden would pass
+** after the settle; upgrade by reading the rollout's last task event. */
+static int
+codex_idle(struct agent *a)
+{
+	char *txt, *dim, *fold;
+	unsigned long h = 5381;
+	const char *c;
+	int g, busy, steady;
+
+	if (!(txt = screen_faint(a->path, &dim, &g)))
+	{
+		snprintf(a->why, sizeof a->why, "%s", g == CG_NOVT ? "no mirror"
+		         : cg_why[CG_UNKNOWN]);
+		a->scr = 0;
+		return 0;
+	}
+	g = gate_screen(txt, dim, 0);
+	fold = tail_fold(txt, strlen(txt));
+	busy = !fold || det_match(det_working, sizeof(det_working) /
+	                          sizeof(det_working[0]), fold);
+	for (c = txt; *c; c++)
+		h = h * 33 + (unsigned char)*c;
+	free(fold);
+	free(txt);
+	free(dim);
+	steady = h == a->scr;
+	a->scr = h;
+	snprintf(a->why, sizeof a->why, "%s", busy ? "working (its busy row is "
+	         "on screen)" : g != CG_EMPTY ? cg_why[g] : !steady
+	         ? "its screen is still changing" : "");
+	return !busy && g == CG_EMPTY && steady;
+}
+
+/* Why the Codex at pid is not paused and /quit (#659), or NULL. Only a
+** --no-daemon one ends its turn with the TUI: attached to the daemon or a
+** --remote server, /quit leaves the turn running (spec B). */
+static const char *
+codex_daemon(long pid)
+{
+	char **v = proc_argv(pid);
+	int k, nd = 0, rem = 0;
+
+	for (k = 0; v && v[k] && strcmp(v[k], "--") != 0; k++)
+	{
+		nd |= strcmp(v[k], "--no-daemon") == 0;
+		rem |= strcmp(v[k], "--remote") == 0 ||
+		       strncmp(v[k], "--remote=", 9) == 0;
+	}
+	free(v);
+	return !v ? "codex's command line cannot be read"
+	       : rem ? "codex runs with --remote: /quit would leave its turn "
+	               "running on the server"
+	       : !nd ? "codex runs attached to its daemon (no --no-daemon): "
+	               "/quit would leave its turn running"
+	       : NULL;
+}
+
+/* Is the Codex at pid stale (#659)? Codex keeps no version record (spec
+** G), so: its executable is gone, or was written (mtime) or replaced
+** (ctime) after the process started. Unknown start: stale. */
+static int
+codex_stale(long pid)
+{
+	char path[4096];
+	struct stat st;
+	time_t t = proc_started(pid);
+
+	return t < 0 || proc_exe(pid, path, sizeof path) < 0 ||
+	       stat(path, &st) < 0 || st.st_mtime > t || st.st_ctime > t;
+}
+
+/* A Codex's word in the session argv (its index), argc when it runs inside
+** the session's shell. */
+static int
+codex_tok(char **argv, int argc)
+{
+	int at = dch_codex_tui_word(argv);
+
+	return at >= 0 && at < argc ? at : argc;
 }
 
 /* One poll of one agent. Returns 1 when it ended in failure. */
@@ -8760,12 +8989,14 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	int g, ready, idle, busy;
 
 	snprintf(step_s, sizeof step_s, "%lds", step / 1000);
+	ag_mode(a, 0);
 	if (a->step == AG_EXIT)
 	{
 		/* Our /exit asked Claude to quit; with background work left it
 		** asks first. The pause already told the agent to stop it all,
 		** so confirm the exit, as /exit did before the prompt existed. */
-		if (!a->exit_ans && exit_prompt(a->path, a->work, sizeof a->work) &&
+		if (!a->codex && !a->exit_ans &&
+		    exit_prompt(a->path, a->work, sizeof a->work) &&
 		    ty_push(a->path, "1", 0) == 0)
 		{
 			a->exit_ans = 1;
@@ -8817,6 +9048,25 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		** only disarms (a held session would end on it). */
 		if (strcmp(ci.state, "armed") == 0)
 			respawn_req(a->path, 'c', NULL, 0);
+		/* Codex: the resume message went as its PROMPT; it is back once
+		** a Codex runs in the session again */
+		if (a->codex)
+		{
+			long cx = ci.pid > 0 ? dch_codex_below(ci.pid) : 0;
+
+			cmd_info_free(&ci);
+			if (cx > 0)
+			{
+				ag_say(a, 0, "codex resumed %s, the resume message as its "
+				       "prompt%s", a->id, a->note);
+				return 0;
+			}
+			if (now < a->deadline)
+				return 0;
+			ag_say(a, 1, "relaunched with codex resume %s, but no codex "
+			       "runs in the session within %s", a->id, step_s);
+			return 1;
+		}
 		g = CG_UNKNOWN;
 		busy = ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0;
 		if (busy && !(busy = strcmp(r.status, "idle") != 0) &&
@@ -8871,33 +9121,41 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	}
 
 	/* AG_WAIT: is the pause consumed and the agent idle, for a while? */
-	if (claude_find(a->cpid, 0, &r) == 0 || r.pid != a->cpid)
+	if (a->codex ? kill((pid_t)a->cpid, 0) < 0
+	             : claude_find(a->cpid, 0, &r) == 0 || r.pid != a->cpid)
 	{
-		a->code = "claude_exited";
+		a->code = a->codex ? "codex_exited" : "claude_exited";
 		ag_say(a, 1, "claude exited while pausing");
 		return 1;
 	}
-	if (strcmp(r.status, "busy") == 0 && r.upd >= a->t_sent)
-		a->saw_busy = 1;
-	g = claude_gate(a->path);
-	/* Busy after the push proves the message was taken; an idle stamp
-	** newer than the push does too, unless the message sits queued —
-	** a turn that ends with one queued is idle for a moment first. */
-	/* "shell": idle, a background shell still running. The pause told the
-	** agent to stop them; one still there DCH_AGENT_SHELL_MS after its
-	** status says so is one it does not see (civ2-qa: "no background
-	** shells" over Claude's "2 shells still running"), and /exit's prompt
-	** stops it (ag_tick). */
-	idle = strcmp(r.status, "idle") == 0 ||
-	       (strcmp(r.status, "shell") == 0 && r.upd > a->t_sent &&
-	        now - r.upd >= env_ms("DCH_AGENT_SHELL_MS", 60000));
-	ready = (a->saw_busy || (r.upd > a->t_sent && g != CG_QUEUED)) &&
-	        idle && g == CG_EMPTY;
-	if (!ready && g == CG_EMPTY)
-		snprintf(a->why, sizeof a->why, "status %s", r.status);
-	else if (!ready)
-		snprintf(a->why, sizeof a->why, "status %s, %s", r.status,
-		         g == CG_NOVT ? "no mirror" : cg_why[g]);
+	if (a->codex)
+		ready = codex_idle(a);
+	else
+	{
+		if (strcmp(r.status, "busy") == 0 && r.upd >= a->t_sent)
+			a->saw_busy = 1;
+		g = claude_gate(a->path);
+		/* Busy after the push proves the message was taken; an idle stamp
+		** newer than the push does too, unless the message sits queued —
+		** a turn that ends with one queued is idle for a moment first. */
+		/* "shell": idle, a background shell still running. The pause told the
+		** agent to stop them; one still there DCH_AGENT_SHELL_MS after its
+		** status says so is one it does not see (civ2-qa: "no background
+		** shells" over Claude's "2 shells still running"), and /exit's prompt
+		** stops it (ag_tick). */
+		idle = strcmp(r.status, "idle") == 0 ||
+		       (strcmp(r.status, "shell") == 0 && r.upd > a->t_sent &&
+		        now - r.upd >= env_ms("DCH_AGENT_SHELL_MS", 60000));
+		ready = (a->saw_busy || (r.upd > a->t_sent && g != CG_QUEUED)) &&
+		        idle && g == CG_EMPTY;
+		if (!ready && g == CG_EMPTY)
+			snprintf(a->why, sizeof a->why, "status %s", r.status);
+		else if (!ready)
+			snprintf(a->why, sizeof a->why, "status %s, %s", r.status,
+			         g == CG_NOVT ? "no mirror" : cg_why[g]);
+	}
+	if (!ready)
+		;
 	else if ((g = detect_agents(a->name)) > 0)
 	{
 		ready = 0;
@@ -8913,28 +9171,36 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	if (ready && now - a->ok_since >= settle)
 	{
 		const char *why;
+		char cxh[1200];
 		int st;
 
 		a->code = "exit_failed";
 		/* --stop keeps the agent for --revive: its launch command can
 		** only be read while claude runs. */
-		if (a->stop && dch_agent_probe(a->ci.pid, &a->ag) < 0)
+		if (a->stop && !a->codex && dch_agent_probe(a->ci.pid, &a->ag) < 0)
 		{
 			ag_say(a, 1, "could not read claude's launch command; "
 			       "resume message %s", ag_resume(a, resume));
 			return 1;
 		}
-		/* Taken now, not at pause time: /clear rotates it. */
-		snprintf(a->sid, sizeof a->sid, "%s", r.sid);
+		/* Taken now, not at pause time: /clear rotates it. A Codex's
+		** thread seen live (#655), the fallback to its exit line's. */
+		if (!a->codex)
+			snprintf(a->sid, sizeof a->sid, "%s", r.sid);
+		else if (dch_codex_thread(a->cpid, a->sid, sizeof a->sid, cxh,
+		                          sizeof cxh) < 0)
+			a->sid[0] = '\0';
 		/* --stop, claude typed into the shell: no /exit, the shell would
 		** run whatever followed claude on its line. The record's id goes
 		** into the marker and the hangup ends shell and claude together. */
 		if (a->stop && a->tok == a->argc)
 		{
-			snprintf(a->id, sizeof a->id, "%s", r.sid);
-			snprintf(a->ag.sid, sizeof a->ag.sid, "%s", r.sid);
+			snprintf(a->id, sizeof a->id, "%s", a->sid);
+			snprintf(a->ag.sid, sizeof a->ag.sid, "%s", a->sid);
 			json_phase(a->name, "ending", a->json);
-			if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
+			/* a Codex's marker is empty: the record keeps its thread */
+			if ((why = stop_end(a->name, a->path, a->mpid,
+			                    a->codex ? NULL : &a->ag)))
 			{
 				a->code = "end_failed";
 				ag_say(a, 1, "%s; resume message %s", why,
@@ -8955,7 +9221,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			return 1;
 		}
 		/* --stop: a record refresh after /exit must keep the agent */
-		if (a->stop && stop_mark(a->path, &a->ag, 0) < 0)
+		if (a->stop && stop_mark(a->path, a->codex ? NULL : &a->ag, 0) < 0)
 		{
 			stop_mark(a->path, NULL, 1);
 			respawn_req(a->path, 'c', NULL, 0);
@@ -8966,7 +9232,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		/* -3 (still in the composer) goes on to AG_EXIT: claude may be
 		** gone already, and a cancel would end a held session; AG_EXIT
 		** cancels safely if it never exits. */
-		if ((st = ag_type(a->path, "/exit", 0)) != 0 && st != -3)
+		if ((st = ag_type(a->path, AG_QUIT(a), 0)) != 0 && st != -3)
 		{
 			if (a->stop)
 				stop_mark(a->path, NULL, 1);
@@ -9045,7 +9311,7 @@ restart_agents(int force, const char *only, int json)
 		char mpath[8192], mcwd[PATH_MAX], jcwd[PATH_MAX], rc[PATH_MAX];
 		const char *skip = NULL, *code = NULL;
 		struct crec r;
-		long mpid;
+		long mpid, cx = 0;
 		int st, n;
 
 		if (only && strcmp(sl.v[k], only) != 0)
@@ -9070,7 +9336,14 @@ restart_agents(int force, const char *only, int json)
 		n = a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0
 		    ? claude_find(a->ci.pid, 1, &r) : 0;
 		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
-		if (n == 0 && a->tok == a->argc)
+		/* no Claude: a Codex is paused, /quit and resumed (#659) */
+		if (n == 0 && a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0 &&
+		    (cx = dch_codex_below(a->ci.pid)) > 0)
+		{
+			a->codex = 1;
+			a->tok = codex_tok(a->argv, a->argc);
+		}
+		if (n == 0 && !a->codex && a->tok == a->argc)
 		{
 			if (json)
 				stop_print(a->name, "skipped", "not_claude", "no claude "
@@ -9098,7 +9371,24 @@ restart_agents(int force, const char *only, int json)
 		if (mpid > 1 && proc_cwd(mpid, rc, sizeof rc) == 0 &&
 		    !realpath(rc, mcwd))
 			mcwd[0] = '\0';
-		if (n == 0)
+		/* Resumed in its own cwd (-C), so no cwd check. */
+		if (cx > 0)
+		{
+			if ((skip = codex_daemon(cx)))
+				code = "codex_daemon";
+			else if (a->tok == a->argc)
+				skip = "codex was started inside the session's shell, "
+				       "not as its command", code = "in_shell";
+			else if (proc_depth((long)getpid(), cx) >= 0 ||
+			         (self && strcmp(self, a->name) == 0))
+				skip = "run from outside dch to restart this one",
+				code = "self";
+			else if (proc_cwd(cx, rc, sizeof rc) < 0 ||
+			         !realpath(rc, a->cwd))
+				skip = "codex's cwd cannot be read",
+				code = "cwd_unknown";
+		}
+		else if (n == 0)
 			skip = "claude is its command, but no live claude "
 			       "session record joins it", code = "no_record";
 		/* No /exit there: the shell would run whatever followed claude
@@ -9121,6 +9411,25 @@ restart_agents(int force, const char *only, int json)
 		if (skip)
 		{
 			stop_print(a->name, "skipped", code, skip, "", "", json);
+			cmd_info_free(&a->ci);
+			continue;
+		}
+		if (cx > 0 && (force || codex_stale(cx)))
+		{
+			a->cpid = cx;
+			na++;
+			continue;
+		}
+		if (cx > 0)
+		{
+			/* as Claude's "current", in its own words: no version */
+			snprintf(rc, sizeof rc, "%s%salready on the installed codex "
+			         "(its binary is unchanged since it started)",
+			         json ? "" : a->name, json ? "" : ": ");
+			if (json)
+				stop_print(a->name, "skipped", "current", rc, "", "", 1);
+			else
+				slist_push(&cur, rc);
 			cmd_info_free(&a->ci);
 			continue;
 		}
@@ -9187,7 +9496,11 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 	for (k = 0; k < na; k++)
 	{
 		struct agent *a = &ag[k];
-		int g = ag_sig ? CG_UNKNOWN : claude_gate(a->path);
+		int g;
+
+		a->rmsg = rmsg;
+		ag_mode(a, 1);	/* the pause message: Tab into a Codex */
+		g = ag_sig ? CG_UNKNOWN : claude_gate(a->path);
 
 		if (ag_sig)
 		{
@@ -9227,8 +9540,8 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 		}
 		if (a->stop || a->json)
 			continue;
-		printf("%s: pause message sent; waiting for claude %s to go "
-		       "idle\n", a->name, a->ver);
+		printf("%s: pause message sent; waiting for %s%s%s to go idle\n",
+		       a->name, AG_WHO(a), a->ver[0] ? " " : "", a->ver);
 		fflush(stdout);
 	}
 	do
@@ -9754,7 +10067,7 @@ do_stop_verb(char **names, int nnames, int json)
 		struct cmd_info ci;
 		struct crec r;
 		const char *why;
-		long mpid;
+		long mpid, cx = 0;
 		int c = -1, st = -1;
 
 		session_sock_path(names[k], path, sizeof path);
@@ -9795,7 +10108,9 @@ do_stop_verb(char **names, int nnames, int json)
 			continue;
 		}
 		mpid = proc_ppid(ci.pid);
-		if (claude_find(ci.pid, 1, &r) == 0)
+		/* no Claude: a Codex is paused and /quit the same way (#659) */
+		if (claude_find(ci.pid, 1, &r) == 0 &&
+		    (cx = dch_codex_below(ci.pid)) <= 0)
 		{
 			int cp = claude_proc(ci.pid) > 0;
 
@@ -9820,7 +10135,7 @@ do_stop_verb(char **names, int nnames, int json)
 			bad |= why != NULL;
 			continue;
 		}
-		if (proc_fg(ci.pid, r.pid) == 0)
+		if (proc_fg(ci.pid, cx > 0 ? cx : r.pid) == 0)
 		{
 			/* the pause message and /exit would go to the shell in
 			** front (#282) */
@@ -9831,6 +10146,14 @@ do_stop_verb(char **names, int nnames, int json)
 			continue;
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
+		if (cx > 0 && (why = codex_daemon(cx)))
+		{
+			/* left running: its session stays, nothing typed */
+			cmd_info_free(&ci);
+			stop_print(names[k], "skipped", "codex_daemon", why, "", "",
+			           json);
+			continue;
+		}
 		if (claude_gate(path) != CG_NOVT)
 		{
 			struct agent *a = &ag[na++];
@@ -9840,9 +10163,12 @@ do_stop_verb(char **names, int nnames, int json)
 			a->ci = ci;
 			a->argv = ci.argv;
 			a->argc = ci.argc;
-			a->tok = dch_claude_tok(a->argv, a->argc);
-			a->cpid = r.pid;
-			snprintf(a->ver, sizeof a->ver, "%s", r.ver);
+			a->codex = cx > 0;
+			a->tok = a->codex ? codex_tok(a->argv, a->argc)
+			                  : dch_claude_tok(a->argv, a->argc);
+			a->cpid = a->codex ? cx : r.pid;
+			if (!a->codex)
+				snprintf(a->ver, sizeof a->ver, "%s", r.ver);
 			a->mpid = mpid;
 			a->stop = 1;
 			a->json = json;
@@ -10103,10 +10429,10 @@ stop_recorded(const char *path, long since, char *sid, size_t sidsz)
 	    (dfd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) < 0)
 		return -1;
 	ok = hrec_load(dfd, fn, &h) == 0 && strcmp(h.end, "stopped") == 0 &&
-	     h.sid[0] && h.ended >= since;
+	     (h.sid[0] || h.cx[0]) && h.ended >= since;
 	close(dfd);
-	if (ok)
-		snprintf(sid, sidsz, "%s", h.sid);
+	if (ok)	/* a Codex's: its thread (#659) */
+		snprintf(sid, sidsz, "%s", h.sid[0] ? h.sid : h.cx);
 	free(h.body);
 	free(h.argv);
 	free(h.launch);
@@ -12038,6 +12364,9 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json,
 			cxset = setenv("CODEX_HOME", r->cxhome, 1) == 0;
 		}
 		setenv("DCH_REVIVE_CODEX", r->cx, 1);
+		/* a parent Codex's ids, inherited by this dch, are not its (#662) */
+		unsetenv("CODEX_THREAD_ID");
+		unsetenv("CODEX_SESSION_ID");
 	}
 	/* Under another name, claude's --name follows when it was the dch name;
 	** a name of the user's own stays (#398). s holds r->argv's pointers,
@@ -13283,6 +13612,218 @@ xr_crec_cfg(const struct crec *c, char *cfg, size_t cfgsz)
 		cfg[0] = '\0';
 }
 
+/* Why the last xr_cx_lookup gave no rollout or a cut one (#656):
+** "compressed" (a .zst only, and no libzstd in this build), "corrupt" (a
+** bad or truncated frame), "range" (the copy hit xr_lim.bytes); else NULL. */
+static const char *xr_cx_why;
+
+#ifdef HAVE_ZSTD
+/* fd's zstd frames into tfd, streamed, at most cap bytes out: 0, 1 a bad
+** or truncated frame, 2 a local failure; *n the bytes written, *cut set
+** when the cap stopped it. */
+static int
+xr_zst_copy(int fd, int tfd, uint64_t cap, uint64_t *n, int *cut)
+{
+	size_t isz = ZSTD_DStreamInSize(), osz = ZSTD_DStreamOutSize(), r = 1;
+	ZSTD_DStream *z = ZSTD_createDStream();
+	char *ib = malloc(isz), *ob = malloc(osz);
+	int bad = !z || !ib || !ob || ZSTD_isError(ZSTD_initDStream(z)) ? 2 : 0;
+	ssize_t got = 0;
+
+	while (!bad && !*cut && (got = read(fd, ib, isz)) != 0)
+	{
+		ZSTD_inBuffer in = {ib, 0, 0};
+
+		if (got < 0 && errno == EINTR)
+			continue;
+		if (got < 0)
+			bad = 1;
+		else
+			in.size = (size_t)got;
+		while (!bad && !*cut && in.pos < in.size)
+		{
+			ZSTD_outBuffer out = {ob, osz, 0};
+			size_t w = 0;
+			ssize_t wr;
+
+			if (ZSTD_isError(r = ZSTD_decompressStream(z, &out, &in)))
+				bad = 1;
+			else if (out.pos > cap - *n)
+			{
+				out.pos = (size_t)(cap - *n);
+				*cut = 1;
+			}
+			while (!bad && w < out.pos)
+				if ((wr = write(tfd, ob + w, out.pos - w)) > 0)
+					w += (size_t)wr;
+				else if (wr < 0 && errno != EINTR)
+					bad = 2;
+			*n += w;
+		}
+	}
+	if (!bad && !*cut && r != 0)
+		bad = 1;	/* the input ended inside a frame */
+	ZSTD_freeDStream(z);
+	free(ib);
+	free(ob);
+	return bad;
+}
+#endif
+
+#ifdef HAVE_ZSTD
+/* The copy cache's bound (#656): in dir, drop every copy and stray
+** .dec.* of ours unused for 24 h (a copy's mtime is its last use), then
+** the oldest copies past 4, keep (the one in use) counted, never dropped. */
+static void
+xr_zst_prune(const char *dir, const char *keep)
+{
+	time_t now = time(NULL);
+	int pass;
+
+	for (pass = 0; pass < 64; pass++)	/* one oldest dropped per pass */
+	{
+		DIR *d = opendir(dir);
+		struct dirent *de;
+		struct stat s;
+		char p[1300], oldest[1300] = "";
+		time_t om = 0;
+		int copies = 1;	/* keep */
+		size_t l;
+
+		if (!d)
+			return;
+		while ((de = readdir(d)))
+		{
+			l = strlen(de->d_name);
+			if ((strncmp(de->d_name, ".dec.", 5) &&
+			     (l < 7 || strcmp(de->d_name + l - 6, ".jsonl") ||
+			      !isxdigit((unsigned char)de->d_name[0]))) ||
+			    snprintf(p, sizeof p, "%s/%s", dir, de->d_name) >=
+			    (int)sizeof p || !strcmp(p, keep) || lstat(p, &s) < 0 ||
+			    !S_ISREG(s.st_mode) || s.st_uid != getuid())
+				continue;
+			if (now - s.st_mtime > 24 * 3600)
+			{
+				(void)unlink(p);
+				continue;
+			}
+			if (de->d_name[0] == '.')
+				continue;	/* a decode under way elsewhere */
+			copies++;
+			if (!oldest[0] || s.st_mtime < om)
+			{
+				snprintf(oldest, sizeof oldest, "%s", p);
+				om = s.st_mtime;
+			}
+		}
+		closedir(d);
+		if (copies <= 4 || !oldest[0])
+			return;
+		(void)unlink(oldest);
+	}
+}
+#endif
+
+/* path (a .zst rollout, *st its stat) as its decoded copy: path and *st the
+** copy's. The copy is cached in $TMPDIR/dch-zst-<uid> (0700) by the .zst's
+** identity, so a chapter's anchor (its inode) holds from one run to the
+** next; Codex never rewrites a compressed rollout. Bounded by
+** xr_zst_prune after each new copy. 0, else -1. */
+static int
+xr_zst_decode(char *path, size_t pathsz, struct stat *st)
+{
+#ifndef HAVE_ZSTD
+	(void)path;
+	(void)pathsz;
+	(void)st;
+	xr_cx_why = "compressed";
+	return -1;
+#else
+	static const char *const whys[] = {"ok", "corrupt", "range"};
+	const char *td = getenv("TMPDIR");
+	char dir[1100], fin[1300], tmp[1300];
+	struct stat ds;
+	uint64_t n = 0;
+	int k, fd, tfd, bad, cut = 0;
+
+	if (!td || td[0] != '/')
+		td = "/tmp";
+	if (snprintf(dir, sizeof dir, "%s/dch-zst-%lu", td,
+	             (unsigned long)getuid()) >= (int)sizeof dir)
+		return -1;
+	(void)mkdir(dir, 0700);
+	if (lstat(dir, &ds) < 0 || !S_ISDIR(ds.st_mode) ||
+	    ds.st_uid != getuid() || (ds.st_mode & 077))
+		return -1;
+	for (k = 0; k < 3; k++)
+	{
+		snprintf(fin, sizeof fin, "%s/%llx-%llx-%llx-%llx.%s.jsonl", dir,
+		         (unsigned long long)st->st_dev,
+		         (unsigned long long)st->st_ino,
+		         (unsigned long long)st->st_size,
+		         (unsigned long long)st->st_mtime, whys[k]);
+		/* a hit's mtime becomes its last use (the key is the .zst's) */
+		if (lstat(fin, &ds) == 0 && S_ISREG(ds.st_mode) &&
+		    ds.st_uid == getuid() && !(ds.st_mode & 077))
+		{
+			(void)utimes(fin, NULL);
+			break;
+		}
+	}
+	if (k == 3)
+	{
+		if ((fd = xr_seam_open(path, st)) < 0)
+			return -1;
+		snprintf(tmp, sizeof tmp, "%s/.dec.XXXXXX", dir);
+		if ((tfd = mkstemp(tmp)) < 0)
+		{
+			close(fd);
+			return -1;
+		}
+		bad = xr_zst_copy(fd, tfd, xr_lim.bytes, &n, &cut);
+		close(fd);
+		k = bad ? 1 : cut ? 2 : 0;
+		snprintf(fin, sizeof fin, "%s/%llx-%llx-%llx-%llx.%s.jsonl", dir,
+		         (unsigned long long)st->st_dev,
+		         (unsigned long long)st->st_ino,
+		         (unsigned long long)st->st_size,
+		         (unsigned long long)st->st_mtime, whys[k]);
+		if (close(tfd) < 0 || bad == 2 || n == 0 || rename(tmp, fin) < 0 ||
+		    lstat(fin, &ds) < 0)
+		{
+			(void)unlink(tmp);
+			xr_cx_why = bad == 1 ? "corrupt" : NULL;
+			dch_trace("xray zst: no copy (bad %d, %llu bytes)", bad,
+			          (unsigned long long)n);
+			return -1;
+		}
+		xr_zst_prune(dir, fin);
+	}
+	if (snprintf(path, pathsz, "%s", fin) >= (int)pathsz)
+		return -1;
+	xr_cx_why = k ? whys[k] : NULL;
+	*st = ds;
+	dch_trace("xray zst: copy %s, %llu bytes", whys[k],
+	          (unsigned long long)ds.st_size);
+	return 0;
+#endif
+}
+
+/* xr_codex_lookup, then a .zst hit as its decoded copy (#656). */
+static int
+xr_cx_lookup(const char *home, const char *tid, char *path, size_t pathsz,
+             struct stat *st)
+{
+	size_t n;
+
+	xr_cx_why = NULL;
+	if (xr_codex_lookup(home, tid, path, pathsz, st) < 0)
+		return -1;
+	n = strlen(path);
+	return n > 4 && !strcmp(path + n - 4, ".zst")
+	       ? xr_zst_decode(path, pathsz, st) : 0;
+}
+
 /* The live Codex under a session's child (7.4, K9): the shallowest codex,
 ** its CODEX_HOME (validated before any read: mutant 36) and the one thread
 ** id dch_codex_snapshot_id's strict rule gives (ambiguous or absent: no
@@ -13293,6 +13834,20 @@ struct xr_cx
 	long pid;
 	char home[1400], tid[64], cwd[PATH_MAX];
 };
+
+/* An ended Codex's thread and home, from its History record (#655): 1, or
+** 0 when the record names none. */
+static int
+xr_ended_codex(const struct hrec *h, struct xr_cx *x)
+{
+	memset(x, 0, sizeof *x);
+	if (!h->cx[0] || !h->cxhome[0])
+		return 0;
+	snprintf(x->home, sizeof x->home, "%s", h->cxhome);
+	snprintf(x->tid, sizeof x->tid, "%s", h->cx);
+	snprintf(x->cwd, sizeof x->cwd, "%s", h->acwd[0] ? h->acwd : h->cwd);
+	return 1;
+}
 
 static int
 xr_live_codex(const struct cmd_info *ci, struct xr_cx *x)
@@ -13757,7 +14312,8 @@ xr_cand_cmp(const void *a, const void *b)
 
 /* The other sessions' Claude and Codex files (7.6), each mapped like <n>'s
 ** by names only (xr_claude_lookup: a uuid, a valid config_dir, one regular
-** <sid>.jsonl, no symlink; xr_codex_lookup for a Codex; nothing opened), in
+** <sid>.jsonl, no symlink; xr_cx_lookup for a Codex; nothing opened but a
+** .zst rollout, decoded once into its cached copy), in
 ** 3.4's order: <n>'s project dir newest lastSeen first, then (all) the
 ** other dirs, newest first. The count, *out to free. */
 static int
@@ -13769,8 +14325,8 @@ xr_mapped(const char *self, const char *project, int all,
 
 	for (k = 0; k < n; k++)
 	{
-		if (v[k].codex ? xr_codex_lookup(v[k].cfg, v[k].sid, v[k].path,
-		                                 sizeof v[k].path, &v[k].st) < 0
+		if (v[k].codex ? xr_cx_lookup(v[k].cfg, v[k].sid, v[k].path,
+		                              sizeof v[k].path, &v[k].st) < 0
 		    : xr_claude_lookup(v[k].cfg, v[k].sid, v[k].path,
 		                       sizeof v[k].path, &v[k].st, v[k].project,
 		                       sizeof v[k].project) < 0)
@@ -14117,7 +14673,7 @@ xr_codex_read(const struct xr_cx *x, struct xr_claude **d, struct stat *st,
 	int fd, rc;
 
 	*d = NULL;
-	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, st) < 0)
+	if (xr_cx_lookup(x->home, x->tid, path, sizeof path, st) < 0)
 		return -1;
 	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
 		return errno == EACCES || errno == EPERM || errno == EIO ? -2 : -1;
@@ -14159,23 +14715,25 @@ xr_codex_answer(const struct xr_cx *x, struct xr_answer *a,
 	if (rc < 0)
 	{
 		xr_chapters_free(ch);
+		a->reason = xr_cx_why;	/* #656: "compressed", "corrupt" or null */
 		return rc;
 	}
 	a->corpus = "codex";
 	a->available = 1;
 	a->mentions_only = 0;	/* #657: a Codex rollout defines too */
 	a->refs = refs;
-	a->complete = !capped && ch->total == ch->n;
-	a->why = a->complete ? NULL : "range";
+	a->complete = !capped && ch->total == ch->n && !xr_cx_why;
+	a->why = xr_cx_why ? xr_cx_why : a->complete ? NULL : "range";
 	a->ch = ch;
 	return 0;
 }
 
-/* --ref over a live Codex's rollout (3.4, 7.4): as over a transcript, then
-** (--scope project|all) the other sessions' Claude and Codex files. */
+/* --ref over a Codex's rollout (3.4, 7.4; live 0: an ended one's, #656): as
+** over a transcript, then (--scope project|all) the other sessions' Claude
+** and Codex files. */
 static int
 xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
-             const struct xr_refq *q)
+             int live, const struct xr_refq *q)
 {
 	char path[2048], project[1200];
 	struct xr_scan *sc;
@@ -14183,16 +14741,21 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	struct stat st;
 	int rc;
 
-	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
+	if (xr_cx_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
+	{
+		if (xr_cx_why)
+			fprintf(stderr, "dch: the Codex rollout is %s\n", xr_cx_why);
 		return xr_no_corpus();
+	}
 	xr_project_key(label, project, sizeof project);
 	if (q->since >= 0)
 		return xr_since_one(path, &st, 1, session, q->since);
 	if (q->search)
-		return xr_search_one(path, &st, 1, session, x->tid, q, project, 1);
+		return xr_search_one(path, &st, 1, session, x->tid, q, project,
+		                     live);
 	if (!xr_ref_parse(q->text, label, &sp))
 		return xr_not_ref();
-	if (!(sc = xr_scan_new(stdout, sp.key, session, project, 1, q->full,
+	if (!(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
 	                       0, q->budget, xr_t0)))
 		return xr_failed();
 	xr_scan_scope(sc, q->scope);
@@ -14200,11 +14763,11 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 		return xr_ref_exit(sc, -1);
 	rc = xr_ref_file(sc, path, &st, 1);
 	if (rc == 0)	/* XR6, --full: as over a transcript */
-		xr_scan_resolved(sc, &sp, q->text, label, 1);
+		xr_scan_resolved(sc, &sp, q->text, label, live);
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, x->tid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, q->text, session, label, "codex", x->tid, 1);
+		xr_define(sc, &sp, q->text, session, label, "codex", x->tid, live);
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
@@ -14487,13 +15050,24 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 	if (t->kind == XR_ENDED)
 	{
 		const struct hrec *h = t->rec;
+		struct xr_cx xc;
 
 		snprintf(label, sizeof label, "%s", h->acwd[0] ? h->acwd : h->cwd);
+		if (q && !h->sid[0] && xr_ended_codex(h, &xc))
+			return xr_codex_ref(&xc, t->name, label, 0, q);
 		if (q)
 			return h->sid[0] ? xr_claude_ref(h->acfg, h->sid, t->name, 0,
 			                                 label, q)
 			                 : xr_no_corpus();
-		if (h->sid[0])
+		if (!h->sid[0] && xr_ended_codex(h, &xc))
+		{
+			/* #656: its rollout, through History's thread and home */
+			snprintf(sid, sizeof sid, "%s", xc.tid);
+			if (!(refs = xr_index_new()))
+				return xr_failed();
+			rc = xr_codex_answer(&xc, &a, &ch, label, sizeof label, refs);
+		}
+		else if (h->sid[0])
 		{
 			snprintf(sid, sizeof sid, "%s", h->sid);
 			if (!(refs = xr_index_new()))
@@ -14553,7 +15127,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 			if (q)
 			{
 				cmd_info_free(&ci);
-				return cx > 0 ? xr_codex_ref(&xc, t->name, label, q)
+				return cx > 0 ? xr_codex_ref(&xc, t->name, label, 1, q)
 				              : xr_no_corpus();
 			}
 			if (cx > 0 && !(refs = xr_index_new()))
@@ -14738,6 +15312,16 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 	char cfg[1400];
 	int qc, fr, rc, cx;
 
+	if (t->kind == XR_ENDED && !t->rec->sid[0] &&
+	    xr_ended_codex(t->rec, &xc))
+	{
+		char path[2048];
+		struct stat st;
+
+		return xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0
+		       ? xr_chapter_file(path, &st, 1, xc.tid, t->name, anchor)
+		       : xr_no_corpus();
+	}
 	if (t->kind == XR_ENDED)
 		return t->rec->sid[0] ? xr_chapter_claude(t->rec->acfg, t->rec->sid,
 		                                          t->name, anchor)
@@ -14759,8 +15343,8 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 		struct stat st;
 
 		cmd_info_free(&ci);
-		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
-		                                 &st) == 0
+		return cx > 0 && xr_cx_lookup(xc.home, xc.tid, path, sizeof path,
+		                              &st) == 0
 		       ? xr_chapter_file(path, &st, 1, xc.tid, t->name, anchor)
 		       : xr_no_corpus();
 	}
@@ -14969,6 +15553,19 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind)
 	struct stat st;
 	int qc, cx = 0, claude = 0, rc;
 
+	if (t->kind == XR_ENDED && !t->rec->sid[0] &&
+	    xr_ended_codex(t->rec, &xc))
+	{
+		/* #656: an ended Codex's rollout, as a live one's below */
+		if (xr_cmd(stdout, kind, t->name, xc.tid, xc.cwd, "codex", xc.tid,
+		           warn, sizeof warn, &rc))
+			return rc;
+		if (kind == XCMD_QUESTION)
+			return xr_qs_none(t->name, xc.tid, warn);
+		return xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0
+		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
+		       : xr_tasks_none(t->name, xc.tid, warn);
+	}
 	if (t->kind == XR_ENDED)
 	{
 		snprintf(cwd, sizeof cwd, "%s",
@@ -15015,8 +15612,8 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind)
 			return rc;
 		if (kind == XCMD_QUESTION)
 			return xr_qs_none(t->name, xc.tid, warn);
-		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
-		                                 &st) == 0
+		return cx > 0 && xr_cx_lookup(xc.home, xc.tid, path, sizeof path,
+		                              &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
 		       : xr_tasks_none(t->name, xc.tid, warn);
 	}
@@ -15063,6 +15660,18 @@ xr_memory(const struct xr_target *t)
 			snprintf(cfg, sizeof cfg, "%s", h->acfg);
 			snprintf(sid, sizeof sid, "%s", h->sid);
 		}
+		else if (xr_ended_codex(h, &xc))
+		{
+			/* #656: as a live Codex's, below */
+			q.agent = "codex";
+			snprintf(cfg, sizeof cfg, "%s", xc.home);
+			snprintf(sid, sizeof sid, "%s", xc.tid);
+			if (xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0)
+			{
+				q.path = path;
+				q.st = &st;
+			}
+		}
 	}
 	else
 	{
@@ -15085,8 +15694,8 @@ xr_memory(const struct xr_target *t)
 				snprintf(cwd, sizeof cwd, "%s", xc.cwd);
 			snprintf(cfg, sizeof cfg, "%s", xc.home);
 			snprintf(sid, sizeof sid, "%s", xc.tid);	/* DCH_AGENT_SESSION_ID */
-			if (xc.tid[0] && xr_codex_lookup(xc.home, xc.tid, path,
-			                                 sizeof path, &st) == 0)
+			if (xc.tid[0] && xr_cx_lookup(xc.home, xc.tid, path,
+			                              sizeof path, &st) == 0)
 			{
 				q.path = path;
 				q.st = &st;
@@ -16456,7 +17065,7 @@ xf_cl_same(const struct xr_target *t, struct xf_cl *s)
 		return 1;
 	if (s->cx && !s->sid[0])
 		return 0;
-	if (s->cx ? xr_codex_lookup(s->cx->home, s->sid, path, sizeof path, &st)
+	if (s->cx ? xr_cx_lookup(s->cx->home, s->sid, path, sizeof path, &st)
 	            < 0
 	          : xr_claude_lookup(s->cfg, s->sid, path, sizeof path, &st,
 	                             project, sizeof project) < 0)
@@ -16503,8 +17112,8 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 		s.cx = x;
 		snprintf(s.sid, sizeof s.sid, "%s", x->tid);
 		snprintf(s.label, sizeof s.label, "%s", x->cwd[0] ? x->cwd : label);
-		if (!s.sid[0] || xr_codex_lookup(x->home, s.sid, s.path,
-		                                 sizeof s.path, &st) < 0)
+		if (!s.sid[0] || xr_cx_lookup(x->home, s.sid, s.path,
+		                              sizeof s.path, &st) < 0)
 		{
 			xf_cx_dir(x, dir, sizeof dir);
 			snprintf(s.watch, sizeof s.watch, "%s", dir);

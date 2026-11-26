@@ -2915,6 +2915,26 @@ t_codex_lookup(void)
 	CHECK("codex lookup: another id's file is no hit",
 	      xr_codex_lookup(d, "019a0000-1111-7222-8333-444455556667", path,
 	                      sizeof path, &st) < 0);
+	/* #656: a .zst beside its .jsonl is one hit, the plain one; alone,
+	** the .zst; the reverted-thread name "<tid>_<rollout-id>" */
+	snprintf(q, sizeof q, "%s.zst", p);
+	mkfile(q);
+	CHECK("codex lookup: .jsonl wins over its .zst",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+	      !strcmp(path, p));
+	unlink(p);
+	CHECK("codex lookup: a lone .jsonl.zst is the hit",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+	      !strcmp(path, q));
+	unlink(q);
+	snprintf(q, sizeof q, "%s/sessions/2000/01/02/rollout-2000-01-02T00-00"
+	         "-00-%s_019a0000-1111-7222-8333-444455550000.jsonl", d, tid);
+	mkfile(q);
+	CHECK("codex lookup: the _<rollout-id> name is a hit",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+	      !strcmp(path, q));
+	unlink(q);
+	mkfile(p);
 	CHECK("codex lookup: a non-UUID id is refused",
 	      xr_codex_lookup(d, "../../x", path, sizeof path, &st) < 0);
 	snprintf(q, sizeof q, "%s/sessions/../", d);
