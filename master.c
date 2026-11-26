@@ -570,6 +570,9 @@ static char rec_stop[65536];	/* <sock>.stopped, as rec_stopped() read it */
 ** or read from Codex's `codex resume <id>` exit line in cx_tail, the last
 ** bytes the child wrote. They stick: a Codex that quit keeps its id. */
 static char rec_cx[40], rec_cxhome[1200];
+/* A Codex was seen in the session (a refresh found one, or --revive seeded
+** its thread): only then is an exit line's id its thread (#662). */
+static int rec_cx_seen;
 static char cx_tail[1024];
 static size_t cx_tail_len;
 
@@ -770,8 +773,11 @@ rec_refresh(void)
 	/* a Codex as the agent: its thread, for --revive (#655) */
 	if (!stopped && the_pty.fd >= 0 && !rec_ag.pid &&
 	    (cx = dch_codex_below(the_pty.pid)) > 0)
+	{
+		rec_cx_seen = 1;
 		(void)dch_codex_thread(cx, rec_cx, sizeof rec_cx, rec_cxhome,
 		                       sizeof rec_cxhome);
+	}
 	if (sidecar_path(".alias", ap, sizeof ap) == 0 &&
 	    (fd = open(ap, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) >= 0)
 	{
@@ -841,6 +847,10 @@ rec_cx_exit(void)
 	char id[37], *h;
 	size_t k, kl = sizeof key - 1;
 
+	/* a shell that printed the line is no Codex; a Codex as the command
+	** counts even when it quit before a refresh saw it */
+	if (!rec_cx_seen && (!cur_argv || dch_codex_tui_word(cur_argv) < 0))
+		return;
 	for (k = cx_tail_len; k-- > 0;)
 	{
 		if (k + kl + 36 > cx_tail_len ||
@@ -1348,6 +1358,10 @@ init_pty(char **argv, int statusfd)
 		/* An interactive Codex gets --no-daemon (#083), in the
 		** child only: the recorded argv stays as typed. */
 		argv = dch_codex_argv(argv);
+		/* A Codex thread id in our env is inherited (dch run from a
+		** Codex's tool shell): never the child's own (#662). */
+		unsetenv("CODEX_THREAD_ID");
+		unsetenv("CODEX_SESSION_ID");
 		/* A relaunched Claude gets its MCP servers before its first
 		** request, so the resume message is typed with their tools in
 		** place (#364); child only, a value the user set stays. */
@@ -4995,6 +5009,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 				const char *ch = getenv("CODEX_HOME"), *hm;
 
 				snprintf(rec_cx, sizeof rec_cx, "%s", ra);
+				rec_cx_seen = 1;
 				if (ch && *ch)
 					snprintf(rec_cxhome, sizeof rec_cxhome, "%s", ch);
 				else if ((hm = getenv("HOME")) && *hm)

@@ -2158,8 +2158,8 @@ dch_codex_snapshot_id(const char *home, const char *sess, const char *marker,
 }
 
 /* The thread the Codex at pid runs, and the CODEX_HOME it runs under (its
-** own, else its HOME's .codex), for the history record (#655): its env's
-** thread id, else its shell snapshot's. 0 with both set, else -1 and
+** own, else its HOME's .codex), for the history record (#655): its shell
+** snapshot's thread id. 0 with both set, else -1 and
 ** neither touched. */
 int
 dch_codex_thread(long pid, char *id, size_t idsz, char *home, size_t homesz)
@@ -2177,12 +2177,11 @@ dch_codex_thread(long pid, char *id, size_t idsz, char *home, size_t homesz)
 	if (proc_env_value(pid, "DCH_NATIVE_BRIDGE_ID", mk, sizeof mk) == 0 &&
 	    mk[0])
 		marker = mk;
-	if ((proc_env_value(pid, "CODEX_THREAD_ID", t, sizeof t) != 0 ||
-	     !dch_codex_id_ok(t)) &&
-	    (proc_env_value(pid, "CODEX_SESSION_ID", t, sizeof t) != 0 ||
-	     !dch_codex_id_ok(t)) &&
-	    (proc_dch_session(pid, sess, sizeof sess) != 0 ||
-	     dch_codex_snapshot_id(h, sess, marker, t, sizeof t, 1) != 0))
+	/* Not CODEX_THREAD_ID/CODEX_SESSION_ID from its env: a Codex never
+	** starts with its own id there, so one is always inherited (a parent
+	** Codex's tool shell ran dch), another thread (#662). */
+	if (proc_dch_session(pid, sess, sizeof sess) != 0 ||
+	    dch_codex_snapshot_id(h, sess, marker, t, sizeof t, 1) != 0)
 		return -1;
 	if (strlen(t) >= idsz || strlen(h) >= homesz)
 		return -1;
@@ -12367,6 +12366,9 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json,
 			cxset = setenv("CODEX_HOME", r->cxhome, 1) == 0;
 		}
 		setenv("DCH_REVIVE_CODEX", r->cx, 1);
+		/* a parent Codex's ids, inherited by this dch, are not its (#662) */
+		unsetenv("CODEX_THREAD_ID");
+		unsetenv("CODEX_SESSION_ID");
 	}
 	/* Under another name, claude's --name follows when it was the dch name;
 	** a name of the user's own stays (#398). s holds r->argv's pointers,

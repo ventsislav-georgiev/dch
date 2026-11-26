@@ -254,6 +254,32 @@ def main():
         check("no id: revived with its argv as before", got and
               got[2:] == [fake, "--no-daemon", "hello there"] and
               "codex resumed" not in r.stdout, (got, r.stdout))
+
+        # 6. (#662) an inherited CODEX_THREAD_ID (dch run from a Codex's
+        # tool shell) is not the session's thread: its snapshot's is
+        TIN, TOUT = T1.replace("6601", "6611"), T1.replace("6601", "6612")
+        got = spawn("cx4", [fake, "-m", "o3"],
+                    {"CODEX_HOME": cxhome, "CODEX_THREAD_ID": TOUT,
+                     "FAKE_CODEX_TID": TIN, "FAKE_CODEX_SNAP": "1"})
+        until(lambda: ((rec("cx4") or {}).get("codex") or {})
+              .get("thread_id"), 10)
+        if got:
+            os.kill(int(got[0]), signal.SIGKILL)
+        ended("cx4")
+        r4 = rec("cx4") or {}
+        check("inherited CODEX_THREAD_ID: the record keeps the snapshot's "
+              "thread after SIGKILL",
+              (r4.get("codex") or {}).get("thread_id") == TIN, r4)
+
+        # 7. (#662) a plain shell that prints a `codex resume <id>` line
+        # gets no codex record
+        names.append("cx5")
+        dch("--spawn", "cx5", "--size", "100x30", "sh", "-c",
+            "printf 'To continue this session, run:\\n  codex resume %s\\n'"
+            "; sleep 0.5" % T2)
+        r5 = until(lambda: (rec("cx5") or {}).get("end") and rec("cx5"), 15)
+        check("a shell printing `codex resume <id>`: no codex object",
+              r5 and "codex" not in r5, r5)
     finally:
         for n in names:
             dch("-k", n)

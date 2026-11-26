@@ -3082,7 +3082,7 @@ gets the same steps, in Codex's own terms (Codex 0.167):
 - **Exit.** dch arms the hold and types `/quit` and Enter. Never Ctrl-C: one
   Ctrl-C quits an idle Codex at once and interrupts a busy one. The thread id
   is the one in the last `codex resume <id>` line Codex prints on exit, else
-  the one seen live (`CODEX_THREAD_ID`, or its shell snapshot) right before
+  the one seen live (its shell snapshot) right before
   `/quit`.
 - **Restart.** The original command starts again as `codex resume <id> -C
   <cwd> … <resume message>`: the resume message goes as its PROMPT, nothing
@@ -3253,9 +3253,13 @@ stopped for the pause.
 A session whose command is an interactive Codex (`codex ...` or `headroom
 wrap codex ...`, not `codex exec` and the like) records the Codex thread it
 runs, as `"codex":{"thread_id","home"}` beside `"agent"`: the id while Codex
-runs (its `CODEX_THREAD_ID`, else the shell snapshot that carries the
-session's `DCH_SESSION`, made at Codex's first turn), or else the last `codex
-resume <id>` line Codex prints on exit; `home` is Codex's own `CODEX_HOME`,
+runs (the shell snapshot that carries the session's `DCH_SESSION`, made at
+Codex's first turn), or else the last `codex resume <id>` line Codex prints
+on exit, read only once a Codex was seen in the session or is its command
+(a shell that prints such a line records none). A `CODEX_THREAD_ID` or
+`CODEX_SESSION_ID` in the env is never read: a Codex does not start with its
+own id there, so one is always a parent Codex's (dch run from its tool
+shell), and dch drops both from the session child's env; `home` is Codex's own `CODEX_HOME`,
 else its `HOME`'s `.codex`. `--history` shows it as `[codex <id>]`,
 `--history --json` as that object. `--revive` relaunches it as `codex resume
 <id> -C <cwd>` right after the `codex` word, the other options kept, any

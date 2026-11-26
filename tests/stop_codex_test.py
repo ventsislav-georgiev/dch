@@ -142,7 +142,7 @@ def main():
         # 1. idle: pause pasted + Tab, /quit + Enter, ended stopped with
         # the exit line's id (over the live one), revived resumed
         n, d, e = sess("idle", "idle", extra={"FAKE_CODEX_TID": T1,
-                                               "CODEX_THREAD_ID": T2})
+                                               "FAKE_CODEX_SNAP_TID": T2})
         until(lambda: ((rec(n) or {}).get("codex") or {})
               .get("thread_id") == T2, 10)
         r = run("--stop", n, "--json")
@@ -166,7 +166,7 @@ def main():
         run("-k", n)
 
         # 2. no exit line: the thread id seen live
-        n, d, e = sess("live", "idle", extra={"CODEX_THREAD_ID": T3})
+        n, d, e = sess("live", "idle", extra={"FAKE_CODEX_SNAP_TID": T3})
         r = run("--stop", n, "--json")
         j = final(r)
         check("live: --stop ok with the live thread id",
