@@ -600,7 +600,8 @@ def main():
         check("trace: a hard link at DCH_DEBUG is not appended/chmodded",
               st.st_size == 4 and stat.S_IMODE(st.st_mode) == 0o644)
 
-        # WG3: a pty slave at DCH_DEBUG must not become the master's ctty
+        # #647 (QA NIT-WK1): a pty slave at DCH_DEBUG is no master ctty
+        # (ps tty column: ?? on macOS, ? on Linux)
         mfd, sfd = os.openpty()
         os.set_blocking(mfd, False)
         try:
@@ -614,8 +615,10 @@ def main():
                 got = os.read(mfd, 4096)
             except BlockingIOError:
                 got = b""
-            check("trace: a pty slave at DCH_DEBUG is no master ctty, gets no bytes",
-                  rows and all(r[1] == "??" for r in rows) and got == b"")
+            ok = bool(rows) and all(r[1] in ("?", "??") for r in rows) and got == b""
+            if not ok:
+                print("      | ps rows %r, read %r" % (rows, got))
+            check("trace: a pty slave at DCH_DEBUG is no master ctty, gets no bytes", ok)
         finally:
             run("-k", "tp%s" % TAG, timeout=20)
             names.remove("tp%s" % TAG)
