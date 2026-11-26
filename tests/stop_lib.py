@@ -43,7 +43,7 @@ TAG = str(os.getpid())
 PAUSE = "pause all work, this session is being stopped by dch --stop"
 GAVE_UP = "resume all work. dch --stop gave up"
 REVIVED = "resume all work. This session was stopped by dch --stop"
-FINAL = ["detail", "name", "reason", "result", "session_id"]
+FINAL = ["agent", "detail", "name", "reason", "result", "session_id"]
 
 
 def run(*args, timeout=120, env=None):
@@ -234,13 +234,22 @@ def main(part):
             check("--history --json carries \"end\":\"stopped\"",
                   any(e["name"] == p and e["end"] == "stopped" for e in h))
 
+            p = sess("stj", "sh")
+            until(lambda: rec(p) and cmd(p))
+            r = stop(p, "--json")
+            objs = ndjson(r.stdout) or [{}]
+            check("no claude --json: final ok with \"agent\":null",
+                  r.returncode == 0 and objs[-1].get("result") == "ok" and
+                  "agent" in objs[-1] and objs[-1]["agent"] is None)
+            names.remove(p)
+
             # --- unknown name, old master ------------------------------------
             r = stop("nosuch" + TAG, "--json")
             check("unknown name: failed/no_session, exit 1",
                   r.returncode == 1 and ndjson(r.stdout) == [
                       {"name": "nosuch" + TAG, "result": "failed",
                        "reason": "no_session", "detail": "no such session",
-                       "session_id": ""}])
+                       "session_id": "", "agent": None}])
             old = os.path.join(sockdir, "old%s.sock" % TAG)
             srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             srv.bind(old)
@@ -401,7 +410,8 @@ def main(part):
                   [o.get("phase") for o in objs[:-1]] == ["pausing", "ending"] and
                   all(sorted(o) == ["name", "phase"] for o in objs[:-1]) and
                   objs[-1] == {"name": shc, "result": "ok", "reason": "",
-                               "detail": "", "session_id": sid3})
+                               "detail": "", "session_id": sid3,
+                               "agent": "claude"})
             a = (rec(shc) or {}).get("agent") or {}
             check("shell claude: record ends stopped, launch as typed, its cwd",
                   rec(shc)["end"] == "stopped" and
@@ -453,7 +463,8 @@ def main(part):
                        [o.get("phase") for o in objs[:-1]] ==
                        ["pausing", "ending"] and
                        objs[-1] == {"name": n, "result": "ok", "reason": "",
-                                    "detail": "", "session_id": sid5}))
+                                    "detail": "", "session_id": sid5,
+                                    "agent": "claude"}))
                 # Poll, not a fixed sleep: under ASan on a CI runner the
                 # teardown can take longer. Once the shell is gone the touch
                 # can no longer run, so checking the mark after is sound.

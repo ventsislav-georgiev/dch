@@ -633,6 +633,14 @@ error (`--history` and `--agent-list` take their own).
 | `not_started` | revive | The session did not start (the program cannot be executed: the reason is on stderr). |
 | `launch_unknown` | revive | Revived, but its Claude was not resumed: the launch command is unknown. |
 
+`--stop --json` and `--restart --include-agents --json` result lines end with
+`"agent":"claude"` or `"agent":"codex"`, the agent kind where dch knows it:
+`ok`, `failed`, `interrupted` and `skipped` alike (a Codex's `codex_daemon`,
+`no_thread`, `cwd_unknown` too). A line with no agent (a session running none,
+an error before detection such as `old_master`, `respawn_pending`, `self`,
+`not_claude`) carries `"agent":null`: the key is never left out. Plain
+`--restart` and every other verb are unchanged.
+
 A typical agent loop:
 
 ```sh

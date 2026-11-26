@@ -7474,6 +7474,21 @@ json_final(const char *name, const char *xk, const char *xv,
 ** #067). 1 when it printed that line. */
 /* The agent word in --stop's lines: "codex" while ag_say reports one. */
 static const char *stop_who = "claude";
+/* --json's "agent" on the --stop/--restart lines: "codex", "claude", or
+** NULL (no agent known yet or none) */
+static const char *stop_ag = NULL;
+
+static void
+stop_json(const char *name, const char *res, const char *code,
+          const char *detail, const char *sid)
+{
+	json_final_open(name, NULL, NULL, res, code, detail, sid);
+	if (stop_ag)
+		printf(",\"agent\":\"%s\"}\n", stop_ag);
+	else
+		fputs(",\"agent\":null}\n", stdout);
+	fflush(stdout);
+}
 
 static int
 stop_ok_norec(const char *name, const char *sid, int json)
@@ -7491,7 +7506,7 @@ stop_ok_norec(const char *name, const char *sid, int json)
 	         *sid ? stop_who : "", !*sid ? "" : strcmp(stop_who, "codex") == 0
 	         ? " resume " : " --resume ", sid);
 	if (json)
-		json_final(name, NULL, NULL, "ok", "", d, sid);
+		stop_json(name, "ok", "", d, sid);
 	else
 		printf("%s: stopped (%s)\n", name, d);
 	fflush(stdout);
@@ -7513,7 +7528,7 @@ stop_print(const char *name, const char *res, const char *code,
 	else
 		snprintf(hint, sizeof hint, "revive with dch --revive %s", name);
 	if (json)
-		json_final(name, NULL, NULL, res, code, detail, sid);
+		stop_json(name, res, code, detail, sid);
 	else if (strcmp(res, "ok") != 0)
 		/* the id, once known, on every line: it may be all that is left */
 		printf("%s: %s — %s%s%s%s%s%s\n", name, res, detail,
@@ -8530,7 +8545,7 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 	va_end(ap);
 	if (a->codex)
 		ag_codex_words(d, sizeof d);
-	stop_who = AG_WHO(a);
+	stop_who = stop_ag = AG_WHO(a);
 	if (a->stop && strcmp(res, "ok") == 0 &&
 	    stop_ok_norec(a->name, a->id[0] ? a->id : a->sid, a->json))
 		;
@@ -8546,6 +8561,7 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 		fflush(stdout);
 	}
 	stop_who = "claude";
+	stop_ag = NULL;
 	a->step = AG_DONE;
 }
 
@@ -9322,6 +9338,7 @@ restart_agents(int force, const char *only, int json)
 
 		if (only && strcmp(sl.v[k], only) != 0)
 			continue;
+		stop_ag = NULL;
 		snprintf(a->name, sizeof a->name, "%s", sl.v[k]);
 		session_sock_path(sl.v[k], a->path, sizeof a->path);
 		a->json = json;
@@ -9418,9 +9435,11 @@ restart_agents(int force, const char *only, int json)
 		                          sizeof a->want) < 0)
 			skip = "cannot run `claude --version` as the session "
 			       "would (its PATH and cwd)", code = "version_unknown";
+		stop_ag = cx > 0 ? "codex" : "claude";
 		if (skip)
 		{
 			stop_print(a->name, "skipped", code, skip, "", "", json);
+			stop_ag = NULL;
 			cmd_info_free(&a->ci);
 			continue;
 		}
@@ -9440,6 +9459,7 @@ restart_agents(int force, const char *only, int json)
 				stop_print(a->name, "skipped", "current", rc, "", "", 1);
 			else
 				slist_push(&cur, rc);
+			stop_ag = NULL;
 			cmd_info_free(&a->ci);
 			continue;
 		}
@@ -9460,10 +9480,12 @@ restart_agents(int force, const char *only, int json)
 			stop_print(a->name, "skipped", "current", rc, "", "", 1);
 		else
 			slist_push(&cur, rc);
+		stop_ag = NULL;
 		snprintf(want, sizeof want, "%s", a->want);
 		said -= n == 1;
 		cmd_info_free(&a->ci);
 	}
+	stop_ag = NULL;
 	slist_free(&sl);
 	if (cur.n && !na && !said && !only)
 		printf("all claude agents already on claude %s\n", want);
@@ -9639,9 +9661,13 @@ restart_agents(int force, const char *only, int json)
 			h = dch_claude_tok(ci.argv, ci.argc) < ci.argc;
 			cmd_info_free(&ci);
 			if (h && json)
+			{
+				stop_ag = "claude";
 				stop_print(sl.v[k], "skipped", "no_screen", "dch-lite "
 				           "has no terminal mirror to watch it with", "",
 				           "", 1);
+				stop_ag = NULL;
+			}
 			hit |= h;
 		}
 	}
@@ -10134,9 +10160,11 @@ do_stop_verb(char **names, int nnames, int json)
 			{
 				/* ending it would hang up a Claude unpaused, its id
 				** unknown: leave it */
+				stop_ag = "claude";
 				stop_print(names[k], "failed", "claude_unreadable", "a "
 				           "claude runs in it, but no session record of "
 				           "it can be read; left running", "", "", json);
+				stop_ag = NULL;
 				bad = 1;
 				continue;
 			}
@@ -10155,8 +10183,10 @@ do_stop_verb(char **names, int nnames, int json)
 			/* the pause message and /exit would go to the shell in
 			** front (#282) */
 			cmd_info_free(&ci);
+			stop_ag = cx > 0 ? "codex" : "claude";
 			stop_print(names[k], "failed", say_code[SAY_NOT_FG],
 			           say_why[SAY_NOT_FG], "", "", json);
+			stop_ag = NULL;
 			bad = 1;
 			continue;
 		}
@@ -10165,16 +10195,20 @@ do_stop_verb(char **names, int nnames, int json)
 		{
 			/* left running: its session stays, nothing typed */
 			cmd_info_free(&ci);
+			stop_ag = "codex";
 			stop_print(names[k], "skipped", "codex_daemon", why, "", "",
 			           json);
+			stop_ag = NULL;
 			continue;
 		}
 		if (cx > 0 && dch_codex_thread(cx, tid, sizeof tid, cxh,
 		                               sizeof cxh) < 0)
 		{
 			cmd_info_free(&ci);
+			stop_ag = "codex";
 			stop_print(names[k], "skipped", "no_thread", cx_no_thread, "",
 			           "", json);
+			stop_ag = NULL;
 			continue;
 		}
 		if (claude_gate(path) != CG_NOVT)
@@ -10202,8 +10236,10 @@ do_stop_verb(char **names, int nnames, int json)
 #endif
 		/* nothing is typed without the mirror to gate on */
 		cmd_info_free(&ci);
+		stop_ag = cx > 0 ? "codex" : "claude";
 		stop_print(names[k], "skipped", say_code[SAY_NO_SCREEN],
 		           say_why[SAY_NO_SCREEN], "", "", json);
+		stop_ag = NULL;
 	}
 #ifdef HAVE_LIBGHOSTTY_VT
 	if (na)

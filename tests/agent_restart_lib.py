@@ -498,7 +498,7 @@ def main(part):
                                "reason": "in_shell",
                                "detail": "claude was started inside the "
                                "session's shell, not as its command",
-                               "session_id": ""})
+                               "session_id": "", "agent": "claude"})
             time.sleep(1)
             check("shell claude: still running, nothing typed, the touch never "
                   "ran", y1 and alive(y1["pid"]) and typed(y) == [] and
@@ -521,7 +521,8 @@ def main(part):
                   z1 and objs[-1] == {"name": z, "result": "ok", "reason": "",
                                       "detail": "claude %s -> %s, resumed %s" %
                                       (ver, ver2, z1["sid"]),
-                                      "session_id": z1["sid"]} and
+                                      "session_id": z1["sid"],
+                                      "agent": "claude"} and
                   z2 and z2["sid"] == z1["sid"])
             # --all --json over a mix: one master object and one agent result
             # per session, nothing typed
