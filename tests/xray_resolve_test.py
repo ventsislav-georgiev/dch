@@ -1064,25 +1064,34 @@ def test_github(m):
                   not os.listdir(tgt), (dt, rv, lg))
             if os.path.isfile(cache):
                 os.unlink(cache)
-        for label, off in (("an hour ahead", 3600), ("61 s old", -61)):
+        for label, off in (("an hour ahead", 3600), ("a second old", -1)):
             shutil.rmtree(cache, ignore_errors=True)
             os.makedirs(ghd)
             lock = os.path.join(ghd, "acme,widgets,702.lock")
             open(lock, "w").close()
             os.utime(lock, (time.time() + off,) * 2)
             r, ls, rv, lg = q("acme/widgets#702", full=False, keep=True)
-            check("#530 light: a fill lock %s is stale: broken, filled, the "
-                  "title" % label, len(rv) == 1 and
+            check("#646 light: a leftover unlocked fill lock %s is taken: "
+                  "filled, the title" % label, len(rv) == 1 and
                   rv[0]["title"] == "Quick enough" and lg and
                   wait_for(idle, 10), (rv, lg, os.listdir(ghd)))
-        for label in ("", ", a 61 s old lock taken over by one"):
+        # #646: a lock some live process holds (flock) blocks the fill
+        shutil.rmtree(cache, ignore_errors=True)
+        os.makedirs(ghd)
+        lock = os.path.join(ghd, "acme,widgets,702.lock")
+        hf = open(lock, "w")
+        fcntl.flock(hf, fcntl.LOCK_EX)
+        r, ls, rv, lg = q("acme/widgets#702", full=False, keep=True)
+        hf.close()
+        check("#646 light: a held fill lock (flock) blocks the fill: gh not "
+              "run, no title", not rv and not lg, (rv, lg))
+        os.unlink(lock)
+        for label in ("", ", a leftover lock file taken by one"):
             shutil.rmtree(cache, ignore_errors=True)
             open(log, "w").close()
             if label:
                 os.makedirs(ghd)
-                lock = os.path.join(ghd, "acme,widgets,703.lock")
-                open(lock, "w").close()
-                os.utime(lock, (time.time() - 61,) * 2)
+                open(os.path.join(ghd, "acme,widgets,703.lock"), "w").close()
             ps5 = [subprocess.Popen([DCH, "--xray", n, "--ref",
                                      "acme/widgets#703", "--scope", "session",
                                      "--json"], env=genv,
@@ -1094,34 +1103,9 @@ def test_github(m):
             wait_for(idle, 10)
             runs = open(log).read().count("issues/703")
             check("#530 light: 5 refs at once on a 1 s gh run gh once (the "
-                  "O_EXCL lock%s)" % label, runs == 1 and
+                  "flock lock%s)" % label, runs == 1 and
                   not [f for f in os.listdir(ghd) if ".lock" in f],
                   (runs, os.listdir(ghd)))
-        # ---- #549: a fill sweeps the crashed takeovers' .stale litter
-        shutil.rmtree(cache, ignore_errors=True)
-        os.makedirs(ghd)
-        dp = subprocess.Popen(["true"])
-        dp.wait()
-        sd = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % dp.pid)
-        sl = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % os.getpid())
-        dp2 = subprocess.Popen(["true"])
-        dp2.wait()
-        sf = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % dp2.pid)
-        so = os.path.join(ghd, "acme,widgets,705.lock.%d.stale" % os.getppid())
-        for f in (sd, sl, sf, so):
-            open(f, "w").close()
-        os.utime(sd, (time.time() - 61,) * 2)
-        os.utime(so, (time.time() - 61,) * 2)
-        r, ls, rv, lg = q("acme/widgets#705", full=False, keep=True)
-        wait_for(idle, 10)
-        check("#549 light: a fill removes an old .stale file of a dead pid",
-              not os.path.exists(sd), os.listdir(ghd))
-        check("#549 light: a fresh .stale file of a dead pid is removed",
-              not os.path.exists(sf), os.listdir(ghd))
-        check("#549 light: a .stale file over 60 s old of a live pid is "
-              "removed", not os.path.exists(so), os.listdir(ghd))
-        check("#549 light: a fresh .stale file of a live pid is kept",
-              os.path.exists(sl), os.listdir(ghd))
         pg = pids + ".pgid"
         r, ls, rv, lg = q("acme/widgets#704", full=False)
         wait_for(lambda: os.path.exists(pg) and idle(), 10)

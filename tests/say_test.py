@@ -567,7 +567,7 @@ def main():
         names.remove(t3)
 
         # WG1/WG2: a client call that traces (--spawn), bounded
-        def spawn_traced(base, path):
+        def spawn_traced(base, path, keep=False):
             n = "%s%s" % (base, TAG)
             names.append(n)
             try:
@@ -577,8 +577,9 @@ def main():
                 ok = True
             except subprocess.TimeoutExpired:
                 ok = False  # run() kills the child it spawned on timeout
-            run("-k", n, timeout=20)
-            names.remove(n)
+            if not keep:
+                run("-k", n, timeout=20)
+                names.remove(n)
             return ok
 
         # WG1: FIFO at DCH_DEBUG must not hang the client
@@ -598,6 +599,31 @@ def main():
         st = os.stat(hv)
         check("trace: a hard link at DCH_DEBUG is not appended/chmodded",
               st.st_size == 4 and stat.S_IMODE(st.st_mode) == 0o644)
+
+        # #647 (QA NIT-WK1): a pty slave at DCH_DEBUG is no master ctty
+        # (ps tty column: ?? on macOS, ? on Linux)
+        mfd, sfd = os.openpty()
+        os.set_blocking(mfd, False)
+        try:
+            spawn_traced("tp", os.ttyname(sfd), keep=True)
+            n = "tp%s" % TAG
+            ps = subprocess.run(["ps", "-axo", "pid=,tty=,command="],
+                                capture_output=True, text=True).stdout
+            rows = [l.split(None, 2) for l in ps.splitlines()
+                    if "--master-of" in l and n in l]
+            try:
+                got = os.read(mfd, 4096)
+            except BlockingIOError:
+                got = b""
+            ok = bool(rows) and all(r[1] in ("?", "??") for r in rows) and got == b""
+            if not ok:
+                print("      | ps rows %r, read %r" % (rows, got))
+            check("trace: a pty slave at DCH_DEBUG is no master ctty, gets no bytes", ok)
+        finally:
+            run("-k", "tp%s" % TAG, timeout=20)
+            names.remove("tp%s" % TAG)
+            os.close(mfd)
+            os.close(sfd)
 
         # --- concurrency: about the slowest session, not the sum ---------
         # Each slow one: two eaten Enters, 3 s apart = 6 s+; five in a row
