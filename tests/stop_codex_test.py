@@ -77,7 +77,7 @@ def main():
                               text=True, timeout=timeout,
                               env=dict(env, **(extra or {})), cwd=tmp)
 
-    def sess(base, mode, argv=("--no-daemon",), extra=None):
+    def sess(base, mode, argv=("--no-daemon",), extra=None, prog="codex"):
         n = "%s%s" % (base, TAG)
         d = os.path.join(tmp, n)
         os.mkdir(d)
@@ -86,7 +86,7 @@ def main():
         names.append(n)
         dirs.append(d)
         e = dict(FAKE_CODEX_DIR=d, **(extra or {}))
-        r = run("--spawn", n, "--size", "100x30", "codex", *argv, extra=e)
+        r = run("--spawn", n, "--size", "100x30", prog, *argv, extra=e)
         check("%s: spawned" % n, r.returncode == 0, r.stderr)
         want = {"idle": "Ask Codex", "busy": "to interrupt)",
                 "dialog": "Press enter to confirm"}[mode]
@@ -232,10 +232,19 @@ def main():
                   (r.stdout, r.stderr, keys(d)))
             run("-k", n)
 
-        # 6. --restart --include-agents: /quit, then codex resume with the
-        # resume message as its PROMPT
+        # 6. --restart --include-agents: a Codex whose binary is unchanged
+        # since it started is current: skipped without -f, nothing typed;
+        # -f: /quit, then codex resume with the resume message as PROMPT
         n, d, e = sess("rst", "idle", extra={"FAKE_CODEX_TID": T1})
         r = run("--restart", n, "--include-agents", "--json")
+        j = final(r)
+        time.sleep(0.5)
+        check("current: skipped/current without -f, nothing typed",
+              r.returncode == 0 and j.get("result") == "skipped" and
+              j.get("reason") == "current" and "installed codex" in
+              j.get("detail", "") and keys(d) == [] and len(argvs(d)) == 1,
+              (r.stdout, r.stderr, keys(d)))
+        r = run("--restart", n, "--include-agents", "-f", "--json")
         j = final(r)
         got = until(lambda: len(argvs(d)) > 1 and argvs(d)[1])
         check("restart: ok, exit 0", r.returncode == 0 and
@@ -248,6 +257,24 @@ def main():
                                   RESUME], got)
         check("restart: the session runs on",
               until(lambda: "Ask Codex" in run("--read", n).stdout), "")
+        run("-k", n)
+
+        # 7. stale: its binary touched after it started restarts, no -f
+        own = os.path.join(tmp, "own")
+        os.mkdir(own)
+        shutil.copy2(os.path.join(bindir, "codex"), own)
+        exe = os.path.join(own, "codex")
+        n, d, e = sess("stale", "idle", extra={"FAKE_CODEX_TID": T2},
+                       prog=exe)
+        time.sleep(1.2)
+        os.utime(exe)  # an upgrade wrote the binary after the start
+        r = run("--restart", n, "--include-agents", "--json")
+        j = final(r)
+        got = until(lambda: len(argvs(d)) > 1 and argvs(d)[1])
+        check("stale: restarted without -f, codex resume <id>",
+              r.returncode == 0 and j.get("result") == "ok" and got and
+              got[0] == exe and got[1:4] == ["resume", T2, "-C"] and
+              got[-1] == RESUME, (r.stdout, r.stderr, got))
         run("-k", n)
 
         bad = [x for x in dirs if os.path.exists(os.path.join(x, "CTRL-C"))

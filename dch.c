@@ -1630,24 +1630,34 @@ proc_argv(long pid)
 	return v;
 }
 
+/* The executable path of process pid (Linux: "… (deleted)" once replaced);
+** 0, or -1. */
 static int
-proc_is_codex(long pid)
+proc_exe(long pid, char *path, size_t sz)
 {
-	char path[4096];
-	const char *base;
 #ifdef __APPLE__
-	if (proc_pidpath((int)pid, path, sizeof(path)) <= 0)
-		return 0;
+	return proc_pidpath((int)pid, path, (uint32_t)sz) > 0 ? 0 : -1;
 #else
 	char proc[64];
 	ssize_t n;
 
 	snprintf(proc, sizeof(proc), "/proc/%ld/exe", pid);
-	n = readlink(proc, path, sizeof(path) - 1);
+	n = readlink(proc, path, sz - 1);
 	if (n <= 0)
-		return 0;
+		return -1;
 	path[n] = '\0';
+	return 0;
 #endif
+}
+
+static int
+proc_is_codex(long pid)
+{
+	char path[4096];
+	const char *base;
+
+	if (proc_exe(pid, path, sizeof path) < 0)
+		return 0;
 	base = strrchr(path, '/');
 	base = base ? base + 1 : path;
 	return strcmp(base, "codex") == 0 ||
@@ -8947,6 +8957,20 @@ codex_daemon(long pid)
 	       : NULL;
 }
 
+/* Is the Codex at pid stale (#659)? Codex keeps no version record (spec
+** G), so: its executable is gone, or was written (mtime) or replaced
+** (ctime) after the process started. Unknown start: stale. */
+static int
+codex_stale(long pid)
+{
+	char path[4096];
+	struct stat st;
+	time_t t = proc_started(pid);
+
+	return t < 0 || proc_exe(pid, path, sizeof path) < 0 ||
+	       stat(path, &st) < 0 || st.st_mtime > t || st.st_ctime > t;
+}
+
 /* A Codex's word in the session argv (its index), argc when it runs inside
 ** the session's shell. */
 static int
@@ -9350,8 +9374,7 @@ restart_agents(int force, const char *only, int json)
 		if (mpid > 1 && proc_cwd(mpid, rc, sizeof rc) == 0 &&
 		    !realpath(rc, mcwd))
 			mcwd[0] = '\0';
-		/* A Codex has no version record (spec G): -f or not, it is
-		** restarted. Resumed in its own cwd (-C), so no cwd check. */
+		/* Resumed in its own cwd (-C), so no cwd check. */
 		if (cx > 0)
 		{
 			if ((skip = codex_daemon(cx)))
@@ -9394,10 +9417,23 @@ restart_agents(int force, const char *only, int json)
 			cmd_info_free(&a->ci);
 			continue;
 		}
-		if (cx > 0)
+		if (cx > 0 && (force || codex_stale(cx)))
 		{
 			a->cpid = cx;
 			na++;
+			continue;
+		}
+		if (cx > 0)
+		{
+			/* as Claude's "current", in its own words: no version */
+			snprintf(rc, sizeof rc, "%s%salready on the installed codex "
+			         "(its binary is unchanged since it started)",
+			         json ? "" : a->name, json ? "" : ": ");
+			if (json)
+				stop_print(a->name, "skipped", "current", rc, "", "", 1);
+			else
+				slist_push(&cur, rc);
+			cmd_info_free(&a->ci);
 			continue;
 		}
 		a->cpid = r.pid;
