@@ -12942,9 +12942,8 @@ res_unstale(const char *lock)
 	size_t n;
 	DIR *dp;
 
-	snprintf(d, sizeof d, "%s", lock);
-	b = strrchr(d, '/');
-	if (!b)
+	if (snprintf(d, sizeof d, "%s", lock) >= (int)sizeof d ||
+	    !(b = strrchr(d, '/')))
 		return;
 	*b++ = '\0';
 	n = strlen(b);
