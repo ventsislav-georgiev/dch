@@ -8709,7 +8709,7 @@ ag_read_id(struct agent *a, const struct cmd_info *ci)
 		snprintf(a->id, sizeof a->id, "%s", a->sid);
 		snprintf(a->note + strlen(a->note), sizeof a->note -
 		         strlen(a->note), a->codex ? " (no resume line in the exit "
-		         "output; used the thread id seen live)" : " (no resume line"
+		         "output; used the thread id of its shell snapshot)" : " (no resume line"
 		         " in the exit output; used the session record's id)");
 	}
 	else
@@ -8717,8 +8717,10 @@ ag_read_id(struct agent *a, const struct cmd_info *ci)
 		snprintf(a->id, sizeof a->id, "%s", tid);
 		if (strcmp(tid, a->sid) != 0)
 			snprintf(a->note + strlen(a->note), sizeof a->note -
-			         strlen(a->note), " (exit line said %s, session "
-			         "record said %s; used the exit line)", tid, a->sid);
+			         strlen(a->note), !a->sid[0] ? " (exit line said %s; "
+			         "no %s id to cross-check)%.0s" : " (exit line said %s,"
+			         " %s said %s; used the exit line)", tid, a->codex ?
+			         "shell snapshot" : "session record", a->sid);
 	}
 }
 
@@ -9169,7 +9171,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	if (ready && now - a->ok_since >= settle)
 	{
 		const char *why;
-		char cxh[1200];
+		char cxh[1200], cxt[64];
 		int st;
 
 		a->code = "exit_failed";
@@ -9182,12 +9184,13 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			return 1;
 		}
 		/* Taken now, not at pause time: /clear rotates it. A Codex's
-		** thread seen live (#655), the fallback to its exit line's. */
+		** thread seen live (#655), the fallback to its exit line's; the
+		** one seen before the pause stays when it cannot be read now. */
 		if (!a->codex)
 			snprintf(a->sid, sizeof a->sid, "%s", r.sid);
-		else if (dch_codex_thread(a->cpid, a->sid, sizeof a->sid, cxh,
-		                          sizeof cxh) < 0)
-			a->sid[0] = '\0';
+		else if (dch_codex_thread(a->cpid, cxt, sizeof cxt, cxh,
+		                          sizeof cxh) == 0)
+			snprintf(a->sid, sizeof a->sid, "%s", cxt);
 		/* --stop, claude typed into the shell: no /exit, the shell would
 		** run whatever followed claude on its line. The record's id goes
 		** into the marker and the hangup ends shell and claude together. */
@@ -9277,6 +9280,11 @@ ag_on_sig(int sig)
 ** agents that were attempted and failed. */
 static int ag_run(struct agent *ag, int na, const char *pmsg,
                   const char *rmsg);
+
+/* --stop's and --include-agents' skip for a Codex with no thread id. */
+static const char cx_no_thread[] = "codex's thread id is unknown (no shell "
+	"snapshot names it: no turn yet, or snapshots are off); left running, "
+	"nothing typed";
 
 static int
 restart_agents(int force, const char *only, int json)
@@ -9385,6 +9393,10 @@ restart_agents(int force, const char *only, int json)
 			         !realpath(rc, a->cwd))
 				skip = "codex's cwd cannot be read",
 				code = "cwd_unknown";
+			/* never `codex resume ""`: known before anything is typed */
+			else if (dch_codex_thread(cx, a->sid, sizeof a->sid, rc,
+			                          sizeof rc) < 0)
+				skip = cx_no_thread, code = "no_thread";
 		}
 		else if (n == 0)
 			skip = "claude is its command, but no live claude "
@@ -9553,8 +9565,10 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 				ag[k].res = "interrupted";
 				ag[k].code = "signal";
 				ag_say(&ag[k], 1, "interrupted (signal %d) while waiting "
-				       "for it to pause; resume message %s", (int)ag_sig,
-				       ag_resume(&ag[k], rmsg));
+				       "for it to pause; resume message %s%s", (int)ag_sig,
+				       ag_resume(&ag[k], rmsg), ag[k].codex ? "; the pause "
+				       "message cannot be taken back from codex and still "
+				       "runs once its turn ends" : "");
 				fails++;
 			}
 			else if (ag[k].step != AG_DONE && ag_sig2)
@@ -10067,6 +10081,9 @@ do_stop_verb(char **names, int nnames, int json)
 		const char *why;
 		long mpid, cx = 0;
 		int c = -1, st = -1;
+#ifdef HAVE_LIBGHOSTTY_VT
+		char tid[64], cxh[1200];
+#endif
 
 		session_sock_path(names[k], path, sizeof path);
 		if (self && *self &&
@@ -10152,9 +10169,19 @@ do_stop_verb(char **names, int nnames, int json)
 			           json);
 			continue;
 		}
+		if (cx > 0 && dch_codex_thread(cx, tid, sizeof tid, cxh,
+		                               sizeof cxh) < 0)
+		{
+			cmd_info_free(&ci);
+			stop_print(names[k], "skipped", "no_thread", cx_no_thread, "",
+			           "", json);
+			continue;
+		}
 		if (claude_gate(path) != CG_NOVT)
 		{
 			struct agent *a = &ag[na++];
+
+			snprintf(a->sid, sizeof a->sid, "%s", cx > 0 ? tid : "");
 
 			snprintf(a->name, sizeof a->name, "%s", names[k]);
 			snprintf(a->path, sizeof a->path, "%s", path);
