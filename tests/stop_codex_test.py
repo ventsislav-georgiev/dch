@@ -10,8 +10,10 @@ id, --revive relaunching `codex resume <id> -C <cwd>`); the exit line's id
 over the live one, and the live one with no exit line; a busy Codex waited
 out until idle; a dialog (failed/prompt, no key); a daemon-attached and a
 --remote Codex (skipped/codex_daemon, no key); --restart --include-agents
-relaunching it `codex resume <id> -C <cwd> ... <resume message>`; no Ctrl-C
-byte, ever.
+relaunching it `codex resume <id> -C <cwd> ... <resume message>`; no thread
+id known up front (no shell snapshot): --stop and --restart -f skipped
+`no_thread`, not one key (#668); a signal mid-stop says the pause still runs;
+the notes name what was seen; no Ctrl-C byte, ever.
 
 Run:  python3 tests/stop_codex_test.py        (uses ./dch)
 """
@@ -154,6 +156,9 @@ def main():
               sent_pause_then_quit(k), k)
         check("idle: --stop reports the exit line's thread id",
               j.get("session_id") == T1, j)
+        check("idle: the note names the snapshot's id it overrode",
+              "(exit line said %s, shell snapshot said %s; used the exit "
+              "line)" % (T1, T2) in j.get("detail", ""), j)
         rc = until(lambda: (rec(n) or {}).get("end") and rec(n), 10) or {}
         check("idle: the record ended stopped with the codex id",
               rc.get("end") == "stopped" and
@@ -172,13 +177,18 @@ def main():
         check("live: --stop ok with the live thread id",
               r.returncode == 0 and j.get("result") == "ok" and
               j.get("session_id") == T3, (r.stdout, r.stderr))
+        check("live: the note says the id came from its shell snapshot",
+              "used the thread id of its shell snapshot" in
+              j.get("detail", "") and "seen live" not in j.get("detail", ""),
+              j)
         rc = until(lambda: (rec(n) or {}).get("end") and rec(n), 10) or {}
         check("live: the record ended stopped with it",
               rc.get("end") == "stopped" and
               (rc.get("codex") or {}).get("thread_id") == T3, rc)
 
         # 3. busy: the pause queues (Tab); /quit waits for idle
-        n, d, e = sess("busy", "busy", extra={"FAKE_CODEX_TID": T1})
+        n, d, e = sess("busy", "busy", extra={"FAKE_CODEX_TID": T1,
+                                               "FAKE_CODEX_SNAP_TID": T2})
         pr = subprocess.Popen([DCH, "--stop", n, "--json"], env=env, cwd=tmp,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True)
@@ -203,7 +213,7 @@ def main():
               sent_pause_then_quit(keys(d)), (out, err, keys(d)))
 
         # 4. a dialog: failed/prompt, not one key
-        n, d, e = sess("dlg", "dialog")
+        n, d, e = sess("dlg", "dialog", extra={"FAKE_CODEX_SNAP_TID": T2})
         r = run("--stop", n, "--json")
         j = final(r)
         time.sleep(0.5)
@@ -235,7 +245,8 @@ def main():
         # 6. --restart --include-agents: a Codex whose binary is unchanged
         # since it started is current: skipped without -f, nothing typed;
         # -f: /quit, then codex resume with the resume message as PROMPT
-        n, d, e = sess("rst", "idle", extra={"FAKE_CODEX_TID": T1})
+        n, d, e = sess("rst", "idle", extra={"FAKE_CODEX_TID": T1,
+                                              "FAKE_CODEX_SNAP_TID": T3})
         r = run("--restart", n, "--include-agents", "--json")
         j = final(r)
         time.sleep(0.5)
@@ -264,7 +275,8 @@ def main():
         os.mkdir(own)
         shutil.copy2(os.path.join(bindir, "codex"), own)
         exe = os.path.join(own, "codex")
-        n, d, e = sess("stale", "idle", extra={"FAKE_CODEX_TID": T2},
+        n, d, e = sess("stale", "idle", extra={"FAKE_CODEX_TID": T2,
+                                                "FAKE_CODEX_SNAP_TID": T3},
                        prog=exe)
         time.sleep(1.2)
         os.utime(exe)  # an upgrade wrote the binary after the start
@@ -275,6 +287,60 @@ def main():
               r.returncode == 0 and j.get("result") == "ok" and got and
               got[0] == exe and got[1:4] == ["resume", T2, "-C"] and
               got[-1] == RESUME, (r.stdout, r.stderr, got))
+        run("-k", n)
+
+        # 8. no thread id known up front (no shell snapshot): never
+        # `codex resume ""`; skipped no_thread, not one key, left running
+        NOTH = ("codex's thread id is unknown (no shell snapshot names it: "
+                "no turn yet, or snapshots are off); left running, nothing "
+                "typed")
+        n, d, e = sess("noid", "idle")
+        r = run("--stop", n, "--json")
+        j = final(r)
+        time.sleep(0.5)
+        check("no id: --stop skipped/no_thread, nothing typed, still runs",
+              r.returncode == 0 and j.get("result") == "skipped" and
+              j.get("reason") == "no_thread" and j.get("detail") == NOTH and
+              keys(d) == [] and run("--read", n).returncode == 0 and
+              not (rec(n) or {}).get("end"), (r.stdout, r.stderr, keys(d)))
+        run("-k", n)
+        n, d, e = sess("noidr", "idle")
+        r = run("--restart", n, "--include-agents", "-f", "--json")
+        j = final(r)
+        time.sleep(0.5)
+        check("no id: --restart -f skipped/no_thread, nothing typed, "
+              "not relaunched",
+              r.returncode == 0 and j.get("result") == "skipped" and
+              j.get("reason") == "no_thread" and j.get("detail") == NOTH and
+              keys(d) == [] and len(argvs(d)) == 1 and
+              "Ask Codex" in run("--read", n).stdout,
+              (r.stdout, r.stderr, keys(d), argvs(d)))
+        r = run("--stop", n)
+        check("no id: --stop's text line", r.stdout.strip() ==
+              "%s: skipped — %s" % (n, NOTH), r.stdout)
+        run("-k", n)
+
+        # 9. a signal while the pause sits queued: interrupted, and the
+        # detail says the pause still runs once the turn ends
+        n, d, e = sess("sig", "busy", extra={"FAKE_CODEX_SNAP_TID": T1})
+        pr = subprocess.Popen([DCH, "--stop", n, "--json"], env=env, cwd=tmp,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+        until(lambda: "Queued follow-up inputs" in run("--read", n).stdout,
+              10)
+        time.sleep(0.5)
+        pr.send_signal(2)
+        try:
+            out, err = pr.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            out, err = pr.communicate()
+        j = final(subprocess.CompletedProcess([], pr.returncode, out, err))
+        check("signal: interrupted, the pause still runs once idle",
+              pr.returncode == 1 and j.get("result") == "interrupted" and
+              "the pause message cannot be taken back from codex and still "
+              "runs once its turn ends" in j.get("detail", "") and
+              "/quit" not in "".join(keys(d)), (out, err))
         run("-k", n)
 
         bad = [x for x in dirs if os.path.exists(os.path.join(x, "CTRL-C"))

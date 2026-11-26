@@ -368,9 +368,10 @@ const struct xr_chapters *xr_claude_chapters(struct xr_claude *d);
 ** name plus .zst when no plain one is beside it (#656): home checked as
 ** xr_config_ok and tid uuid-shaped before any readdir; names only, digits
 ** only, newest first, at most XR_CODEX_DAYS day dirs and XR_CODEX_DAYS
-** year and month dirs; no symlinked dir followed; exactly one regular hit,
-** the caller's and not group- or world-writable. 0 with path and st,
-** else -1. */
+** year and month dirs; no symlinked dir followed; regular hits only, the
+** caller's and not group- or world-writable: one original at most, and
+** of it and its reverts' _<rid> files the newest by mtime (a _<rid> one
+** on a tie). 0 with path and st, else -1. */
 int xr_codex_lookup(const char *home, const char *tid, char *path,
                     size_t pathsz, struct stat *st);
 /* The decoder reads a Codex rollout instead (set before the first line):

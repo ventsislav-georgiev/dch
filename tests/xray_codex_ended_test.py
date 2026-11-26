@@ -9,6 +9,9 @@ CODEX_HOME of fixture rollouts; no Codex ever runs.
   - the plain rollout, the .jsonl.zst one (Codex compresses rollouts after
     7 days; made here with the zstd CLI, the row SKIPs without it) and the
     reverted thread's -<tid>_<rollout-id>.jsonl name
+  - a reverted thread keeps its original beside the _<rid> file, in one
+    day dir or the next (LOW-WP1): the newer by mtime is read, either way;
+    also with the _<rid> file as a .zst
   - .jsonl wins over its .zst sibling
   - a corrupt .zst: corpus none, reason "corrupt", no crash
   - --ref, --search, --tasks and --chapter over the ended rollout
@@ -19,7 +22,7 @@ import json, os, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-TIDS = ["019a3333-4444-7555-8666-7777888899%02d" % k for k in range(1, 9)]
+TIDS = ["019a3333-4444-7555-8666-7777888899%02d" % k for k in range(1, 13)]
 RID = "019a3333-4444-7555-8666-777788889999"
 fails = [0]
 
@@ -80,8 +83,9 @@ def body(tid, turn):
                                                    "text": "done, see #41"}]}))
 
 
-def rollout(tid, turn, suffix="", zst=False, keep_plain=False):
-    p = os.path.join(DAY, "rollout-2026-11-10T10-00-00-%s%s.jsonl"
+def rollout(tid, turn, suffix="", zst=False, keep_plain=False, day=DAY):
+    os.makedirs(day, mode=0o700, exist_ok=True)
+    p = os.path.join(day, "rollout-2026-11-10T10-00-00-%s%s.jsonl"
                      % (tid, suffix))
     with open(p, "w") as f:
         f.write(body(tid, turn))
@@ -92,6 +96,11 @@ def rollout(tid, turn, suffix="", zst=False, keep_plain=False):
         if not keep_plain:
             os.unlink(p)
     return p
+
+
+def age(p, secs):
+    t = time.time() - secs
+    os.utime(p, (t, t))
 
 
 def plant(n, tid):
@@ -162,6 +171,17 @@ def main():
     rollout(TIDS[2], "a reverted thread", suffix="_" + RID)
     answers("cx-rid", TIDS[2], "a reverted thread", "-<tid>_<rollout-id> name")
 
+    # LOW-WP1: a revert leaves the original beside its _<rid> file
+    DAY11 = os.path.join(CODEX, "sessions", "2026", "11", "11")
+    for n, tid, day in (("cx-z5", TIDS[8], DAY), ("cx-z5b", TIDS[9], DAY11)):
+        orig = rollout(tid, "the original", day=DAY)
+        rev = rollout(tid, "the reverted one", suffix="_" + RID, day=day)
+        plant(n, tid)
+        age(orig, 600)
+        answers(n, tid, "the reverted one", "%s: original + newer _<rid>" % n)
+        age(rev, 1200)
+        answers(n, tid, "the original", "%s: original newer than _<rid>" % n)
+
     if not ZSTD:
         print("  SKIP .zst rows: no zstd CLI to make the fixture")
     else:
@@ -207,6 +227,34 @@ def main():
               len([n for n in left if n.endswith(".ok.jsonl")]) == 2,
               left)
 
+        # the cache is also bounded in bytes: with a small cap, a new copy
+        # drops the oldest copies until the total fits, and keeps itself
+        for n in os.listdir(cache):
+            os.unlink(os.path.join(cache, n))
+        cap = 2000
+        now = time.time()
+        olds = [os.path.join(cache, "1-2-3-%d.ok.jsonl" % i)
+                for i in (5, 6)]
+        for i, f in enumerate(olds):
+            with open(f, "w") as fh:
+                fh.write("x" * 900)
+            os.utime(f, (now - 7200 + i * 60,) * 2)
+        plant("cx-cap", TIDS[11])
+        rollout(TIDS[11], "capped turn", zst=True)
+        ENV["DCH_XRAY_CAPS"] = "0:%d" % cap
+        try:
+            answers("cx-cap", TIDS[11], "capped turn", "a copy over the "
+                    "byte cap")
+        finally:
+            del ENV["DCH_XRAY_CAPS"]
+        left = os.listdir(cache)
+        total = sum(os.path.getsize(os.path.join(cache, n))
+                    for n in left)
+        check("the cache drops the oldest copy while the total is over "
+              "the byte cap, keeps the newer one and the new copy",
+              not os.path.exists(olds[0]) and os.path.exists(olds[1]) and
+              len(left) == 2 and total <= cap, (left, total))
+
         plant("cx-both", TIDS[3])
         rollout(TIDS[3], "the plain one", zst=True, keep_plain=True)
         z = os.path.join(DAY, "rollout-2026-11-10T10-00-00-%s.jsonl.zst"
@@ -217,6 +265,13 @@ def main():
         subprocess.run([ZSTD, "-q", "-f", z + ".src", "-o", z], check=True)
         os.unlink(z + ".src")
         answers("cx-both", TIDS[3], "the plain one", ".jsonl beside .zst")
+
+        orig = rollout(TIDS[10], "the original")
+        rollout(TIDS[10], "the reverted zst", suffix="_" + RID, zst=True)
+        plant("cx-z5z", TIDS[10])
+        age(orig, 600)
+        answers("cx-z5z", TIDS[10], "the reverted zst",
+                "original + newer _<rid>.jsonl.zst")
 
         plant("cx-bad", TIDS[4])
         p = os.path.join(DAY, "rollout-2026-11-10T10-00-00-%s.jsonl.zst"
