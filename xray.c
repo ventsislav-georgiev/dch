@@ -12944,7 +12944,7 @@ static int
 res_fill(char *const av[], char *const env[], struct res_run *run,
          const char *repo, const char *num, struct xr_resolved *r)
 {
-	char path[PATH_MAX], lock[PATH_MAX + 8];
+	char path[PATH_MAX], lock[PATH_MAX + 8], cb[4096];
 	struct stat st, sl;
 	long k, max;
 	pid_t pid;
@@ -12965,6 +12965,14 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 	    st.st_ino != sl.st_ino || st.st_dev != sl.st_dev)
 	{
 		close(lk);	/* unlinked by a fill that just ended */
+		return 1;
+	}
+	/* a fill that ended between our cache miss and the open left its entry */
+	if (res_cache_get(repo, num, cb, sizeof cb) &&
+	    (!strcmp(cb, "none") || xr_gh_parse(cb, repo, num, r)))
+	{
+		(void)unlink(lock);
+		close(lk);
 		return 1;
 	}
 	if ((pid = fork()) < 0)

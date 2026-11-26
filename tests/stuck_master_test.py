@@ -492,6 +492,15 @@ def trace_sigterm():
     try:
         r, _ = run(env, "--spawn", "ooa", "sleep", "300")
         pid = spawned_pid(r, os.path.join(sd, "ooa.sock"))
+
+        def serving():
+            try:
+                rows = json.loads(run(env, "--ls-json")[0].stdout)
+            except ValueError:
+                return False
+            return any(o.get("name") == "ooa" and o.get("cols") for o in rows)
+        # the socket exists before the SIGTERM handler: wait for the loop
+        until(serving, 5)
         os.kill(pid, signal.SIGTERM)
         gone = until(lambda: not master_alive(pid), 5)
         with open(env["DCH_DEBUG"]) as f:

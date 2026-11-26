@@ -165,7 +165,10 @@ def files(root):
             m = re.search(r"\.json\.(\d+)\.tmp$", f)
             if m and is_master(int(m.group(1))):
                 continue
-            st = os.lstat(p)
+            try:
+                st = os.lstat(p)
+            except FileNotFoundError:  # a peer's key temp file, renamed
+                continue
             out[p] = (st.st_size, st.st_mtime_ns)
     return out
 
