@@ -126,7 +126,7 @@ def main():
               rc == 0 and j.get("result") == "ok" and j.get("reason") == "",
               j)
         check("idle: the text arrived as one bracketed paste",
-              "\x1b[200~hello codex\x1b[201~" in k, k)
+              "\x1b[200~hello codex\x1b[201~" in "".join(k), k)
         check("idle: then Tab on its own, no Enter",
               k[-1:] == ["\t"] and "\r" not in "".join(k), k)
         check("idle: the composer is empty again, the text in history",
@@ -137,14 +137,14 @@ def main():
         k2 = keys(d)[len(k):]
         check("idle '!': pasted whole, then Tab, sent",
               rc == 0 and j.get("result") == "ok" and
-              "\x1b[200~! ls\x1b[201~" in k2 and k2[-1:] == ["\t"],
+              "\x1b[200~! ls\x1b[201~" in "".join(k2) and k2[-1:] == ["\t"],
               (j, k2))
         # a "/" text keeps Enter: Codex's slash popup takes Tab
         rc, j = say(n, "/status")
         k3 = keys(d)[len(k) + len(k2):]
         check("idle '/': pasted, then Enter, no Tab, sent",
               rc == 0 and j.get("result") == "ok" and
-              "\x1b[200~/status\x1b[201~" in k3 and k3[-1:] == ["\r"] and
+              "\x1b[200~/status\x1b[201~" in "".join(k3) and k3[-1:] == ["\r"] and
               "\t" not in "".join(k3), (j, k3))
 
         # streaming: the busy row hidden, the plain composer, fresh output
@@ -154,7 +154,7 @@ def main():
         k = keys(d)
         check("streaming: sent, pasted, then Tab, never Enter",
               rc == 0 and j.get("result") == "ok" and
-              "\x1b[200~when you are done\x1b[201~" in k and
+              "\x1b[200~when you are done\x1b[201~" in "".join(k) and
               k[-1:] == ["\t"] and "\r" not in "".join(k), (j, k))
 
         # busy: Tab queues for the turn's end; Enter would steer it
@@ -163,7 +163,7 @@ def main():
         k = keys(d)
         check("busy: sent, exit 0", rc == 0 and j.get("result") == "ok", j)
         check("busy: pasted, then Tab, never Enter",
-              "\x1b[200~after this turn\x1b[201~" in k and
+              "\x1b[200~after this turn\x1b[201~" in "".join(k) and
               k[-1:] == ["\t"] and "\r" not in "".join(k), k)
         check("busy: shown queued",
               "Queued follow-up inputs" in run("--read", n).stdout)
