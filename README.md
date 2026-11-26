@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.171.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.172.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -725,8 +725,8 @@ busy or waiting on a human.
 
 | State | Signal |
 | --- | --- |
-| `blocked` | Permission/confirmation prompts: "Do you want to proceed?", "Esc to cancel · Tab to amend" (Write/Edit), "Claude has written up a plan …" (plan approval), "Allow command?", "Press enter to confirm or esc to cancel", "permission required", "waiting for approval", … (Claude Code, Codex, Gemini, opencode, Cursor). With Claude Code's input box on screen, only the rows below it count: a reply that quotes a prompt is not one |
-| `working` | Busy footers ("esc to interrupt", "ctrl+c to interrupt") or an animated braille spinner at the start of a line — only honored if the session also produced output in the last 30 s, so a frozen frame can't read as busy |
+| `blocked` | Permission/confirmation prompts: "Do you want to proceed?", "Esc to cancel · Tab to amend" (Write/Edit), "Claude has written up a plan …" (plan approval), "permission required", "waiting for approval", … (Claude Code, Codex, Gemini, opencode, Cursor). Codex 0.167: a line starting "Press enter to confirm or esc to cancel" (its run-command, edit, network, permissions and MCP approvals), a line starting "enter to submit \| esc to cancel" (MCP form), "enter to submit answer" / "enter to submit all" (its questions), and lines starting "Trust this folder?", "Hooks need review" or "Working directory · Resume" (startup and resume dialogs); "Allow command?" is kept for Codex before 0.167. With Claude Code's input box on screen, only the rows below it count: a reply that quotes a prompt is not one |
+| `working` | Busy footers ("esc to interrupt", "ctrl+c to interrupt", Codex's "… to interrupt)" with a remapped key) or an animated braille spinner at the start of a line — only honored if the session also produced output in the last 30 s, so a frozen frame can't read as busy |
 | `idle` / `working` | Fallback output heuristic: pty output within the last 5 s = `working`, else `idle` |
 
 Resolution order, per query:
@@ -744,6 +744,12 @@ to install. Transcript/pager views that replay old prompts are recognized
 and suppressed, but a program that happens to print a matching string can
 still false-positive. `DCH_NO_DETECT=1` in the client's environment
 disables detection entirely (reported state + heuristic only).
+
+Codex hides its busy row ("• Working (… • esc to interrupt)") while the
+answer streams, so its screen then shows the plain composer. No rule
+matches that screen, and the output heuristic reads the streaming text as
+`working`; a pause of more than 5 s with no output in that stretch reads
+`idle` until output resumes. The hooks below report the turn exactly.
 
 Detection needs the session master's VT mirror: against a lite or
 `DCH_NO_VT=1` master it falls back to the reported state + heuristic. A
@@ -783,12 +789,24 @@ stale `working` behind (a hard-killed one can, until the next report or
 session end — same trade-off herdr makes, which uses process-exit rather
 than a timeout to expire state).
 
-**OpenAI Codex** (`~/.codex/config.toml`) — Codex only signals
-turn-complete:
+**OpenAI Codex** (0.167; `[hooks]` in `~/.codex/config.toml`, or a
+`hooks.json` beside it) — the same event names and commands as Claude Code:
 
-```toml
-notify = ["sh", "-c", "dch --report \"$DCH_SESSION\" idle 2>/dev/null; true"]
-```
+| Hook event | Command |
+| --- | --- |
+| `UserPromptSubmit`, `PreToolUse` | `dch --report "$DCH_SESSION" working 2>/dev/null; true` |
+| `PermissionRequest` | `dch --report "$DCH_SESSION" blocked 2>/dev/null; true` |
+| `Stop`, `Interrupt` | `dch --report "$DCH_SESSION" idle 2>/dev/null; true` |
+| `SessionEnd` | `dch --report "$DCH_SESSION" clear 2>/dev/null; true` |
+
+`PermissionRequest` runs before Codex shows its approval dialog. A hook
+there can answer allow or deny; the command above answers neither. Codex runs a
+hook only after you trust it, and a new or edited hook raises the "Hooks
+need review" dialog at the next start (dch reads that dialog as `blocked`).
+Trust the hooks once in the Codex TUI. Not verified: that `DCH_SESSION`
+reaches Codex's hook processes (Codex builds their environment itself).
+Codex's `notify = [...]` fires only at turn end, so it can report `idle` and
+nothing else.
 
 **Anything else**: call `dch --report "$DCH_SESSION" <state>` from the
 harness's hook/notify mechanism. Outside a dch session `DCH_SESSION` is
@@ -1224,7 +1242,7 @@ its prompt (in another session of this project: that session's prompt). A shell 
 shows its lines.
 
 The line under the tabs names the corpus: `Shell · last N rows`, `Shell · no
-shell integration · mentions only`, `Codex · mentions only`, `X-ray needs the
+shell integration · mentions only`, `Codex`, `X-ray needs the
 full dch build` (dch-lite), `X-ray is off for shells (xray_ring = 0)`,
 `2 Claude sessions run here; X-ray reads one`, `No Claude session found
 here`, and so on. A shell's line adds "a terminal's own clear-screen key may
@@ -1416,9 +1434,9 @@ The corpus:
   - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
 - **Codex.** A live Codex in the session (the first process named `codex`
   below the session's shell) answers from its rollout: `corpus: "codex"`,
-  always `mentions_only: true` (Prosper's label: "Codex · mentions only").
-  Its chapters are its user turns and compactions, its refs are mentions, and
-  nothing is ever a definition. `session_id` is the Codex thread id.
+  `mentions_only: false` (#657; before it, always `true`, Prosper's label
+  "Codex · mentions only"). Its chapters are its user turns and compactions;
+  its refs are mentions and definitions. `session_id` is the Codex thread id.
   - The thread comes only from Codex's shell snapshots,
     `<CODEX_HOME>/shell_snapshots/<id>.<n>.sh`. Exactly one UUID-named
     snapshot must export the session's `DCH_SESSION` (and its bridge marker,
@@ -1443,10 +1461,30 @@ The corpus:
   - Assistant text uses the prose rules. Tool calls (`function_call`
     arguments, `custom_tool_call` input, `local_shell_call` action) and their
     outputs use the code rules, with the tool clips. Developer messages,
-    reasoning, every `event_msg` (a user turn's twin among them) and any other
-    record type give nothing.
-  - Rollouts are read as Codex 0.151 to 0.167 writes them (a `timestamp`,
-    `type`, `payload` line). `project_label` is the Codex process's cwd, or
+    reasoning, every other `event_msg` (a user turn's and an answer's twins
+    among them, so a turn counts once) and any other record type give
+    nothing.
+  - Definitions (#657) follow the rule for a Claude tool result paired with
+    its call: a shell command's output defines as a `Bash` result does (a
+    file read with `cat` as Claude's `cat`), any other call's output as a
+    generic tool's, and a failed one defines nothing. A patch (`apply_patch`,
+    a `FileChange`) is a write, as Claude's `Edit`: no definition. The source
+    is the `event_msg` `item_completed` record (paginated rollouts):
+    `CommandExecution` (`command`, `aggregated_output`; failed when
+    `exit_code` is not 0) and `McpToolCall` (`result`'s text; failed with an
+    `error` or `isError`). Its `id` is the call's `call_id`, so a call that
+    also has a `response_item` output defines once; code mode's inner calls
+    exist only as these items, and their output gives its mentions too. A
+    rollout without these items (legacy) pairs `function_call` with
+    `function_call_output` by `call_id`; the exit status is the output's
+    `Process exited with code N` (`exec_command`) or `Exit code: N`
+    (`shell`), and the body after its `Output:` line is what defines. Codex
+    cuts a persisted command output past 64 KiB in its middle (`... command
+    output truncated for persistence ...`): the kept head defines as a
+    clipped Claude result does, and D2 (a whole JSON value) is off for it.
+  - Rollouts are read as Codex 0.151 to 0.167.2 writes them (a `timestamp`,
+    `type`, `payload` line; the `item_completed` fields checked against the
+    0.167.2 source). `project_label` is the Codex process's cwd, or
     the rollout's last `cwd` when that cannot be read; file refs resolve
     against the rollout's `cwd`.
   - Nothing in the Codex directory is run or written.

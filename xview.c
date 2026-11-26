@@ -2483,8 +2483,10 @@ xv_label(const struct xv *v, char *b, size_t n)
 	/* a Claude followed on while others run: the count (#314) */
 	if (!v->have || (!strcmp(c, "claude") && v->claudes < 2))
 		return;
-	if (!strcmp(c, "codex"))
+	if (!strcmp(c, "codex") && v->mentions_only)
 		snprintf(b, n, "Codex%smentions only", d);
+	else if (!strcmp(c, "codex"))	/* #657: a rollout defines */
+		snprintf(b, n, "Codex");
 	else if (!strcmp(c, "shell"))
 	{
 		int alt = !strcmp(v->why, "alt");

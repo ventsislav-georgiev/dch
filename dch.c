@@ -3888,6 +3888,7 @@ struct det_rule
 static const struct det_rule det_suppress[] = {
 	{ "showing detailed transcript", 0 },              /* claude ctrl-o */
 	{ "pgup/pgdn to", "q to quit" },                   /* codex pager   */
+	{ "pgup/pgdn/", "close" },                  /* codex 0.167 pager */
 };
 /* Waiting on a human. Checked before working: a stale spinner must not
 ** mask a live permission prompt. */
@@ -3899,9 +3900,15 @@ static const struct det_rule det_blocked[] = {
 	** start, as it wraps at its end under ~90 columns */
 	{ "^claude has written up a plan", 0 },            /* claude plan   */
 	{ "^background work is running", 0 },              /* claude /exit  */
-	{ "press enter to confirm or esc to cancel", 0 },  /* codex         */
+	/* codex 0.167 approvals (exec, patch, network, permissions, MCP) */
+	{ "^press enter to confirm or esc to cancel", 0 },
+	{ "^enter to submit | esc to cancel", 0 },  /* codex MCP form   */
 	{ "enter to submit answer", 0 },                   /* codex forms   */
-	{ "allow command?", 0 },                           /* codex exec    */
+	{ "enter to submit all", 0 },                      /* codex forms   */
+	{ "^trust this folder?", 0 },               /* codex startup    */
+	{ "^hooks need review", 0 },                /* codex startup    */
+	{ "^working directory \xc2\xb7 resume", 0 },  /* codex resume */
+	{ "allow command?", 0 },        /* codex before 0.167 (not in it) */
 	{ "permission required", 0 },                      /* opencode      */
 	{ "waiting for approval", 0 },                     /* cursor        */
 	{ "waiting for user confirmation", 0 },            /* gemini        */
@@ -3912,6 +3919,7 @@ static const struct det_rule det_blocked[] = {
 /* Busy right now (footer hints; spinner handled separately). */
 static const struct det_rule det_working[] = {
 	{ "esc to interrupt", 0 },                 /* claude,codex,opencode */
+	{ " to interrupt)", 0 },          /* codex, remapped interrupt key */
 	{ "ctrl+c to interrupt", 0 },                      /* opencode      */
 };
 
@@ -13979,7 +13987,7 @@ xr_codex_answer(const struct xr_cx *x, struct xr_answer *a,
 	}
 	a->corpus = "codex";
 	a->available = 1;
-	a->mentions_only = 1;
+	a->mentions_only = 0;	/* #657: a Codex rollout defines too */
 	a->refs = refs;
 	a->complete = !capped && ch->total == ch->n;
 	a->why = a->complete ? NULL : "range";
@@ -16190,7 +16198,7 @@ xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 	if ((!s->cx || !s->label[0]) && xr_claude_cwd(s->d)[0])
 		snprintf(s->label, sizeof s->label, "%s", xr_claude_cwd(s->d));
 	a->corpus = s->cx ? "codex" : "claude";
-	a->mentions_only = s->cx != NULL;
+	a->mentions_only = 0;	/* #657: a Codex rollout defines too */
 	a->available = 1;
 	a->ch = xr_claude_chapters(s->d);
 	a->refs = s->ix;

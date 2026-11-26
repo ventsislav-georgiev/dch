@@ -468,6 +468,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "hot-path perf budget" perf_test.py
     pyrun "picker resolves harness session names" harness_names_test.py
     pyrun "--meta stores session metadata for --ls-json" meta_test.py
+    pyrun "Codex 0.167 screens: blocked, working, suppressed (#654)" detect_codex_test.py
     pyrun "--ls-json claude_session_id and transcript_path" transcript_test.py
     pyrun "--ls-json cols, rows and attached clients" ls_json_size_test.py
     pyrun "a stopped master with a full backlog hangs no verb (#265)" stuck_master_test.py
