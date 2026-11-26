@@ -435,6 +435,9 @@ int dch_history_dir(char *out, size_t outsz, const char *sockdir,
 int dch_dir_private(const char *dir);
 /* The shallowest Codex at or below child (X-ray 7.3/7.4); 0 none. */
 long dch_codex_below(long child);
+/* #655: the thread id and CODEX_HOME of the Codex at pid; 0, or -1. */
+int dch_codex_thread(long pid, char *id, size_t idsz, char *home,
+                     size_t homesz);
 int dch_agent_probe(long child, struct dch_agent *a);
 /* 1: the Claude at pid is in front of its terminal, through any wrapper
 ** pty up to the session child root (#282, #312); 0 not; -1 unreadable. */

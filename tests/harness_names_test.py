@@ -117,7 +117,8 @@ def main():
         # dch sessions to resolve against.
         for name in ("hn-named", "hn-derived", "hn-codex-old",
                      "hn-codex-empty", "hn-codex-wrong", "hn-codex-stale",
-                     "hn-codex-malformed", "hn-inherited"):
+                     "hn-codex-malformed", "hn-inherited", "hn-esc",
+                     "hn-spaced", "hn-nul"):
             subprocess.run([DCH, "--spawn", name, "sleep", "60"], check=True)
         # A Codex TUI runs under its session's master: that is what makes
         # its snapshot its own (#083).
@@ -159,6 +160,16 @@ def main():
         p9 = spawn_env_proc("hn-inherited", "hn-inherited",
                             CODEX_THREAD_ID="codex-inherited")
         procs.extend((p4, p5, p6, p7, p8, p9))
+        # #661: the record is parsed as JSON: escapes decoded, \" kept,
+        # spaced "name" : form matched, \u0000 is refused by the parser.
+        for sess, raw in (
+                ("hn-esc", r'{"pid":%d,"name":"caf\u00e9 \"q\" \u001b[0m"}'),
+                ("hn-spaced", '{"pid":%d, "name" : "spaced x" }'),
+                ("hn-nul", r'{"pid":%d,"name":"ab\u0000cd"}')):
+            pe = spawn_env_proc(sess, sess)
+            procs.append(pe)
+            with open(os.path.join(sessdir, "%d.json" % pe.pid), "w") as f:
+                f.write(raw % pe.pid)
         write_codex_snapshot(home, "codex-live", "hn-codex")
         write_codex_snapshot(home, "codex-foreign", "hn-codex-shared")
         write_codex_index(home, [
@@ -174,6 +185,12 @@ def main():
         sl = ls_json(home)
         check("named harness session resolved",
               sl.get("hn-named", {}).get("harness") == "my-claude")
+        check("escaped name decoded (u00e9, \\\", ESC)",
+              sl.get("hn-esc", {}).get("harness") == 'caf\u00e9 "q" \x1b[0m')
+        check("spaced \"name\" : record matched",
+              sl.get("hn-spaced", {}).get("harness") == "spaced x")
+        check("NUL in name: record rejected by the parser, no name",
+              sl.get("hn-nul", {}).get("harness") == "")
         check("derived harness name skipped",
               sl.get("hn-derived", {}).get("harness") == "")
         check("named Codex session resolved",

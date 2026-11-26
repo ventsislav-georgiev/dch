@@ -566,6 +566,12 @@ static char rec_end[192];	/* how the master ended, set before exit */
 static struct timespec rec_at;	/* last refresh */
 static long rec_ms = 60L * 1000L;	/* DCH_RECORD_MS */
 static char rec_stop[65536];	/* <sock>.stopped, as rec_stopped() read it */
+/* The Codex thread the session ran and its CODEX_HOME (#655): seen live,
+** or read from Codex's `codex resume <id>` exit line in cx_tail, the last
+** bytes the child wrote. They stick: a Codex that quit keeps its id. */
+static char rec_cx[40], rec_cxhome[1200];
+static char cx_tail[1024];
+static size_t cx_tail_len;
 
 static void
 rec_str(FILE *f, const char *s)
@@ -617,6 +623,7 @@ static void
 rec_write(const char *end)
 {
 	char tmp[1300], q[sizeof rec_end * 6 + 3], mid[sizeof q + 80];
+	char hq[sizeof rec_cxhome * 6 + 3], cx[sizeof hq + 80];
 	time_t now = time(NULL);
 	int fd, ok;
 
@@ -635,7 +642,12 @@ rec_write(const char *end)
 		fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
 	if (fd < 0)
 		return;
-	ok = rec_put(fd, rec_head) && rec_put(fd, mid) &&
+	cx[0] = '\0';
+	if (rec_cx[0] && dch_json_quote(hq, sizeof hq, rec_cxhome) !=
+	    (size_t)-1)
+		snprintf(cx, sizeof cx, "\"codex\":{\"thread_id\":\"%s\","
+		         "\"home\":%s},", rec_cx, hq);
+	ok = rec_put(fd, rec_head) && rec_put(fd, cx) && rec_put(fd, mid) &&
 	     rec_put(fd, rec_agent) && rec_put(fd, "}\n");
 	if (close(fd) != 0 || !ok || rename(tmp, rec_path) != 0)
 		unlink(tmp);
@@ -750,10 +762,16 @@ rec_refresh(void)
 	size_t hl, al;
 	FILE *f;
 	int fd, stopped;
+	long cx;
 
 	if (!rec_path[0])
 		return;
 	stopped = rec_probe();
+	/* a Codex as the agent: its thread, for --revive (#655) */
+	if (!stopped && the_pty.fd >= 0 && !rec_ag.pid &&
+	    (cx = dch_codex_below(the_pty.pid)) > 0)
+		(void)dch_codex_thread(cx, rec_cx, sizeof rec_cx, rec_cxhome,
+		                       sizeof rec_cxhome);
 	if (sidecar_path(".alias", ap, sizeof ap) == 0 &&
 	    (fd = open(ap, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) >= 0)
 	{
@@ -813,6 +831,37 @@ rec_refresh(void)
 	rec_write("");
 }
 
+/* Codex's exit line, `codex resume <id>` (SGR around it), as the last of
+** them in cx_tail: the thread when no live probe saw one, or a newer one.
+** Plain byte work: rec_exit may run from die(). */
+static void
+rec_cx_exit(void)
+{
+	static const char key[] = "codex resume ";
+	char id[37], *h;
+	size_t k, kl = sizeof key - 1;
+
+	for (k = cx_tail_len; k-- > 0;)
+	{
+		if (k + kl + 36 > cx_tail_len ||
+		    memcmp(cx_tail + k, key, kl) != 0)
+			continue;
+		memcpy(id, cx_tail + k + kl, 36);
+		id[36] = '\0';
+		if (!dch_codex_id_ok(id))
+			continue;
+		memcpy(rec_cx, id, sizeof id);
+		if (!rec_cxhome[0])
+		{
+			if ((h = getenv("CODEX_HOME")) && *h)
+				snprintf(rec_cxhome, sizeof rec_cxhome, "%s", h);
+			else if ((h = getenv("HOME")) && *h)
+				snprintf(rec_cxhome, sizeof rec_cxhome, "%s/.codex", h);
+		}
+		return;
+	}
+}
+
 /* At exit: how the session ended. `dch -k` leaves <sock>.killed before it
 ** signals us, `dch --stop` <sock>.stopped (with the agent to keep); else
 ** die() named the signal, else the child's exit status. */
@@ -837,6 +886,7 @@ rec_exit(void)
 	else if (!rec_end[0])
 		snprintf(rec_end, sizeof rec_end, "exit %d",
 		         exit_code >= 0 ? exit_code : 1);
+	rec_cx_exit();
 	rec_write(rec_end);
 }
 
@@ -2111,6 +2161,25 @@ process_pty_buf(const unsigned char *buf, size_t len)
 	/* Remember any enhanced-keyboard mode toggles so we can re-arm a
 	** client that attaches later (see kbd_u / kbd_m). */
 	track_modes(buf, len);
+
+	/* Always: Codex's exit line for the record (#655) */
+	if (len >= sizeof cx_tail)
+	{
+		memcpy(cx_tail, buf + len - sizeof cx_tail, sizeof cx_tail);
+		cx_tail_len = sizeof cx_tail;
+	}
+	else
+	{
+		if (cx_tail_len + len > sizeof cx_tail)
+		{
+			size_t drop = cx_tail_len + len - sizeof cx_tail;
+
+			memmove(cx_tail, cx_tail + drop, cx_tail_len - drop);
+			cx_tail_len -= drop;
+		}
+		memcpy(cx_tail + cx_tail_len, buf, len);
+		cx_tail_len += len;
+	}
 
 	/* Armed: keep the raw tail of what the child says on its way out. */
 	if (respawn_armed)
@@ -4919,6 +4988,20 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			if (ra && dch_json_is_object(ra))
 				rec_seed = strdup(ra);
 			unsetenv("DCH_REVIVE_AGENT");
+			/* and the Codex thread it resumes (#655), under the
+			** CODEX_HOME it hands the child */
+			if ((ra = getenv("DCH_REVIVE_CODEX")) && dch_codex_id_ok(ra))
+			{
+				const char *ch = getenv("CODEX_HOME"), *hm;
+
+				snprintf(rec_cx, sizeof rec_cx, "%s", ra);
+				if (ch && *ch)
+					snprintf(rec_cxhome, sizeof rec_cxhome, "%s", ch);
+				else if ((hm = getenv("HOME")) && *hm)
+					snprintf(rec_cxhome, sizeof rec_cxhome, "%s/.codex",
+					         hm);
+			}
+			unsetenv("DCH_REVIVE_CODEX");
 			revive_mcp = getenv("DCH_REVIVE_MCP") != NULL;
 			unsetenv("DCH_REVIVE_MCP");
 		}

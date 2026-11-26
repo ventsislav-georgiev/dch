@@ -1822,19 +1822,20 @@ load_harness_record(const char *path, const char *body, size_t body_len,
                     void *arg)
 {
 	struct slist *sl = arg;
-	char jb[8192], sess[600], cb[256], *nm, *q, *endp;
+	char sess[600], cb[256], nm[1024], src[32], *endp;
 	const char *base = strrchr(path, '/'), *cn;
 	long pid;
 	int i;
-	if (body_len >= sizeof jb) return 0;
-	memcpy(jb, body, body_len + 1);
+	if (body_len >= 8192) return 0;
 	base = base ? base + 1 : path;
 	pid = strtol(base, &endp, 10);
-	if (pid <= 0 || strcmp(endp, ".json") ||
-	    strstr(jb, "\"nameSource\":\"derived\"")) return 0;
-	nm = strstr(jb, "\"name\":\"");
-	if (!nm || !(q = strchr(nm += 8, '"')) || q == nm) return 0;
-	*q = '\0';
+	if (pid <= 0 || strcmp(endp, ".json")) return 0;
+	/* decoded by the JSON parser: escapes, \" and spaced forms; a \u0000
+	** cuts the C string there */
+	if ((dch_json_string(body, "nameSource", src, sizeof src) == 0 &&
+	     !strcmp(src, "derived")) ||
+	    dch_json_string(body, "name", nm, sizeof nm) != 0 || !nm[0])
+		return 0;
 	for (char *c = nm; *c; c++)
 		if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
 	if (proc_dch_session(pid, sess, sizeof sess) != 0) return 0;
@@ -2124,6 +2125,40 @@ dch_codex_snapshot_id(const char *home, const char *sess, const char *marker,
 	closedir(d);
 	return best.st_mtime && !(strict && ambiguous) &&
 	       !dch_codex_shared(sess, marker) ? 0 : -1;
+}
+
+/* The thread the Codex at pid runs, and the CODEX_HOME it runs under (its
+** own, else its HOME's .codex), for the history record (#655): its env's
+** thread id, else its shell snapshot's. 0 with both set, else -1 and
+** neither touched. */
+int
+dch_codex_thread(long pid, char *id, size_t idsz, char *home, size_t homesz)
+{
+	char h[1200], t[128], sess[600], mk[700];
+	const char *marker = NULL;
+
+	if (proc_env_value(pid, "CODEX_HOME", h, sizeof h) != 0 || !h[0])
+	{
+		/* room left for the "/.codex" it gains */
+		if (proc_env_value(pid, "HOME", h, sizeof h - 8) != 0 || !h[0])
+			return -1;
+		strcat(h, "/.codex");
+	}
+	if (proc_env_value(pid, "DCH_NATIVE_BRIDGE_ID", mk, sizeof mk) == 0 &&
+	    mk[0])
+		marker = mk;
+	if ((proc_env_value(pid, "CODEX_THREAD_ID", t, sizeof t) != 0 ||
+	     !dch_codex_id_ok(t)) &&
+	    (proc_env_value(pid, "CODEX_SESSION_ID", t, sizeof t) != 0 ||
+	     !dch_codex_id_ok(t)) &&
+	    (proc_dch_session(pid, sess, sizeof sess) != 0 ||
+	     dch_codex_snapshot_id(h, sess, marker, t, sizeof t, 1) != 0))
+		return -1;
+	if (strlen(t) >= idsz || strlen(h) >= homesz)
+		return -1;
+	snprintf(id, idsz, "%s", t);
+	snprintf(home, homesz, "%s", h);
+	return 0;
 }
 
 static int
@@ -7569,6 +7604,10 @@ static const char *const cg_why[] = {
 static const char *const cg_code[] = {	/* --stop's reasons, as --say's */
 	"", "prompt", "draft", "queued", "no_screen",
 };
+/* In a --say child (#658): the agent is Codex, and the key that submits
+** (NULL: Enter; Tab queues into a busy Codex, where Enter would steer). */
+static int ty_codex;
+static const char *ty_key;
 
 struct agent
 {
@@ -7812,6 +7851,46 @@ screen_modal(const char *txt)
 	return res;
 }
 
+/* Codex's composer (#658, spec A1): the bottom-most row starting "› "
+** (blanks before it allowed), its wrapped rows indented two, up to the
+** footer ("context left", "for shortcuts") or the first row that is not
+** one. Returns the "›", *end where it ends; NULL none. An approval list's
+** "› 1. Yes" matches too: callers check for dialogs first. */
+static char *
+codex_composer_find(char *txt, char **end)
+{
+	char *ls, *nx, *comp = NULL, *g;
+	size_t w;
+
+	for (ls = txt; ls; ls = nx)
+	{
+		nx = strchr(ls, '\n');
+		nx = nx ? nx + 1 : NULL;
+		g = ls + strspn(ls, " ");
+		if (strncmp(g, "\xe2\x80\xba ", 4) == 0)
+			comp = g;
+	}
+	if (!comp)
+		return NULL;
+	for (ls = comp; (nx = strchr(ls, '\n')); ls = nx)
+	{
+		char keep;
+		int stop;
+
+		nx++;
+		w = strcspn(nx, "\n");
+		keep = nx[w];
+		nx[w] = '\0';	/* the row alone, for strstr */
+		stop = strncmp(nx, "  ", 2) || !nx[strspn(nx, " ")] ||
+		       strstr(nx, "context left") || strstr(nx, "for shortcuts");
+		nx[w] = keep;
+		if (stop)
+			break;
+	}
+	*end = nx ? nx : ls + strlen(ls);
+	return comp;
+}
+
 /* Is the Claude Code screen at `path` safe to type into? Positive evidence
 ** only: the composer must be on screen and empty (nothing after the glyph,
 ** or only Claude's dim placeholder: a typed draft is not dim), with no
@@ -7829,6 +7908,16 @@ gate_screen(char *txt, const char *dim, int queue_ok)
 
 	if ((res = screen_modal(txt)) == CG_QUEUED && queue_ok)
 		res = CG_UNKNOWN;
+	/* Codex: empty is its main placeholder; the side conversation's
+	** ("Ask a follow-up question") sends to a side thread, not the agent */
+	if (res == CG_UNKNOWN && ty_codex &&
+	    (comp = codex_composer_find(txt, &end)))
+		return strncmp(comp + 4, "Ask Codex to do anything", 24) == 0
+		       ? CG_EMPTY
+		       : strncmp(comp + 4, "Ask a follow-up question", 24) == 0
+		       ? CG_UNKNOWN : CG_DRAFT;
+	if (ty_codex)
+		return res;
 	/* bash mode (a "!" prefix) is a human's: a /command would run there */
 	if (res == CG_UNKNOWN && (comp = composer_find(txt, &end)) &&
 	    *comp == '!')
@@ -7913,13 +8002,16 @@ composer_holds_at(const char *path, const char *text)
 		return -2;
 	if (screen_modal(txt) == CG_DIALOG)
 		;
-	else if (!(comp = composer_find(txt, &end)))
+	else if (!(comp = ty_codex ? codex_composer_find(txt, &end)
+	                           : composer_find(txt, &end)))
 		ok = -1;
 	else if ((have = squeeze(composer_text(comp),
 	                         (size_t)(end - composer_text(comp)), (size_t)-1)) &&
 	         (want = squeeze(text, strlen(text), 32)))
 		ok = *want && (strncmp(have, want, strlen(want)) == 0 ||
-		               strncmp(have, "[Pastedtext#", 12) == 0);
+		               strncmp(have, "[Pastedtext#", 12) == 0 ||
+		               /* Codex's past 1000 chars (spec A4) */
+		               strncmp(have, "[PastedContent", 14) == 0);
 	free(have);
 	free(want);
 	free(txt);
@@ -7950,12 +8042,14 @@ composer_left(const char *path, const char *text)
 		return -1;
 	if ((g = gate_screen(txt, dim, 1)) == CG_EMPTY)
 		res = 0;
-	else if (g == CG_DRAFT && (comp = composer_find(txt, &end)) &&
+	else if (g == CG_DRAFT && (comp = ty_codex ? codex_composer_find(txt, &end)
+	                                           : composer_find(txt, &end)) &&
 	         (have = squeeze(composer_text(comp),
 	                         (size_t)(end - composer_text(comp)), (size_t)-1)) &&
 	         (want = squeeze(text, strlen(text), (size_t)-1)) &&
 	         (strncmp(want, have, strlen(have)) == 0 ||
-	          strncmp(have, "[Pastedtext#", 12) == 0))
+	          strncmp(have, "[Pastedtext#", 12) == 0 ||
+	          strncmp(have, "[PastedContent", 14) == 0))
 		res = *comp == '!' && strcmp(have, "!") == 0 ? 2 : 1;
 	free(have);
 	free(want);
@@ -8064,7 +8158,7 @@ ag_type(const char *path, const char *text, int paste)
 	}
 	for (n = 0; ; n++)
 	{
-		if ((t = ty_push(path, NULL, 1)) == -4)
+		if ((t = ty_push(path, ty_key, !ty_key)) == -4)
 			return ty_take_back(path, text, land);
 		if (t < 0)
 			return -1;
@@ -9243,7 +9337,9 @@ restart_agents(int force, const char *only, int json)
 ** (Enter would answer it) or a draft (ours would join it) — those are
 ** skipped and the caller retries. Every session types in a child of its
 ** own, so --all costs the slowest session, not the sum (ag_type alone may
-** take ~25 s). */
+** take ~25 s). A Codex session (#658) goes through the same gate and
+** typing, its composer read by codex_composer_find, every text pasted, and
+** Tab in place of Enter but for a "/" text (say_type). */
 
 /* Outcomes; from SAY_NO_SESSION on they are failures. */
 enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
@@ -9344,6 +9440,12 @@ say_type(const char *path, const char *text, int paste)
 	default:
 		return SAY_NO_SCREEN;
 	}
+	/* Codex: Tab, which queues into a running turn where Enter would steer
+	** it, and submits on an idle composer as Enter does (spec A5); so no
+	** busy read, which streaming would fool. A "/" text keeps Enter: the
+	** slash popup takes Tab. */
+	if (ty_codex && *text != '/')
+		ty_key = "\t";
 	t = ag_type(path, text, paste);
 	/* a "!" text left behind is a loaded shell command: the person's next
 	** Enter runs it with no permission prompt, so take it back (#635).
@@ -9441,6 +9543,7 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	{
 		struct cmd_info ci;
 		struct crec r;
+		long cx = 0;
 
 		session_sock_path(names[k], path, sizeof path);
 		if (self && *self &&
@@ -9457,9 +9560,11 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			/* any status: a busy Claude queues the message. A
 			** suspended one reads nothing: the shell in front would
 			** (#282) */
-			c = ci.pid <= 0 || claude_find(ci.pid, 1, &r) == 0
-			    ? SAY_NOT_CLAUDE
-			    : proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : -1;
+			c = ci.pid <= 0 ? SAY_NOT_CLAUDE
+			    : claude_find(ci.pid, 1, &r) != 0
+			    ? (proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : -1)
+			    : (cx = dch_codex_below(ci.pid)) <= 0 ? SAY_NOT_CLAUDE
+			    : proc_fg(ci.pid, cx) == 0 ? SAY_NOT_FG : -1;
 			cmd_info_free(&ci);
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -9472,8 +9577,11 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			ty_kids = NULL;
 			ty_nkids = 0;
 			sigprocmask(SIG_SETMASK, &old, NULL);
+			/* Codex: always pasted. A pasted "/cmd" still runs as
+			** one, a pasted "!" opens no shell mode (spec A4) */
+			ty_codex = cx > 0;
 			_exit(SAY_EXIT + say_type(path, text,
-			      !say_raw(text)));
+			      ty_codex || !say_raw(text)));
 		}
 		if (c < 0)
 			sigprocmask(SIG_SETMASK, &old, NULL);
@@ -9771,6 +9879,7 @@ struct hrec
 	char name[512], alias[600], cwd[PATH_MAX], end[192];
 	char sid[64], aname[256], acwd[PATH_MAX];
 	char acfg[1400];	/* agent's config_dir, "" = the default (#065) */
+	char cx[40], cxhome[1200];	/* a Codex's thread and home (#655) */
 	long started, updated, ended;
 	char **argv, **launch;	/* malloc'd blocks */
 	int argc, launchc, live;
@@ -9781,7 +9890,7 @@ struct hrec
 	long long deadline;
 };
 
-enum { RV_SKIP, RV_PLAIN, RV_ARGV, RV_SHELL };
+enum { RV_SKIP, RV_PLAIN, RV_ARGV, RV_SHELL, RV_CODEX };
 
 static void
 hrec_free(struct hrec *r, int n)
@@ -9955,6 +10064,11 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	}
 	else
 		r->sid[0] = '\0';
+	if (dch_json_nested_string(r->body, "codex", "thread_id", r->cx,
+	                           sizeof r->cx) < 0 || !dch_codex_id_ok(r->cx) ||
+	    dch_json_nested_string(r->body, "codex", "home", r->cxhome,
+	                           sizeof r->cxhome) < 0)
+		r->cx[0] = r->cxhome[0] = '\0';
 	hrec_strip(r, r->argv, &r->argc, NULL, "argv");
 	/* A record with an end is over even if a new session took its name;
 	** live means its own socket answers, so a record a cold start moved
@@ -10164,6 +10278,8 @@ do_history_verb(int json, int remote)
 		if (r[k].sid[0])
 			printf("  [claude %s%s%s]", r[k].aname,
 			       r[k].aname[0] ? " " : "", r[k].sid);
+		else if (r[k].cx[0])
+			printf("  [codex %s]", r[k].cx);
 		if (r[k].pinned)
 			fputs("  [pinned]", stdout);
 		if (aside)
@@ -11810,8 +11926,9 @@ rv_say(const struct hrec *r, int json, const char *res, const char *code,
 	vsnprintf(d, sizeof d, fmt, ap);
 	va_end(ap);
 	if (json)
-		rv_json_final(r->name, r->as, res, code, d, r->sid,
-		              r->mode == RV_ARGV);
+		rv_json_final(r->name, r->as, res, code, d,
+		              r->sid[0] ? r->sid : r->cx, r->mode == RV_ARGV ||
+		              r->mode == RV_CODEX);
 	else
 		printf("%s: %s\n", r->name, d);
 	fflush(stdout);
@@ -11855,13 +11972,14 @@ rv_cfg(const char *cfg, char **v, int tok)
 ** it comes back as the shell (RV_SHELL, the command is typed later). 0, or
 ** -1 with the reason printed. */
 static int
-revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
+revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json,
+             char *msg)
 {
 	char **nv = NULL, **v = r->argv;
-	int tok = dch_claude_tok(r->argv, r->argc), nc = r->argc, rc;
+	int tok = dch_claude_tok(r->argv, r->argc), nc = r->argc, rc, cxat;
 	const char *lossy = hrec_lossy(r), *cfg = NULL, *o;
-	char *was = NULL, *nmv = NULL;
-	int mcp = 0;
+	char *was = NULL, *nmv = NULL, *cxwas = NULL;
+	int mcp = 0, cxset = 0;
 
 	if (lossy)
 	{
@@ -11899,6 +12017,28 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 	}
 	else if (r->sid[0] && r->launch)
 		r->mode = RV_SHELL;
+	/* a Codex as the command: `codex resume <id> -C <cwd> [msg]` under
+	** the CODEX_HOME it ran with (#655) */
+	else if (!r->sid[0] && r->cx[0] &&
+	         (cxat = dch_codex_tui_word(r->argv)) >= 0)
+	{
+		char def[1200];
+		const char *hm = getenv("HOME");
+
+		if (!(nv = calloc((size_t)r->argc + 7, sizeof *nv)))
+			return -1;
+		nc = dch_codex_resume(r->argv, r->argc, cxat, r->cx, r->cwd, msg, nv);
+		v = nv;
+		r->mode = RV_CODEX;
+		o = getenv("CODEX_HOME");
+		snprintf(def, sizeof def, "%s/.codex", hm ? hm : "");
+		if (r->cxhome[0] && strcmp(r->cxhome, o && *o ? o : def) != 0)
+		{
+			cxwas = o ? strdup(o) : NULL;
+			cxset = setenv("CODEX_HOME", r->cxhome, 1) == 0;
+		}
+		setenv("DCH_REVIVE_CODEX", r->cx, 1);
+	}
 	/* Under another name, claude's --name follows when it was the dch name;
 	** a name of the user's own stays (#398). s holds r->argv's pointers,
 	** and so does v: the value's entry is found by identity. */
@@ -11960,6 +12100,12 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 		}
 	}
 	unsetenv("DCH_REVIVE_AGENT");
+	unsetenv("DCH_REVIVE_CODEX");
+	if (cxset && cxwas)
+		setenv("CODEX_HOME", cxwas, 1);
+	else if (cxset)
+		unsetenv("CODEX_HOME");
+	free(cxwas);
 	if (mcp)
 		unsetenv("DCH_REVIVE_MCP");
 	if (cfg && was)
@@ -12341,6 +12487,33 @@ rec_hit(const struct hrec *h, const char *arg, const char *stem, int byfile)
                       "\"file\" in dch --history --json (session a.json: " \
                       "a.json.json)"
 
+/* The resume message for record h, revived with `how` (DCH_REVIVE_MSG
+** stands in for it when set). */
+static void
+rv_text(const struct hrec *h, const char *how, char *text, size_t sz)
+{
+	char when[32] = "an unknown time";
+	time_t t = (time_t)hrec_when(h);
+
+	if (t)
+		strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
+	if (strcmp(h->end, "stopped") == 0)
+		snprintf(text, sz, "resume all work. This session "
+		         "was stopped by dch --stop (%s) and dch revived it "
+		         "with %s. Re-arm the monitors, "
+		         "background shells, subagents, loops, wakeups and "
+		         "crons you stopped before the pause, then carry on "
+		         "where you left off.", when, how);
+	else
+		snprintf(text, sz, "resume all work. This session "
+		         "ended (%s, last seen %s) and dch revived it with "
+		         "%s. Re-read your ledger and task list, "
+		         "re-arm the monitors, background shells, loops, "
+		         "wakeups and crons that died with it, re-dispatch "
+		         "any unfinished workers, then carry on where you "
+		         "left off.", h->end, when, how);
+}
+
 /* `--revive <name> [--as <new>]` / `--revive --all`; nomsg: --no-message,
 ** claude is resumed and nothing is typed into it. */
 static int
@@ -12465,7 +12638,19 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			continue;
 		}
 		json_phase(h->name, "starting", json);
-		if (revive_spawn(exe, h, cols, rows, json) < 0)
+		{
+			/* a Codex takes its resume message as its PROMPT (#655) */
+			const char *em = getenv("DCH_REVIVE_MSG");
+			char cxmsg[1200];
+
+			if (em && *em)
+				snprintf(cxmsg, sizeof cxmsg, "%s", em);
+			else
+				rv_text(h, "codex resume", cxmsg, sizeof cxmsg);
+			i = revive_spawn(exe, h, cols, rows, json,
+			                 nomsg ? NULL : cxmsg);
+		}
+		if (i < 0)
 		{
 			h->mode = RV_SKIP;
 			bad++;
@@ -12495,7 +12680,15 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 					(void)rename(rp, np);
 			}
 		}
-		if (h->mode == RV_PLAIN)
+		if (h->mode == RV_CODEX)
+			rv_say(h, json, "ok", "", "revived as %s in %s, codex resumed "
+			       "%s; resume message %s", h->as, h->cwd, h->cx, nomsg
+			       ? "not sent (--no-message)" : "passed as its prompt");
+		else if (h->mode == RV_PLAIN && !h->sid[0] && h->cx[0])
+			rv_say(h, json, "ok", "", "revived as %s in %s; codex NOT "
+			       "resumed (not an interactive codex command): codex resume %s",
+			       h->as, h->cwd, h->cx);
+		if (h->mode == RV_PLAIN && (h->sid[0] || !h->cx[0]))
 		{
 			rv_say(h, json, h->sid[0] ? "failed" : "ok",
 			       h->sid[0] ? "launch_unknown" : "", "revived as %s in "
@@ -12552,8 +12745,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		struct hrec *h = &r[k];
 		const char *msg = getenv("DCH_REVIVE_MSG");
 		const char *code, *res;
-		char text[1200], when[32] = "an unknown time";
-		time_t t = (time_t)hrec_when(h);
+		char text[1200];
 
 		why = NULL;
 		if (h->mode != RV_ARGV && h->mode != RV_SHELL)
@@ -12566,23 +12758,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			       h->sid);
 			continue;
 		}
-		if (t)
-			strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
-		if (strcmp(h->end, "stopped") == 0)
-			snprintf(text, sizeof text, "resume all work. This session "
-			         "was stopped by dch --stop (%s) and dch revived it "
-			         "with claude --resume. Re-arm the monitors, "
-			         "background shells, subagents, loops, wakeups and "
-			         "crons you stopped before the pause, then carry on "
-			         "where you left off.", when);
-		else
-			snprintf(text, sizeof text, "resume all work. This session "
-			         "ended (%s, last seen %s) and dch revived it with "
-			         "claude --resume. Re-read your ledger and task list, "
-			         "re-arm the monitors, background shells, loops, "
-			         "wakeups and crons that died with it, re-dispatch "
-			         "any unfinished workers, then carry on where you "
-			         "left off.", h->end, when);
+		rv_text(h, "claude --resume", text, sizeof text);
 #ifdef HAVE_LIBGHOSTTY_VT
 		json_phase(h->name, "resuming", json);
 		code = "";
