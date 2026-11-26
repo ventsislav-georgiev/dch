@@ -20,7 +20,7 @@ import json, os, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-TIDS = ["019a3333-4444-7555-8666-7777888899%02d" % k for k in range(1, 8)]
+TIDS = ["019a3333-4444-7555-8666-7777888899%02d" % k for k in range(1, 9)]
 RID = "019a3333-4444-7555-8666-777788889999"
 fails = [0]
 
@@ -195,6 +195,29 @@ def main():
             check("ended Codex .zst: --search reads it too",
                   r.returncode == 0 and
                   json.loads(r.stdout).get("hits"), (r.stdout, r.stderr))
+
+        # the copy cache is bounded: a new copy drops copies and stray
+        # .dec.* files unused for 24 h, and keeps itself
+        if not nozstd:
+            cache = os.path.join(T, "tmp", "dch-zst-%d" % os.getuid())
+            old = time.time() - 2 * 86400
+            os.makedirs(cache, mode=0o700, exist_ok=True)
+            stale = [os.path.join(cache, "1-2-3-4.ok.jsonl"),
+                     os.path.join(cache, ".dec.x")]
+            for f in stale:
+                with open(f, "w") as fh:
+                    fh.write("old\n")
+                os.utime(f, (old, old))
+            plant("cx-prune", TIDS[7])
+            rollout(TIDS[7], "pruning turn", zst=True)
+            answers("cx-prune", TIDS[7], "pruning turn", "a new .zst copy")
+            left = os.listdir(cache)
+            check("the cache drops a copy and a .dec.* older than 24 h, "
+                  "keeps the new copy",
+                  not any(os.path.exists(f) for f in stale) and
+                  # cx-zst's copy and cx-prune's new one
+                  len([n for n in left if n.endswith(".ok.jsonl")]) == 2,
+                  left)
 
         plant("cx-both", TIDS[3])
         rollout(TIDS[3], "the plain one", zst=True, keep_plain=True)

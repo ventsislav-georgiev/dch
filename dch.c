@@ -13395,10 +13395,65 @@ xr_zst_copy(int fd, int tfd, uint64_t cap, uint64_t *n, int *cut)
 }
 #endif
 
+#ifdef HAVE_ZSTD
+/* The copy cache's bound (#656): in dir, drop every copy and stray
+** .dec.* of ours unused for 24 h (a copy's mtime is its last use), then
+** the oldest copies past 4, keep (the one in use) counted, never dropped. */
+static void
+xr_zst_prune(const char *dir, const char *keep)
+{
+	time_t now = time(NULL);
+	int pass;
+
+	for (pass = 0; pass < 64; pass++)	/* one oldest dropped per pass */
+	{
+		DIR *d = opendir(dir);
+		struct dirent *de;
+		struct stat s;
+		char p[1300], oldest[1300] = "";
+		time_t om = 0;
+		int copies = 1;	/* keep */
+		size_t l;
+
+		if (!d)
+			return;
+		while ((de = readdir(d)))
+		{
+			l = strlen(de->d_name);
+			if ((strncmp(de->d_name, ".dec.", 5) &&
+			     (l < 7 || strcmp(de->d_name + l - 6, ".jsonl") ||
+			      !isxdigit((unsigned char)de->d_name[0]))) ||
+			    snprintf(p, sizeof p, "%s/%s", dir, de->d_name) >=
+			    (int)sizeof p || !strcmp(p, keep) || lstat(p, &s) < 0 ||
+			    !S_ISREG(s.st_mode) || s.st_uid != getuid())
+				continue;
+			if (now - s.st_mtime > 24 * 3600)
+			{
+				(void)unlink(p);
+				continue;
+			}
+			if (de->d_name[0] == '.')
+				continue;	/* a decode under way elsewhere */
+			copies++;
+			if (!oldest[0] || s.st_mtime < om)
+			{
+				snprintf(oldest, sizeof oldest, "%s", p);
+				om = s.st_mtime;
+			}
+		}
+		closedir(d);
+		if (copies <= 4 || !oldest[0])
+			return;
+		(void)unlink(oldest);
+	}
+}
+#endif
+
 /* path (a .zst rollout, *st its stat) as its decoded copy: path and *st the
 ** copy's. The copy is cached in $TMPDIR/dch-zst-<uid> (0700) by the .zst's
 ** identity, so a chapter's anchor (its inode) holds from one run to the
-** next; Codex never rewrites a compressed rollout. 0, else -1. */
+** next; Codex never rewrites a compressed rollout. Bounded by
+** xr_zst_prune after each new copy. 0, else -1. */
 static int
 xr_zst_decode(char *path, size_t pathsz, struct stat *st)
 {
@@ -13432,9 +13487,13 @@ xr_zst_decode(char *path, size_t pathsz, struct stat *st)
 		         (unsigned long long)st->st_ino,
 		         (unsigned long long)st->st_size,
 		         (unsigned long long)st->st_mtime, whys[k]);
+		/* a hit's mtime becomes its last use (the key is the .zst's) */
 		if (lstat(fin, &ds) == 0 && S_ISREG(ds.st_mode) &&
 		    ds.st_uid == getuid() && !(ds.st_mode & 077))
+		{
+			(void)utimes(fin, NULL);
 			break;
+		}
 	}
 	if (k == 3)
 	{
@@ -13463,6 +13522,7 @@ xr_zst_decode(char *path, size_t pathsz, struct stat *st)
 			          (unsigned long long)n);
 			return -1;
 		}
+		xr_zst_prune(dir, fin);
 	}
 	if (snprintf(path, pathsz, "%s", fin) >= (int)pathsz)
 		return -1;

@@ -1469,7 +1469,10 @@ The corpus:
     into a private copy, `$TMPDIR/dch-zst-<uid>/` (0700, files 0600, named
     by the `.zst`'s device, inode, size and mtime), and that copy is read.
     The copy is reused, so chapter anchors hold from one query to the
-    next; Codex never rewrites a compressed rollout. A bad or truncated
+    next; Codex never rewrites a compressed rollout. The cache is bounded:
+    each use sets a copy's mtime, and each new copy drops the copies (and
+    stray `.dec.*` temp files) unused for 24 hours, then the least recently
+    used ones past 4. A bad or truncated
     frame gives what decoded before it with `complete: false`, `why:
     "corrupt"`, or, when nothing decoded, `corpus: "none"`, `reason:
     "corrupt"`; a copy cut at 1 GiB has `why: "range"`. A build without
