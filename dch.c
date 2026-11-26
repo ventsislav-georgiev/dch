@@ -3929,7 +3929,9 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 ** A leading '^' on s1 makes a line rule: only a line that starts with s1
 ** (after leading blanks) and contains s2 (if any) matches — the footer
 ** itself, not prose that quotes it. Any length: while background agents run, the
-** footer runs to the screen width. */
+** footer runs to the screen width. A leading '$' on s1 makes a last-row
+** rule: the last non-blank line contains s1 and s2. An s2 led by '$' must
+** end its line, after a " (" on it (a busy row's parenthesis). */
 struct det_rule
 {
 	const char *s1, *s2;
@@ -3939,7 +3941,7 @@ struct det_rule
 static const struct det_rule det_suppress[] = {
 	{ "showing detailed transcript", 0 },              /* claude ctrl-o */
 	{ "pgup/pgdn to", "q to quit" },                   /* codex pager   */
-	{ "pgup/pgdn/", "close" },                  /* codex 0.167 pager */
+	{ "$pgup/pgdn/", "close" },     /* codex 0.167 pager, its footer */
 };
 /* Waiting on a human. Checked before working: a stale spinner must not
 ** mask a live permission prompt. */
@@ -3970,15 +3972,29 @@ static const struct det_rule det_blocked[] = {
 /* Busy right now (footer hints; spinner handled separately). */
 static const struct det_rule det_working[] = {
 	{ "esc to interrupt", 0 },                 /* claude,codex,opencode */
-	{ " to interrupt)", 0 },          /* codex, remapped interrupt key */
+	{ "^\xe2\x80\xa2 ", "$ to interrupt)" },  /* codex busy row, any key */
 	{ "ctrl+c to interrupt", 0 },                      /* opencode      */
 };
 
-/* Line rule r ('^' s1) against the lines of hay. */
+/* Does [p, q) contain s? */
+static int
+det_in(const char *p, const char *q, const char *s)
+{
+	size_t n = strlen(s);
+
+	for (; (size_t)(q - p) >= n; p++)
+		if (!memcmp(p, s, n))
+			return 1;
+	return 0;
+}
+
+/* Line rule r ('^' or '$' s1) against the lines of hay. */
 static int
 det_line(const struct det_rule *r, const char *hay)
 {
-	const char *p = hay, *e, *nl, *q, *s1 = r->s1 + 1;
+	const char *p = hay, *e, *nl, *q, *s1 = r->s1 + 1, *s2 = r->s2;
+	size_t n;
+	int m, last = 0;
 
 	while (*p)
 	{
@@ -3992,17 +4008,25 @@ det_line(const struct det_rule *r, const char *hay)
 		while (q > p && (q[-1] == ' ' || q[-1] == '\t' ||
 		                 q[-1] == '\r'))
 			q--;
-		if (!strncmp(p, s1, strlen(s1)) && !r->s2)
-			return 1;
-		if (!strncmp(p, s1, strlen(s1)))
-			for (q = p; q < e; q++)
-				if (!strncmp(q, r->s2, strlen(r->s2)))
-					return 1;
+		if (p < q)
+		{
+			m = *r->s1 == '^' ? !strncmp(p, s1, strlen(s1))
+			                  : det_in(p, q, s1);
+			if (m && s2 && *s2 == '$')
+				m = (n = strlen(s2 + 1)) <= (size_t)(q - p) &&
+				    !memcmp(q - n, s2 + 1, n) &&
+				    det_in(p, q - n, " (");
+			else if (m && s2)
+				m = det_in(p, q, s2);
+			if (m && *r->s1 == '^')
+				return 1;
+			last = m;
+		}
 		if (!nl)
 			break;
 		p = nl + 1;
 	}
-	return 0;
+	return last && *r->s1 == '$';
 }
 
 static int
@@ -4010,7 +4034,8 @@ det_match(const struct det_rule *t, size_t n, const char *hay)
 {
 	size_t i;
 	for (i = 0; i < n; i++)
-		if (t[i].s1[0] == '^' ? det_line(&t[i], hay) :
+		if (t[i].s1[0] == '^' || t[i].s1[0] == '$' ?
+		    det_line(&t[i], hay) :
 		    strstr(hay, t[i].s1) &&
 		    (!t[i].s2 || strstr(hay, t[i].s2)))
 			return 1;
@@ -4191,15 +4216,25 @@ composer_find(char *txt, char **end)
 	return comp;
 }
 
-/* A blocker phrase on folded screen text. Claude Code's composer gives
-** way to a live prompt or form, so with a composer on screen only the
-** rows below it count: text above it is transcript, and a reply quoting
-** "Do you want to proceed?" is not a prompt. No composer (a dialog,
-** another harness): the whole text counts. */
+static char *codex_composer_find(char *txt, char **end);
+
+/* A blocker phrase on folded screen text. Claude Code's composer ("❯")
+** and Codex's ("› ", not a dialog's "› 1." option) give way to a live
+** prompt or form, so with a composer on screen only the rows below it
+** count: text above it is transcript, and a reply quoting "Do you want to
+** proceed?" is not a prompt. No composer (a dialog, another harness): the
+** whole text counts. */
 static int
 det_blocker(char *fold)
 {
-	char *end, *from = composer_find(fold, &end) ? end : fold;
+	char *end, *c, *from = fold;
+
+	if (composer_find(fold, &end))
+		from = end;
+	else if ((c = codex_composer_find(fold, &end)) &&
+	         !(c[4] >= '0' && c[4] <= '9' &&
+	           c[4 + strspn(c + 4, "0123456789")] == '.'))
+		from = end;
 
 	return det_match(det_blocked,
 	                 sizeof(det_blocked) / sizeof(det_blocked[0]), from);

@@ -1007,11 +1007,14 @@ def test_defs():
                                                     "text": "done with #831; "
                                                     "#860, #870 and #896 "
                                                     "left"}]}))
-    legacy = (user(1, "legacy turn, see #891") +
+    legacy = (user(1, "legacy turn, see #891 and #893") +
               exec_call(2, "l1", "gh issue view 890") +
               exec_out(3, "l1", "# #890 Legacy paired\nbody\n", 0) +
               exec_call(4, "l2", "gh issue view 891") +
               exec_out(5, "l2", "# #891 Legacy failed\nbody\n", 2) +
+              # #664: a killed process's -1 is a failure, not "no code"
+              exec_call(5, "l4", "gh issue view 893") +
+              exec_out(5, "l4", "# #893 Legacy killed\nbody\n", -1) +
               line(6, "response_item", {
                   "type": "function_call", "name": "shell", "call_id": "l3",
                   "arguments": json.dumps({"command": ["bash", "-lc",
@@ -1068,6 +1071,7 @@ def test_defs():
                 ("#890", [("D1", "Legacy paired")],
                  "exec_command paired by call_id, Process exited with code 0"),
                 ("#891", [], "exited with code 2: failed, no definition"),
+                ("#893", [], "exited with code -1: failed, no definition"),
                 ("#892", [("D1", "Old shell")],
                  "shell's Exit code: 0 output")):
             d, m, r = defs_of(n, ref)
