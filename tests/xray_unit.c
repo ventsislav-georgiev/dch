@@ -4292,7 +4292,7 @@ t_res_git(void)
 		char *ob = NULL;
 		size_t obl = 0;
 		FILE *of = open_memstream(&ob, &obl);
-		int ok;
+		int ok, mb;
 
 		mode("slowmb");
 		memset(&lsp, 0, sizeof lsp);
@@ -4321,15 +4321,15 @@ t_res_git(void)
 		** merge-base starts (the fake logs its argv first); a runner that
 		** stalls them past it gets the product's own timeout, not this
 		** row's subject: only then is it run again, at most 3 times */
-		for (k = 0, ok = 0; k < 3 && !ok; k++)
+		for (k = 0, mb = 0; k < 3 && !mb; k++)
 		{
 			put("argv", "", 0);
 			t0 = xr_now_ms();
 			ok = res("abcdef1234", "proj", 1, &r);
 			t0 = xr_now_ms() - t0;
-			if (!strstr(slurp("argv"), "merge-base"))
-				ok = 0;
+			mb = strstr(slurp("argv"), "merge-base") != NULL;
 		}
+		ok = ok && mb;
 		CHECK("git #UO2: a slow merge-base: --full keeps the 3 s deadline",
 		      ok == 1 && is(&r, "commit", "ok") &&
 		      !strstr(r.subtitle, "HEAD") && t0 >= XR_GIT_MS - 50);
