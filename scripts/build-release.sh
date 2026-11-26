@@ -74,19 +74,16 @@ if [ "$os" = darwin ]; then
 	# The linker ad-hoc signs arm64 output; arm64 macOS kills unsigned code.
 	[ "$arch" = arm64 ] && codesign -v dch
 	echo "minos $minos"
-	# libzstd (#656) is linked from its static archive: no dylib to ship
+	# zstd (#656) is compiled in from vendor/zstd: never a system libzstd
 	if otool -L dch | grep -q libzstd; then
-		echo "error: dch links libzstd's dylib" >&2; exit 1
+		echo "error: dch links a libzstd dylib" >&2; exit 1
 	fi
 else
 	# The minimum glibc this binary needs: the newest symbol version it binds.
 	objdump -T dch | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
-	# libzstd (#656): static when the image has libzstd.a, else the system's
-	# libzstd.so.1 (the formula depends on zstd for that case)
+	# zstd (#656) is compiled in from vendor/zstd: never a system libzstd
 	if objdump -p dch | grep -q 'NEEDED.*libzstd'; then
-		echo "libzstd: shared"
-	else
-		echo "libzstd: static or none"
+		echo "error: dch links libzstd.so" >&2; exit 1
 	fi
 fi
 

@@ -24,13 +24,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install zstd (Codex's .jsonl.zst rollouts, #656)
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install zstd
-          else
-            sudo apt-get update -q && sudo apt-get install -y -q libzstd-dev
-          fi
 
       - name: Configure
         run: |
@@ -59,13 +52,6 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install zstd (Codex's .jsonl.zst rollouts, #656)
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install zstd
-          else
-            sudo apt-get update -q && sudo apt-get install -y -q libzstd-dev
-          fi
       - name: Build both variants
         run: |
           ./configure --without-libghostty && make && cp dch /tmp/dch-lite
@@ -111,13 +97,6 @@ jobs:
         -Wnull-dereference -Wimplicit-fallthrough -Werror
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install zstd (Codex's .jsonl.zst rollouts, #656)
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install zstd
-          else
-            sudo apt-get update -q && sudo apt-get install -y -q libzstd-dev
-          fi
       - name: Full
         run: ./configure CC=${{ matrix.cc }} && make XCFLAGS="$STRICT"
       - name: Lite
@@ -134,13 +113,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install zstd (Codex's .jsonl.zst rollouts, #656)
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install zstd
-          else
-            sudo apt-get update -q && sudo apt-get install -y -q libzstd-dev
-          fi
       - name: clang --analyze
         run: |
           rc=0

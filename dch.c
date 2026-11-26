@@ -30,9 +30,7 @@
 #include <libproc.h>
 #include <sys/sysctl.h>
 #endif
-#ifdef HAVE_ZSTD
-#include <zstd.h>	/* Codex's compressed rollouts (#656) */
-#endif
+#include "vendor/zstd/zstd.h"	/* Codex's compressed rollouts (#656) */
 #ifdef __linux__
 #include <sys/inotify.h>	/* --xray --follow's tail (#136) */
 #else
@@ -13613,11 +13611,10 @@ xr_crec_cfg(const struct crec *c, char *cfg, size_t cfgsz)
 }
 
 /* Why the last xr_cx_lookup gave no rollout or a cut one (#656):
-** "compressed" (a .zst only, and no libzstd in this build), "corrupt" (a
-** bad or truncated frame), "range" (the copy hit xr_lim.bytes); else NULL. */
+** "corrupt" (a bad or truncated frame), "range" (the copy hit
+** xr_lim.bytes); else NULL. */
 static const char *xr_cx_why;
 
-#ifdef HAVE_ZSTD
 /* fd's zstd frames into tfd, streamed, at most cap bytes out: 0, 1 a bad
 ** or truncated frame, 2 a local failure; *n the bytes written, *cut set
 ** when the cap stopped it. */
@@ -13668,9 +13665,7 @@ xr_zst_copy(int fd, int tfd, uint64_t cap, uint64_t *n, int *cut)
 	free(ob);
 	return bad;
 }
-#endif
 
-#ifdef HAVE_ZSTD
 /* The copy cache's bound (#656): in dir, drop every copy and stray
 ** .dec.* of ours unused for 24 h (a copy's mtime is its last use), then
 ** the oldest copies past 4, keep (the one in use) counted, never dropped. */
@@ -13722,7 +13717,6 @@ xr_zst_prune(const char *dir, const char *keep)
 		(void)unlink(oldest);
 	}
 }
-#endif
 
 /* path (a .zst rollout, *st its stat) as its decoded copy: path and *st the
 ** copy's. The copy is cached in $TMPDIR/dch-zst-<uid> (0700) by the .zst's
@@ -13732,13 +13726,6 @@ xr_zst_prune(const char *dir, const char *keep)
 static int
 xr_zst_decode(char *path, size_t pathsz, struct stat *st)
 {
-#ifndef HAVE_ZSTD
-	(void)path;
-	(void)pathsz;
-	(void)st;
-	xr_cx_why = "compressed";
-	return -1;
-#else
 	static const char *const whys[] = {"ok", "corrupt", "range"};
 	const char *td = getenv("TMPDIR");
 	char dir[1100], fin[1300], tmp[1300];
@@ -13806,7 +13793,6 @@ xr_zst_decode(char *path, size_t pathsz, struct stat *st)
 	dch_trace("xray zst: copy %s, %llu bytes", whys[k],
 	          (unsigned long long)ds.st_size);
 	return 0;
-#endif
 }
 
 /* xr_codex_lookup, then a .zst hit as its decoded copy (#656). */
@@ -14715,7 +14701,7 @@ xr_codex_answer(const struct xr_cx *x, struct xr_answer *a,
 	if (rc < 0)
 	{
 		xr_chapters_free(ch);
-		a->reason = xr_cx_why;	/* #656: "compressed", "corrupt" or null */
+		a->reason = xr_cx_why;	/* #656: "corrupt" or null */
 		return rc;
 	}
 	a->corpus = "codex";

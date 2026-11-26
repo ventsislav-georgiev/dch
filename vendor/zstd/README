@@ -1,0 +1,19 @@
+zstd version:   v1.6.0 (decompress-only single-file build)
+source:         https://github.com/facebook/zstd/releases/download/v1.6.0/zstd-1.6.0.tar.gz
+source sha256:  2ba599ae2a257976278e7e71e998433a387bfd18aa7b78678229fd5d84f5e9b8
+                (matches the release's zstd-1.6.0.tar.gz.sha256)
+license:        BSD (see LICENSE; zstd is dual BSD/GPLv2, dch takes BSD)
+
+files (sha256):
+4cfed1bbf0c884e2974c6a1229f22f9ed9e9181254bae6208e3844c579437b6c  zstddeclib.c
+cad5fadfeea9087daa99d72e9533810dc2dd7b96c6cf5efc4b4be0b49a307af2  zstd.h
+66a8c3f71d12ea6e797e4f622f31f3f8f81c41b36f48cad4f5de7d8bfb6aac0a  zstd_errors.h
+7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8  LICENSE
+
+zstddeclib.c was generated from the tarball with
+  cd build/single_file_libs && ./create_single_file_decoder.sh
+(which runs combine.py -r ../../lib -x legacy/zstd_legacy.h -o zstddeclib.c
+zstddeclib-in.c); zstd.h, zstd_errors.h and LICENSE are lib/zstd.h,
+lib/zstd_errors.h and LICENSE as shipped.
+Unmodified. dch compiles zstddeclib.c into the binary (Makefile.in), so
+X-ray decodes Codex's .jsonl.zst rollouts (#656) with no system libzstd.

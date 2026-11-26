@@ -10,8 +10,7 @@ CODEX_HOME of fixture rollouts; no Codex ever runs.
     7 days; made here with the zstd CLI, the row SKIPs without it) and the
     reverted thread's -<tid>_<rollout-id>.jsonl name
   - .jsonl wins over its .zst sibling
-  - a corrupt .zst: corpus none, reason "corrupt", no crash; a build
-    without libzstd answers reason "compressed" instead
+  - a corrupt .zst: corpus none, reason "corrupt", no crash
   - --ref, --search, --tasks and --chapter over the ended rollout
 
 Run:  python3 tests/xray_codex_ended_test.py    (uses ./dch; run.sh isolates)
@@ -168,18 +167,8 @@ def main():
     else:
         plant("cx-zst", TIDS[1])
         rollout(TIDS[1], "compressed turn about #41", zst=True)
-        probe = xray("cx-zst")[1] or {}
-        nozstd = probe.get("reason") == "compressed"
-        if nozstd:
-            # a build without libzstd: the honest reason, never a crash
-            print("  SKIP .zst decode rows: this dch has no libzstd")
-            check("no libzstd: a .zst-only rollout is corpus none, reason "
-                  "compressed", probe.get("corpus") == "none" and
-                  probe.get("available") is False, probe)
-            o = None
-        else:
-            o = answers("cx-zst", TIDS[1], "compressed turn about #41",
-                        ".jsonl.zst only")
+        o = answers("cx-zst", TIDS[1], "compressed turn about #41",
+                    ".jsonl.zst only")
         if o:
             again = xray("cx-zst")[1]
             check("ended Codex .zst: the anchor holds from run to run "
@@ -198,26 +187,25 @@ def main():
 
         # the copy cache is bounded: a new copy drops copies and stray
         # .dec.* files unused for 24 h, and keeps itself
-        if not nozstd:
-            cache = os.path.join(T, "tmp", "dch-zst-%d" % os.getuid())
-            old = time.time() - 2 * 86400
-            os.makedirs(cache, mode=0o700, exist_ok=True)
-            stale = [os.path.join(cache, "1-2-3-4.ok.jsonl"),
-                     os.path.join(cache, ".dec.x")]
-            for f in stale:
-                with open(f, "w") as fh:
-                    fh.write("old\n")
-                os.utime(f, (old, old))
-            plant("cx-prune", TIDS[7])
-            rollout(TIDS[7], "pruning turn", zst=True)
-            answers("cx-prune", TIDS[7], "pruning turn", "a new .zst copy")
-            left = os.listdir(cache)
-            check("the cache drops a copy and a .dec.* older than 24 h, "
-                  "keeps the new copy",
-                  not any(os.path.exists(f) for f in stale) and
-                  # cx-zst's copy and cx-prune's new one
-                  len([n for n in left if n.endswith(".ok.jsonl")]) == 2,
-                  left)
+        cache = os.path.join(T, "tmp", "dch-zst-%d" % os.getuid())
+        old = time.time() - 2 * 86400
+        os.makedirs(cache, mode=0o700, exist_ok=True)
+        stale = [os.path.join(cache, "1-2-3-4.ok.jsonl"),
+                 os.path.join(cache, ".dec.x")]
+        for f in stale:
+            with open(f, "w") as fh:
+                fh.write("old\n")
+            os.utime(f, (old, old))
+        plant("cx-prune", TIDS[7])
+        rollout(TIDS[7], "pruning turn", zst=True)
+        answers("cx-prune", TIDS[7], "pruning turn", "a new .zst copy")
+        left = os.listdir(cache)
+        check("the cache drops a copy and a .dec.* older than 24 h, "
+              "keeps the new copy",
+              not any(os.path.exists(f) for f in stale) and
+              # cx-zst's copy and cx-prune's new one
+              len([n for n in left if n.endswith(".ok.jsonl")]) == 2,
+              left)
 
         plant("cx-both", TIDS[3])
         rollout(TIDS[3], "the plain one", zst=True, keep_plain=True)
@@ -236,7 +224,7 @@ def main():
         with open(p, "wb") as f:
             f.write(b"\x28\xb5\x2f\xfd" + b"\xff" * 64)
         os.chmod(p, 0o600)
-        bad = "compressed" if nozstd else "corrupt"
+        bad = "corrupt"
         rc, o, err = xray("cx-bad")
         check("ended Codex, corrupt .zst: corpus none, reason " + bad,
               rc == 0 and o and o["corpus"] == "none" and
