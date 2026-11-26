@@ -12931,6 +12931,43 @@ res_gh_ask(char *const av[], char *const env[], long long until,
 	return k;
 }
 
+/* <=1.168.0 left "<lock>.<pid>.stale" crash litter; the fill never makes it now */
+static void
+res_unstale(const char *lock)
+{
+	char d[PATH_MAX], f[PATH_MAX + 8], *b;
+	struct dirent *e;
+	struct stat st;
+	const char *tu = getenv("DCH_TEST_XRAY_UID");
+	size_t n;
+	DIR *dp;
+
+	snprintf(d, sizeof d, "%s", lock);
+	b = strrchr(d, '/');
+	if (!b)
+		return;
+	*b++ = '\0';
+	n = strlen(b);
+	if (!(dp = opendir(d)))
+		return;
+	while ((e = readdir(dp)))
+	{
+		const char *p = e->d_name + n;
+
+		if (strncmp(e->d_name, b, n) || *p++ != '.' || !isdigit((unsigned char)*p))
+			continue;
+		while (isdigit((unsigned char)*p))
+			p++;
+		if (strcmp(p, ".stale") ||
+		    snprintf(f, sizeof f, "%s/%s", d, e->d_name) >= (int)sizeof f ||
+		    lstat(f, &st) != 0 || !S_ISREG(st.st_mode) ||
+		    st.st_uid != (tu ? (uid_t)atoi(tu) : getuid()))
+			continue;
+		(void)unlink(f);
+	}
+	closedir(dp);
+}
+
 /* #522: a real gh takes about 0.9 s, so light never waits for it: a
 ** detached grandchild (its own session, no tty, stdio on /dev/null, no fd
 ** of ours) asks under the full deadline and fills the cache for the next
@@ -12967,6 +13004,7 @@ res_fill(char *const av[], char *const env[], struct res_run *run,
 		close(lk);	/* unlinked by a fill that just ended */
 		return 1;
 	}
+	res_unstale(lock);
 	/* a fill that ended between our cache miss and the open left its entry */
 	if (res_cache_get(repo, num, cb, sizeof cb) &&
 	    (!strcmp(cb, "none") || xr_gh_parse(cb, repo, num, r)))

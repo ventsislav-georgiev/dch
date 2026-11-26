@@ -1075,6 +1075,22 @@ def test_github(m):
                   "filled, the title" % label, len(rv) == 1 and
                   rv[0]["title"] == "Quick enough" and lg and
                   wait_for(idle, 10), (rv, lg, os.listdir(ghd)))
+        # NIT-WL1: a fill sweeps its entry's legacy "<lock>.<pid>.stale" litter
+        shutil.rmtree(cache, ignore_errors=True)
+        os.makedirs(ghd)
+        ent = os.path.join(ghd, "acme,widgets,702.lock.")
+        tgt = os.path.join(T, "stale-target")
+        open(tgt, "w").close()
+        open(ent + "4242.stale", "w").close()
+        os.symlink(tgt, ent + "4343.stale")
+        open(ent + "x.stale", "w").close()
+        r, ls, rv, lg = q("acme/widgets#702", full=False, keep=True)
+        wait_for(idle, 10)
+        check("NIT-WL1 light: a fill removes its entry's .lock.<pid>.stale "
+              "file, keeps a symlink (target intact) and a non-digit decoy",
+              not os.path.exists(ent + "4242.stale") and
+              os.path.islink(ent + "4343.stale") and os.path.exists(tgt) and
+              os.path.exists(ent + "x.stale"), os.listdir(ghd))
         # #646: a lock some live process holds (flock) blocks the fill
         shutil.rmtree(cache, ignore_errors=True)
         os.makedirs(ghd)
