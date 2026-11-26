@@ -227,6 +227,35 @@ def main():
               len([n for n in left if n.endswith(".ok.jsonl")]) == 2,
               left)
 
+        # the cache is also bounded in bytes: with a small cap, a new copy
+        # drops the oldest copies until the total fits, and keeps itself
+        if not nozstd:
+            for n in os.listdir(cache):
+                os.unlink(os.path.join(cache, n))
+            cap = 2000
+            now = time.time()
+            olds = [os.path.join(cache, "1-2-3-%d.ok.jsonl" % i)
+                    for i in (5, 6)]
+            for i, f in enumerate(olds):
+                with open(f, "w") as fh:
+                    fh.write("x" * 900)
+                os.utime(f, (now - 7200 + i * 60,) * 2)
+            plant("cx-cap", TIDS[11])
+            rollout(TIDS[11], "capped turn", zst=True)
+            ENV["DCH_XRAY_CAPS"] = "0:%d" % cap
+            try:
+                answers("cx-cap", TIDS[11], "capped turn", "a copy over the "
+                        "byte cap")
+            finally:
+                del ENV["DCH_XRAY_CAPS"]
+            left = os.listdir(cache)
+            total = sum(os.path.getsize(os.path.join(cache, n))
+                        for n in left)
+            check("the cache drops the oldest copy while the total is over "
+                  "the byte cap, keeps the newer one and the new copy",
+                  not os.path.exists(olds[0]) and os.path.exists(olds[1]) and
+                  len(left) == 2 and total <= cap, (left, total))
+
         plant("cx-both", TIDS[3])
         rollout(TIDS[3], "the plain one", zst=True, keep_plain=True)
         z = os.path.join(DAY, "rollout-2026-11-10T10-00-00-%s.jsonl.zst"

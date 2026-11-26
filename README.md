@@ -1471,7 +1471,7 @@ The corpus:
     next; Codex never rewrites a compressed rollout. The cache is bounded:
     each use sets a copy's mtime, and each new copy drops the copies (and
     stray `.dec.*` temp files) unused for 24 hours, then the least recently
-    used ones past 4. A bad or truncated
+    used ones past 4 or while the copies together exceed that 1 GiB. A bad or truncated
     frame gives what decoded before it with `complete: false`, `why:
     "corrupt"`, or, when nothing decoded, `corpus: "none"`, `reason:
     "corrupt"`; a copy cut at 1 GiB has `why: "range"`. `--ref` and `--search` print

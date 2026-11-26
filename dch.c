@@ -13695,9 +13695,11 @@ xr_zst_copy(int fd, int tfd, uint64_t cap, uint64_t *n, int *cut)
 
 /* The copy cache's bound (#656): in dir, drop every copy and stray
 ** .dec.* of ours unused for 24 h (a copy's mtime is its last use), then
-** the oldest copies past 4, keep (the one in use) counted, never dropped. */
+** the oldest copies past 4 or while the copies' bytes (keep's too) exceed
+** cap (the decode's own cap, so 4 huge copies can't fill $TMPDIR). keep
+** (the one in use) is counted, never dropped. */
 static void
-xr_zst_prune(const char *dir, const char *keep)
+xr_zst_prune(const char *dir, const char *keep, uint64_t cap)
 {
 	time_t now = time(NULL);
 	int pass;
@@ -13710,10 +13712,13 @@ xr_zst_prune(const char *dir, const char *keep)
 		char p[1300], oldest[1300] = "";
 		time_t om = 0;
 		int copies = 1;	/* keep */
+		uint64_t bytes = 0;
 		size_t l;
 
 		if (!d)
 			return;
+		if (stat(keep, &s) == 0)
+			bytes = (uint64_t)s.st_size;
 		while ((de = readdir(d)))
 		{
 			l = strlen(de->d_name);
@@ -13732,6 +13737,7 @@ xr_zst_prune(const char *dir, const char *keep)
 			if (de->d_name[0] == '.')
 				continue;	/* a decode under way elsewhere */
 			copies++;
+			bytes += (uint64_t)s.st_size;
 			if (!oldest[0] || s.st_mtime < om)
 			{
 				snprintf(oldest, sizeof oldest, "%s", p);
@@ -13739,7 +13745,7 @@ xr_zst_prune(const char *dir, const char *keep)
 			}
 		}
 		closedir(d);
-		if (copies <= 4 || !oldest[0])
+		if ((copies <= 4 && bytes <= cap) || !oldest[0])
 			return;
 		(void)unlink(oldest);
 	}
@@ -13811,7 +13817,7 @@ xr_zst_decode(char *path, size_t pathsz, struct stat *st)
 			          (unsigned long long)n);
 			return -1;
 		}
-		xr_zst_prune(dir, fin);
+		xr_zst_prune(dir, fin, xr_lim.bytes);
 	}
 	if (snprintf(path, pathsz, "%s", fin) >= (int)pathsz)
 		return -1;
