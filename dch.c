@@ -1822,19 +1822,20 @@ load_harness_record(const char *path, const char *body, size_t body_len,
                     void *arg)
 {
 	struct slist *sl = arg;
-	char jb[8192], sess[600], cb[256], *nm, *q, *endp;
+	char sess[600], cb[256], nm[1024], src[32], *endp;
 	const char *base = strrchr(path, '/'), *cn;
 	long pid;
 	int i;
-	if (body_len >= sizeof jb) return 0;
-	memcpy(jb, body, body_len + 1);
+	if (body_len >= 8192) return 0;
 	base = base ? base + 1 : path;
 	pid = strtol(base, &endp, 10);
-	if (pid <= 0 || strcmp(endp, ".json") ||
-	    strstr(jb, "\"nameSource\":\"derived\"")) return 0;
-	nm = strstr(jb, "\"name\":\"");
-	if (!nm || !(q = strchr(nm += 8, '"')) || q == nm) return 0;
-	*q = '\0';
+	if (pid <= 0 || strcmp(endp, ".json")) return 0;
+	/* decoded by the JSON parser: escapes, \" and spaced forms; a \u0000
+	** cuts the C string there */
+	if ((dch_json_string(body, "nameSource", src, sizeof src) == 0 &&
+	     !strcmp(src, "derived")) ||
+	    dch_json_string(body, "name", nm, sizeof nm) != 0 || !nm[0])
+		return 0;
 	for (char *c = nm; *c; c++)
 		if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
 	if (proc_dch_session(pid, sess, sizeof sess) != 0) return 0;

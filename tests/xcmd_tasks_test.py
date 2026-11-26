@@ -276,6 +276,16 @@ def main():
               g.get("DCH_SESSION_HARNESS") == "<perf-1>" and
               g.get("DCH_SESSION_ALIAS") == "<my alias>" and
               "bogus" not in out, ({k: v for k, v in g.items() if "NAME" in k or "HARN" in k or "ALIAS" in k}, err))
+        # #661: decoded name, spaced form
+        for raw, want in (
+                (r'{"pid":%d,"name":"caf\u00e9 \"q\""}', 'caf\u00e9 "q"'),
+                ('{"pid":%d, "name" : "spaced x" }', "spaced x")):
+            with open(os.path.join(sdir, "%d.json" % proc.pid), "w") as f:
+                f.write(raw % proc.pid)
+            rc, out, ls, err = tasks("xt-ended")
+            g = seen(ls)
+            check("names: JSON-decoded harness record %r" % want,
+                  g.get("DCH_SESSION_HARNESS") == "<%s>" % want, g.get("DCH_SESSION_HARNESS"))
     finally:
         proc.kill()
         proc.wait()
