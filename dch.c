@@ -9338,6 +9338,7 @@ restart_agents(int force, const char *only, int json)
 
 		if (only && strcmp(sl.v[k], only) != 0)
 			continue;
+		memset(a, 0, sizeof *a);	/* a skipped session's slot is reused */
 		stop_ag = NULL;
 		snprintf(a->name, sizeof a->name, "%s", sl.v[k]);
 		session_sock_path(sl.v[k], a->path, sizeof a->path);

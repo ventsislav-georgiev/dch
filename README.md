@@ -637,8 +637,10 @@ error (`--history` and `--agent-list` take their own).
 `"agent":"claude"` or `"agent":"codex"`, the agent kind where dch knows it:
 `ok`, `failed`, `interrupted` and `skipped` alike (a Codex's `codex_daemon`,
 `no_thread`, `cwd_unknown` too). A line with no agent (a session running none,
-an error before detection such as `old_master`, `respawn_pending`, `self`,
-`not_claude`) carries `"agent":null`: the key is never left out. Plain
+an error before detection such as `old_master`, `respawn_pending`,
+`not_claude`; `--stop`'s `self` too) carries `"agent":null`: the key is never
+left out. `--restart`'s `self` skip carries the agent, as its detection runs
+first. Plain
 `--restart` and every other verb are unchanged.
 
 A typical agent loop:
