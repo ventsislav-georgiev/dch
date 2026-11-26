@@ -279,7 +279,8 @@ def main():
         # #661: decoded name, spaced form
         for raw, want in (
                 (r'{"pid":%d,"name":"caf\u00e9 \"q\""}', 'caf\u00e9 "q"'),
-                ('{"pid":%d, "name" : "spaced x" }', "spaced x")):
+                ('{"pid":%d, "name" : "spaced x" }', "spaced x"),
+                (r'{"pid":%d,"name":"t\u001b]0;p\u0007x"}', "t ]0;p x")):
             with open(os.path.join(sdir, "%d.json" % proc.pid), "w") as f:
                 f.write(raw % proc.pid)
             rc, out, ls, err = tasks("xt-ended")

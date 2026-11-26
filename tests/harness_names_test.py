@@ -118,7 +118,7 @@ def main():
         for name in ("hn-named", "hn-derived", "hn-codex-old",
                      "hn-codex-empty", "hn-codex-wrong", "hn-codex-stale",
                      "hn-codex-malformed", "hn-inherited", "hn-esc",
-                     "hn-spaced", "hn-nul"):
+                     "hn-spaced", "hn-nul", "hn-osc", "hn-bidi", "hn-long"):
             subprocess.run([DCH, "--spawn", name, "sleep", "60"], check=True)
         # A Codex TUI runs under its session's master: that is what makes
         # its snapshot its own (#083).
@@ -165,7 +165,10 @@ def main():
         for sess, raw in (
                 ("hn-esc", r'{"pid":%d,"name":"caf\u00e9 \"q\" \u001b[0m"}'),
                 ("hn-spaced", '{"pid":%d, "name" : "spaced x" }'),
-                ("hn-nul", r'{"pid":%d,"name":"ab\u0000cd"}')):
+                ("hn-nul", r'{"pid":%d,"name":"ab\u0000cd"}'),
+                ("hn-osc", r'{"pid":%d,"name":"t\u001b]0;pwned\u0007\u001b[2Jx"}'),
+                ("hn-bidi", r'{"pid":%d,"name":"a\u202eb\u2067c\u0085d"}'),
+                ("hn-long", '{"pid":%d,"name":"' + "\u00e9" * 750 + '"}')):
             pe = spawn_env_proc(sess, sess)
             procs.append(pe)
             with open(os.path.join(sessdir, "%d.json" % pe.pid), "w") as f:
@@ -186,7 +189,14 @@ def main():
         check("named harness session resolved",
               sl.get("hn-named", {}).get("harness") == "my-claude")
         check("escaped name decoded (u00e9, \\\", ESC)",
-              sl.get("hn-esc", {}).get("harness") == 'caf\u00e9 "q" \x1b[0m')
+              sl.get("hn-esc", {}).get("harness") == 'caf\u00e9 "q"  [0m')
+        check("controls become spaces in --ls-json",
+              sl.get("hn-osc", {}).get("harness") == "t ]0;pwned  [2Jx")
+        check("bidi/C1 controls replaced by one space each",
+              sl.get("hn-bidi", {}).get("harness") == "a b c d")
+        lng = sl.get("hn-long", {}).get("harness", "")
+        check("1500-byte name cut at a UTF-8 boundary, not dropped",
+              0 < len(lng.encode()) <= 1000 and lng.strip("\u00e9") == "")
         check("spaced \"name\" : record matched",
               sl.get("hn-spaced", {}).get("harness") == "spaced x")
         check("NUL in name: record rejected by the parser, no name",
@@ -205,6 +215,12 @@ def main():
                                capture_output=True, text=True).stdout
         check("plain list shows Codex title and real name",
               "my-codex (hn-codex)" in plain)
+        plain_osc = [l for l in plain.splitlines() if "hn-osc" in l]
+        check("-ls row for the escape name has no ESC/BEL",
+              plain_osc and "\x1b" not in plain_osc[0] and
+              "\x07" not in plain_osc[0])
+        check("-ls output has no bidi override",
+              "\u202e" not in plain and "\u2067" not in plain)
         picker = picker_output(home)
         check("picker shows Codex title and real name",
               "my-codex" in picker and "hn-codex" in picker)

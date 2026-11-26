@@ -1822,7 +1822,7 @@ load_harness_record(const char *path, const char *body, size_t body_len,
                     void *arg)
 {
 	struct slist *sl = arg;
-	char sess[600], cb[256], nm[1024], src[32], *endp;
+	char sess[600], cb[256], nm[8192], src[32], *endp;
 	const char *base = strrchr(path, '/'), *cn;
 	long pid;
 	int i;
@@ -1836,8 +1836,25 @@ load_harness_record(const char *path, const char *body, size_t body_len,
 	     !strcmp(src, "derived")) ||
 	    dch_json_string(body, "name", nm, sizeof nm) != 0 || !nm[0])
 		return 0;
-	for (char *c = nm; *c; c++)
-		if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
+	/* body < 8192, so the decoded name always fits nm. Controls, C1 and
+	** bidi controls become one space each (terminal escape injection). */
+	{
+		char *o = nm;
+		for (const unsigned char *c = (unsigned char *)nm; *c;)
+		{
+			if (*c < 0x20 || *c == 0x7f) { *o++ = ' '; c++; }
+			else if (c[0] == 0xc2 && c[1] >= 0x80 && c[1] <= 0x9f)
+			{ *o++ = ' '; c += 2; }
+			else if ((c[0] == 0xe2 && c[1] == 0x80 && c[2] >= 0xaa &&
+			          c[2] <= 0xae) ||
+			         (c[0] == 0xe2 && c[1] == 0x81 && c[2] >= 0xa6 &&
+			          c[2] <= 0xa9))
+			{ *o++ = ' '; c += 3; }
+			else *o++ = (char)*c++;
+		}
+		*o = '\0';
+		if (o - nm > 1000) nm[dch_utf8_trim(nm, 1000)] = '\0';
+	}
 	if (proc_dch_session(pid, sess, sizeof sess) != 0) return 0;
 	cn = canon_name(sess, cb, sizeof cb);
 	for (i = 0; i < sl->n; i++)
