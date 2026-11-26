@@ -127,6 +127,10 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-questions \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-memory \-\-json
 .br
 .B dch \-\-xray
@@ -3894,6 +3898,7 @@ a session name that passes the attach name check and does not start with
 \-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
 \-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
 \-\-xray \fIn\fP \-\-tasks \-\-json
+\-\-xray \fIn\fP \-\-questions \-\-json
 \-\-xray \fIn\fP \-\-memory \-\-json
 \-\-xray \fIn\fP \-\-follow [\-\-tasks] [\-\-memory] \-\-json
 .fi
@@ -3939,6 +3944,7 @@ two of
 .BR \-\-search ,
 .BR \-\-tasks ,
 .BR \-\-memory ,
+.BR \-\-questions ,
 .BR \-\-follow ,
 .B \-\-chapter
 and
@@ -4516,6 +4522,42 @@ the header has
 .BR \-\-memory 's
 keys with
 .BR source:command .
+.TP
+.B questions_command
+Answers
+.B dch \-\-xray
+.I n
+.B \-\-questions \-\-json
+(open questions, #652) by
+.BR tasks_command 's
+rules: the same run, environment, title line, limits and
+.BR warn .
+Rows have
+.BR id ,
+.BR title
+(required),
+.BR status ,
+.BR label ,
+.BR note ,
+.BR created ,
+.B updated
+and
+.BR url ,
+validated and cut as task rows are, bare or wrapped as
+.BR {"question":{...}} ;
+the header has
+.BR \-\-tasks 's
+keys.
+There is no built\-in list: no command, no row or a failure answers
+.B source:none
+(with the failure's
+.BR warn )
+and no row.
+.B \-\-questions
+goes with
+.B \-\-json
+only, not with
+.BR \-\-follow .
 .TP
 .B define_command
 A ref that no transcript defines, from your own command:

@@ -1,7 +1,8 @@
 /*
- * xcmd.c - X-ray's command source (#321): run the user's `tasks_command` or
- * `memory_command`, read its stdout as JSON lines, hand each valid row on as
- * the contract's row line while the rest is still arriving. See xcmd.h.
+ * xcmd.c - X-ray's command source (#321): run the user's `tasks_command`,
+ * `memory_command` or `questions_command` (#652), read its stdout as JSON
+ * lines, hand each valid row on as the contract's row line while the rest is
+ * still arriving. See xcmd.h.
  *
  * The run follows xray.c's git resolver (res_run): stdin /dev/null, its own
  * process group, signals reset, no other fd of ours, a group kill when the
@@ -274,6 +275,37 @@ row_task(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 	put(w, "}}");
 }
 
+/* questions_command (#652): a task row's validation, its fields only */
+static void
+row_question(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
+             const char *id, const char *title)
+{
+	char b[XR_TITLE_MAX * 4 + 1], lb[XR_TITLE_MAX * 4 + 1];
+	const char *st, *word, *label;
+
+	word = cut(p, dch_json_field(p, r, "status"), 0, tmp, b);
+	st = word ? status_of(word) : NULL;
+	label = cut(p, dch_json_field(p, r, "label"), 0, tmp, lb);
+	put(w, "{\"question\":{");
+	key(w, "id");
+	putq(w, id);
+	key(w, "title");
+	putq(w, title);
+	key(w, "status");
+	putq(w, st ? st : "pending");
+	key(w, "label");
+	putq(w, label ? label : word);
+	key(w, "note");
+	putq(w, cut(p, dch_json_field(p, r, "note"), 0, tmp, b));
+	key(w, "created");
+	putq(w, cut(p, dch_json_field(p, r, "created"), 0, tmp, b));
+	key(w, "updated");
+	putq(w, cut(p, dch_json_field(p, r, "updated"), 0, tmp, b));
+	key(w, "url");
+	putq(w, link_text(p, dch_json_field(p, r, "url"), 0, tmp));
+	put(w, "}}");
+}
+
 static void
 row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
            const char *id, const char *title)
@@ -522,8 +554,10 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 		}
 		goto done;
 	}
-	/* {"task":{...}} / {"memory":{...}}, else the bare row */
-	r = dch_json_field(&p, 0, kind == XCMD_TASK ? "task" : "memory");
+	/* {"task":{...}} / {"memory":{...}} / {"question":{...}}, else the
+	** bare row */
+	r = dch_json_field(&p, 0, kind == XCMD_TASK ? "task" : kind ==
+	                   XCMD_QUESTION ? "question" : "memory");
 	if (r < 0 || p.tok[r].kind != JSON_OBJECT)
 		r = 0;
 	if (!(title = cut(&p, dch_json_field(&p, r, "title"), 0, tmp, tb)))
@@ -535,6 +569,8 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 	}
 	if (kind == XCMD_TASK)
 		row_task(&w, &p, r, tmp, id, title);
+	else if (kind == XCMD_QUESTION)
+		row_question(&w, &p, r, tmp, id, title);
 	else
 		row_memory(&w, &p, r, tmp, id, title);
 	if (!w.bad)
@@ -875,7 +911,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
           void *arg, struct xcmd_result *res)
 {
 	const char *what = kind == XCMD_TASK ? "tasks_command" : kind ==
-	                   XCMD_MEMORY ? "memory_command" : "define_command";
+	                   XCMD_MEMORY ? "memory_command" : kind ==
+	                   XCMD_QUESTION ? "questions_command" : "define_command";
 	int wall = kind == XCMD_DEFINE ? XCMD_DEF_WALL_MS : XCMD_WALL_MS;
 	size_t omax = kind == XCMD_DEFINE ? XCMD_DEF_OUT_MAX : XCMD_OUT_MAX;
 	char buf[4096], *argv[XCMD_ARGS_MAX + 1], *mine[XC_NAMES] = {0}, **envp;

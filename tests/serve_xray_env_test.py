@@ -11,7 +11,7 @@ the host's own dch does, and the text is never in the ctl child's argv
 its stdin. #319: a peer's --tasks answers as the host's dch. #321: with a
 tasks_command, the host's config and the host's command answer it; the
 peer's own config, environment and cwd reach none of it; --memory with a
-memory_command the same. #405: a peer's --ref the host's transcripts do not
+memory_command the same, and --questions with a questions_command (#652). #405: a peer's --ref the host's transcripts do not
 define runs the host's define_command, never the peer's, with the ref as
 the peer wrote it, and serve's log line records that ref (#411).
 
@@ -279,6 +279,56 @@ def memory_command(senv, cenv, check):
           not os.path.exists(mark))
 
 
+def questions_command(senv, cenv, check):
+    """#652: a peer's --questions of session xc runs the host's
+    questions_command: source command, its rows, as the host's own dch
+    answers; the peer's own questions_command never runs."""
+    hcwd = os.path.join(senv["HOME"], "xc proj")	# tasks_command()'s
+    host = os.path.join(senv["HOME"], "host-questions")
+    peer = os.path.join(cenv["HOME"], "peer-questions")
+    mark = os.path.join(cenv["HOME"], "peer-q-ran")
+    with open(host, "w") as f:
+        f.write("#!/bin/sh\necho '{\"title\":\"host questions\"}'\n"
+                "echo '{\"question\":{\"id\":\"OQ-1\",\"title\":\"Ship?\","
+                "\"status\":\"pending\",\"label\":\"OPEN\"}}'\n"
+                "printf '{\"id\":\"env\",\"title\":\"<%s|%s>\"}\\n' "
+                "\"$DCH_SESSION\" \"$(pwd)\"\n")
+    with open(peer, "w") as f:
+        f.write("#!/bin/sh\ntouch '%s'\necho '{\"title\":\"peer\"}'\n"
+                % mark)
+    for p in (host, peer):
+        os.chmod(p, 0o755)
+    with open(senv["DCH_CONFIG"], "a") as f:
+        f.write("questions_command = %s\n" % host)
+    with open(cenv["DCH_CONFIG"], "a") as f:
+        f.write("questions_command = %s\n" % peer)
+    henv = {k: v for k, v in senv.items() if not k.startswith("DCH_XRAY_")}
+    loc = subprocess.run([DCH, "--xray", "xc", "--questions", "--json"],
+                         env=henv, capture_output=True, timeout=30,
+                         stdin=subprocess.DEVNULL)
+    rem = subprocess.run([DCH, "--xray", "srv:xc", "--questions", "--json"],
+                         env=cenv, cwd=cenv["HOME"], capture_output=True,
+                         timeout=60, stdin=subprocess.DEVNULL)
+    try:
+        ls = [json.loads(l) for l in rem.stdout.splitlines()]
+    except ValueError:
+        ls = []
+    q = [l["question"] for l in ls if "question" in l]
+    check("questions_command through serve: source command, the host's "
+          "command answers as the host's own dch does",
+          rem.returncode == 0 and rem.stdout == loc.stdout and ls and
+          ls[0]["source"] == "command" and ls[0]["session"] == "xc" and
+          ls[0]["title"] == "host questions",
+          (rem.returncode, rem.stdout[:400], rem.stderr[:300],
+           loc.stdout[:300]))
+    check("...its rows: the question, the session's name and cwd, then done",
+          [x["title"] for x in q] == ["Ship?", "<xc|%s>" % hcwd] and
+          q[0]["label"] == "OPEN" and
+          ls[-1] == {"done": True, "count": 2, "dropped": 0}, ls)
+    check("...and the peer's own questions_command never ran",
+          not os.path.exists(mark))
+
+
 def define_command(senv, cenv, check, log):
     """#405: a peer's --ref OQ-97 of session xa (xn1's; no transcript
     defines it) runs the host's define_command: its definition, source
@@ -493,6 +543,7 @@ def main():
             tasks(senv, cenv, check)
             tasks_command(senv, cenv, logs, check)
             memory_command(senv, cenv, check)
+            questions_command(senv, cenv, check)
             define_command(senv, cenv, check, log)
             define_ref_log(senv, cenv, check, log)
     finally:

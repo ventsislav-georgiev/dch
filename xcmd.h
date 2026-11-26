@@ -1,8 +1,9 @@
 /*
  * xcmd.h - X-ray's command source (#321): the user's own `tasks_command` /
- * `memory_command` / `define_command` (#405) from the dch config, run
- * read-only, its stdout read as JSON lines (define: or one plain-text first
- * line) and turned into the contract's row lines, escapes and controls out.
+ * `memory_command` / `define_command` (#405) / `questions_command` (#652)
+ * from the dch config, run read-only, its stdout read as JSON lines
+ * (define: or one plain-text first line) and turned into the contract's row
+ * lines, escapes and controls out.
  *
  * Client-only, like xray.c: the querying process runs it, the master links
  * none of it. The command line comes only from the user's own config, never
@@ -35,7 +36,7 @@
 #define XCMD_DEF_BODY    2048		/* a definition's body: bytes, */
 #define XCMD_DEF_LINES   20		/* and lines */
 
-enum xcmd_kind { XCMD_TASK, XCMD_MEMORY, XCMD_DEFINE };
+enum xcmd_kind { XCMD_TASK, XCMD_MEMORY, XCMD_DEFINE, XCMD_QUESTION };
 
 /* What the query knows about the session; NULL reads as "". command is the
 ** config value (dch_config_get("tasks_command", ...)), unsplit. XCMD_DEFINE:
