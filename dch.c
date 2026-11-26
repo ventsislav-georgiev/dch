@@ -3888,6 +3888,7 @@ struct det_rule
 static const struct det_rule det_suppress[] = {
 	{ "showing detailed transcript", 0 },              /* claude ctrl-o */
 	{ "pgup/pgdn to", "q to quit" },                   /* codex pager   */
+	{ "pgup/pgdn/", "close" },                  /* codex 0.167 pager */
 };
 /* Waiting on a human. Checked before working: a stale spinner must not
 ** mask a live permission prompt. */
@@ -3899,9 +3900,15 @@ static const struct det_rule det_blocked[] = {
 	** start, as it wraps at its end under ~90 columns */
 	{ "^claude has written up a plan", 0 },            /* claude plan   */
 	{ "^background work is running", 0 },              /* claude /exit  */
-	{ "press enter to confirm or esc to cancel", 0 },  /* codex         */
+	/* codex 0.167 approvals (exec, patch, network, permissions, MCP) */
+	{ "^press enter to confirm or esc to cancel", 0 },
+	{ "^enter to submit | esc to cancel", 0 },  /* codex MCP form   */
 	{ "enter to submit answer", 0 },                   /* codex forms   */
-	{ "allow command?", 0 },                           /* codex exec    */
+	{ "enter to submit all", 0 },                      /* codex forms   */
+	{ "^trust this folder?", 0 },               /* codex startup    */
+	{ "^hooks need review", 0 },                /* codex startup    */
+	{ "^working directory \xc2\xb7 resume", 0 },  /* codex resume */
+	{ "allow command?", 0 },        /* codex before 0.167 (not in it) */
 	{ "permission required", 0 },                      /* opencode      */
 	{ "waiting for approval", 0 },                     /* cursor        */
 	{ "waiting for user confirmation", 0 },            /* gemini        */
@@ -3912,6 +3919,7 @@ static const struct det_rule det_blocked[] = {
 /* Busy right now (footer hints; spinner handled separately). */
 static const struct det_rule det_working[] = {
 	{ "esc to interrupt", 0 },                 /* claude,codex,opencode */
+	{ " to interrupt)", 0 },          /* codex, remapped interrupt key */
 	{ "ctrl+c to interrupt", 0 },                      /* opencode      */
 };
 
