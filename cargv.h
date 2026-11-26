@@ -20,5 +20,15 @@ int dch_claude_strip(char **in, int argc, char **out, int agent);
 ** walk kept everything, or claude does not run (#398). */
 int dch_claude_strip_nm(char **in, int argc, char **out, int agent, int *nm,
                         size_t *off);
+/* #655: s is a Codex thread id (a UUID). 1 or 0. */
+int dch_codex_id_ok(const char *s);
+/* The relaunch of a Codex argv on thread id in cwd: in[0..at] (at: the
+** codex word), then `resume <id> -C <cwd>`, then in's options with their
+** values, less a subcommand, positionals (resume/fork, a SESSION_ID, the
+** PROMPT, everything after `--`), --last and a -C of its own; msg, when
+** non-NULL and not empty, last as the PROMPT. out holds argc + 7 entries,
+** NULL-terminated; its count. */
+int dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
+                     char *msg, char **out);
 
 #endif

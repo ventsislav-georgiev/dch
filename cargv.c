@@ -281,3 +281,76 @@ whole:
 	out[n] = NULL;
 	return n;
 }
+
+/* A Codex thread id as dch records and passes it (#655): a UUID, 36
+** characters with dashes at 8, 13, 18 and 23, hex elsewhere. 1 or 0. */
+int
+dch_codex_id_ok(const char *s)
+{
+	int k;
+
+	for (k = 0; k < 36; k++)
+		if (k == 8 || k == 13 || k == 18 || k == 23 ? s[k] != '-'
+		    : !((s[k] >= '0' && s[k] <= '9') ||
+		        (s[k] >= 'a' && s[k] <= 'f') ||
+		        (s[k] >= 'A' && s[k] <= 'F')))
+			return 0;
+	return s[36] == '\0';
+}
+
+/* codex's options that take the next token as their value (clap, Codex
+** 0.167 `codex --help` and `codex resume --help`); every other option is
+** a flag. shortcut: -i/--image takes one value here, clap's 1.. would
+** take more words up to the next option; upgrade if images matter. */
+static const char *const cxval[] = {
+	"-c", "--config", "--enable", "--disable", "--remote",
+	"--remote-auth-token-env", "-i", "--image", "-m", "--model",
+	"--local-provider", "-p", "--profile", "-s", "--sandbox", "-a",
+	"--ask-for-approval", "-C", "--cd", "--add-dir", NULL
+};
+
+int
+dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
+                 char *msg, char **out)
+{
+	int k, n = 0, val, i;
+
+	for (k = 0; k <= at; k++)
+		out[n++] = in[k];
+	out[n++] = "resume";
+	out[n++] = id;
+	out[n++] = "-C";
+	out[n++] = cwd;
+	for (k = at + 1; k < argc; k++)
+	{
+		const char *a = in[k];
+
+		if (strcmp(a, "--") == 0)
+			break;		/* the rest is the prompt */
+		/* resume or fork, its SESSION_ID, or the PROMPT */
+		if (a[0] != '-' || !a[1])
+			continue;
+		for (val = 0, i = 0; cxval[i] && !val; i++)
+			val = strcmp(a, cxval[i]) == 0;
+		/* a session choice, and a -C of its own: ours stands */
+		if (strcmp(a, "--last") == 0 || strncmp(a, "--cd=", 5) == 0 ||
+		    (a[1] == 'C' && a[2]))
+			continue;
+		if (strcmp(a, "-C") == 0 || strcmp(a, "--cd") == 0)
+		{
+			k++;
+			continue;
+		}
+		out[n++] = in[k];
+		if (val && k + 1 < argc)
+			out[n++] = in[++k];
+	}
+	if (msg && *msg)
+	{
+		if (msg[0] == '-')
+			out[n++] = "--";	/* a prompt, never an option */
+		out[n++] = msg;
+	}
+	out[n] = NULL;
+	return n;
+}

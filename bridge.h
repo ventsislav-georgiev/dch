@@ -19,6 +19,9 @@ int dch_codex_thread_name(const char *home, const char *id, char *out,
                           size_t outsz);
 int dch_codex_shared(const char *sess, const char *marker);
 char **dch_codex_argv(char **argv);
+/* The codex word of an interactive Codex argv (an explicit --no-daemon
+   allowed), -1 when argv is not one (#655). */
+int dch_codex_tui_word(char **argv);
 int dch_pty_gate(const char *path);
 int dch_pty_push(const char *path, const char *text);
 int dch_json_string(const char *json, const char *key, char *out, size_t cap);

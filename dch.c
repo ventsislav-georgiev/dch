@@ -2127,6 +2127,40 @@ dch_codex_snapshot_id(const char *home, const char *sess, const char *marker,
 	       !dch_codex_shared(sess, marker) ? 0 : -1;
 }
 
+/* The thread the Codex at pid runs, and the CODEX_HOME it runs under (its
+** own, else its HOME's .codex), for the history record (#655): its env's
+** thread id, else its shell snapshot's. 0 with both set, else -1 and
+** neither touched. */
+int
+dch_codex_thread(long pid, char *id, size_t idsz, char *home, size_t homesz)
+{
+	char h[1200], t[128], sess[600], mk[700];
+	const char *marker = NULL;
+
+	if (proc_env_value(pid, "CODEX_HOME", h, sizeof h) != 0 || !h[0])
+	{
+		/* room left for the "/.codex" it gains */
+		if (proc_env_value(pid, "HOME", h, sizeof h - 8) != 0 || !h[0])
+			return -1;
+		strcat(h, "/.codex");
+	}
+	if (proc_env_value(pid, "DCH_NATIVE_BRIDGE_ID", mk, sizeof mk) == 0 &&
+	    mk[0])
+		marker = mk;
+	if ((proc_env_value(pid, "CODEX_THREAD_ID", t, sizeof t) != 0 ||
+	     !dch_codex_id_ok(t)) &&
+	    (proc_env_value(pid, "CODEX_SESSION_ID", t, sizeof t) != 0 ||
+	     !dch_codex_id_ok(t)) &&
+	    (proc_dch_session(pid, sess, sizeof sess) != 0 ||
+	     dch_codex_snapshot_id(h, sess, marker, t, sizeof t, 1) != 0))
+		return -1;
+	if (strlen(t) >= idsz || strlen(h) >= homesz)
+		return -1;
+	snprintf(id, idsz, "%s", t);
+	snprintf(home, homesz, "%s", h);
+	return 0;
+}
+
 static int
 load_codex_pid(long pid, void *arg)
 {
@@ -9772,6 +9806,7 @@ struct hrec
 	char name[512], alias[600], cwd[PATH_MAX], end[192];
 	char sid[64], aname[256], acwd[PATH_MAX];
 	char acfg[1400];	/* agent's config_dir, "" = the default (#065) */
+	char cx[40], cxhome[1200];	/* a Codex's thread and home (#655) */
 	long started, updated, ended;
 	char **argv, **launch;	/* malloc'd blocks */
 	int argc, launchc, live;
@@ -9782,7 +9817,7 @@ struct hrec
 	long long deadline;
 };
 
-enum { RV_SKIP, RV_PLAIN, RV_ARGV, RV_SHELL };
+enum { RV_SKIP, RV_PLAIN, RV_ARGV, RV_SHELL, RV_CODEX };
 
 static void
 hrec_free(struct hrec *r, int n)
@@ -9956,6 +9991,11 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	}
 	else
 		r->sid[0] = '\0';
+	if (dch_json_nested_string(r->body, "codex", "thread_id", r->cx,
+	                           sizeof r->cx) < 0 || !dch_codex_id_ok(r->cx) ||
+	    dch_json_nested_string(r->body, "codex", "home", r->cxhome,
+	                           sizeof r->cxhome) < 0)
+		r->cx[0] = r->cxhome[0] = '\0';
 	hrec_strip(r, r->argv, &r->argc, NULL, "argv");
 	/* A record with an end is over even if a new session took its name;
 	** live means its own socket answers, so a record a cold start moved
@@ -10165,6 +10205,8 @@ do_history_verb(int json, int remote)
 		if (r[k].sid[0])
 			printf("  [claude %s%s%s]", r[k].aname,
 			       r[k].aname[0] ? " " : "", r[k].sid);
+		else if (r[k].cx[0])
+			printf("  [codex %s]", r[k].cx);
 		if (r[k].pinned)
 			fputs("  [pinned]", stdout);
 		if (aside)
@@ -11811,8 +11853,9 @@ rv_say(const struct hrec *r, int json, const char *res, const char *code,
 	vsnprintf(d, sizeof d, fmt, ap);
 	va_end(ap);
 	if (json)
-		rv_json_final(r->name, r->as, res, code, d, r->sid,
-		              r->mode == RV_ARGV);
+		rv_json_final(r->name, r->as, res, code, d,
+		              r->sid[0] ? r->sid : r->cx, r->mode == RV_ARGV ||
+		              r->mode == RV_CODEX);
 	else
 		printf("%s: %s\n", r->name, d);
 	fflush(stdout);
@@ -11856,13 +11899,14 @@ rv_cfg(const char *cfg, char **v, int tok)
 ** it comes back as the shell (RV_SHELL, the command is typed later). 0, or
 ** -1 with the reason printed. */
 static int
-revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
+revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json,
+             char *msg)
 {
 	char **nv = NULL, **v = r->argv;
-	int tok = dch_claude_tok(r->argv, r->argc), nc = r->argc, rc;
+	int tok = dch_claude_tok(r->argv, r->argc), nc = r->argc, rc, cxat;
 	const char *lossy = hrec_lossy(r), *cfg = NULL, *o;
-	char *was = NULL, *nmv = NULL;
-	int mcp = 0;
+	char *was = NULL, *nmv = NULL, *cxwas = NULL;
+	int mcp = 0, cxset = 0;
 
 	if (lossy)
 	{
@@ -11900,6 +11944,28 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 	}
 	else if (r->sid[0] && r->launch)
 		r->mode = RV_SHELL;
+	/* a Codex as the command: `codex resume <id> -C <cwd> [msg]` under
+	** the CODEX_HOME it ran with (#655) */
+	else if (!r->sid[0] && r->cx[0] &&
+	         (cxat = dch_codex_tui_word(r->argv)) >= 0)
+	{
+		char def[1200];
+		const char *hm = getenv("HOME");
+
+		if (!(nv = calloc((size_t)r->argc + 7, sizeof *nv)))
+			return -1;
+		nc = dch_codex_resume(r->argv, r->argc, cxat, r->cx, r->cwd, msg, nv);
+		v = nv;
+		r->mode = RV_CODEX;
+		o = getenv("CODEX_HOME");
+		snprintf(def, sizeof def, "%s/.codex", hm ? hm : "");
+		if (r->cxhome[0] && strcmp(r->cxhome, o && *o ? o : def) != 0)
+		{
+			cxwas = o ? strdup(o) : NULL;
+			cxset = setenv("CODEX_HOME", r->cxhome, 1) == 0;
+		}
+		setenv("DCH_REVIVE_CODEX", r->cx, 1);
+	}
 	/* Under another name, claude's --name follows when it was the dch name;
 	** a name of the user's own stays (#398). s holds r->argv's pointers,
 	** and so does v: the value's entry is found by identity. */
@@ -11961,6 +12027,12 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 		}
 	}
 	unsetenv("DCH_REVIVE_AGENT");
+	unsetenv("DCH_REVIVE_CODEX");
+	if (cxset && cxwas)
+		setenv("CODEX_HOME", cxwas, 1);
+	else if (cxset)
+		unsetenv("CODEX_HOME");
+	free(cxwas);
 	if (mcp)
 		unsetenv("DCH_REVIVE_MCP");
 	if (cfg && was)
@@ -12342,6 +12414,33 @@ rec_hit(const struct hrec *h, const char *arg, const char *stem, int byfile)
                       "\"file\" in dch --history --json (session a.json: " \
                       "a.json.json)"
 
+/* The resume message for record h, revived with `how` (DCH_REVIVE_MSG
+** stands in for it when set). */
+static void
+rv_text(const struct hrec *h, const char *how, char *text, size_t sz)
+{
+	char when[32] = "an unknown time";
+	time_t t = (time_t)hrec_when(h);
+
+	if (t)
+		strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
+	if (strcmp(h->end, "stopped") == 0)
+		snprintf(text, sz, "resume all work. This session "
+		         "was stopped by dch --stop (%s) and dch revived it "
+		         "with %s. Re-arm the monitors, "
+		         "background shells, subagents, loops, wakeups and "
+		         "crons you stopped before the pause, then carry on "
+		         "where you left off.", when, how);
+	else
+		snprintf(text, sz, "resume all work. This session "
+		         "ended (%s, last seen %s) and dch revived it with "
+		         "%s. Re-read your ledger and task list, "
+		         "re-arm the monitors, background shells, loops, "
+		         "wakeups and crons that died with it, re-dispatch "
+		         "any unfinished workers, then carry on where you "
+		         "left off.", h->end, when, how);
+}
+
 /* `--revive <name> [--as <new>]` / `--revive --all`; nomsg: --no-message,
 ** claude is resumed and nothing is typed into it. */
 static int
@@ -12466,7 +12565,19 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			continue;
 		}
 		json_phase(h->name, "starting", json);
-		if (revive_spawn(exe, h, cols, rows, json) < 0)
+		{
+			/* a Codex takes its resume message as its PROMPT (#655) */
+			const char *em = getenv("DCH_REVIVE_MSG");
+			char cxmsg[1200];
+
+			if (em && *em)
+				snprintf(cxmsg, sizeof cxmsg, "%s", em);
+			else
+				rv_text(h, "codex resume", cxmsg, sizeof cxmsg);
+			i = revive_spawn(exe, h, cols, rows, json,
+			                 nomsg ? NULL : cxmsg);
+		}
+		if (i < 0)
 		{
 			h->mode = RV_SKIP;
 			bad++;
@@ -12496,7 +12607,15 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 					(void)rename(rp, np);
 			}
 		}
-		if (h->mode == RV_PLAIN)
+		if (h->mode == RV_CODEX)
+			rv_say(h, json, "ok", "", "revived as %s in %s, codex resumed "
+			       "%s; resume message %s", h->as, h->cwd, h->cx, nomsg
+			       ? "not sent (--no-message)" : "passed as its prompt");
+		else if (h->mode == RV_PLAIN && !h->sid[0] && h->cx[0])
+			rv_say(h, json, "ok", "", "revived as %s in %s; codex NOT "
+			       "resumed (not an interactive codex command): codex resume %s",
+			       h->as, h->cwd, h->cx);
+		if (h->mode == RV_PLAIN && (h->sid[0] || !h->cx[0]))
 		{
 			rv_say(h, json, h->sid[0] ? "failed" : "ok",
 			       h->sid[0] ? "launch_unknown" : "", "revived as %s in "
@@ -12553,8 +12672,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		struct hrec *h = &r[k];
 		const char *msg = getenv("DCH_REVIVE_MSG");
 		const char *code, *res;
-		char text[1200], when[32] = "an unknown time";
-		time_t t = (time_t)hrec_when(h);
+		char text[1200];
 
 		why = NULL;
 		if (h->mode != RV_ARGV && h->mode != RV_SHELL)
@@ -12567,23 +12685,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			       h->sid);
 			continue;
 		}
-		if (t)
-			strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
-		if (strcmp(h->end, "stopped") == 0)
-			snprintf(text, sizeof text, "resume all work. This session "
-			         "was stopped by dch --stop (%s) and dch revived it "
-			         "with claude --resume. Re-arm the monitors, "
-			         "background shells, subagents, loops, wakeups and "
-			         "crons you stopped before the pause, then carry on "
-			         "where you left off.", when);
-		else
-			snprintf(text, sizeof text, "resume all work. This session "
-			         "ended (%s, last seen %s) and dch revived it with "
-			         "claude --resume. Re-read your ledger and task list, "
-			         "re-arm the monitors, background shells, loops, "
-			         "wakeups and crons that died with it, re-dispatch "
-			         "any unfinished workers, then carry on where you "
-			         "left off.", h->end, when);
+		rv_text(h, "claude --resume", text, sizeof text);
 #ifdef HAVE_LIBGHOSTTY_VT
 		json_phase(h->name, "resuming", json);
 		code = "";

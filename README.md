@@ -3177,6 +3177,28 @@ though, so a Claude typed into it gets what they export). A session ended by `dc
 its message says it was stopped by `dch --stop` and to re-arm what it
 stopped for the pause.
 
+A session whose command is an interactive Codex (`codex ...` or `headroom
+wrap codex ...`, not `codex exec` and the like) records the Codex thread it
+runs, as `"codex":{"thread_id","home"}` beside `"agent"`: the id while Codex
+runs (its `CODEX_THREAD_ID`, else the shell snapshot that carries the
+session's `DCH_SESSION`, made at Codex's first turn), or else the last `codex
+resume <id>` line Codex prints on exit; `home` is Codex's own `CODEX_HOME`,
+else its `HOME`'s `.codex`. `--history` shows it as `[codex <id>]`,
+`--history --json` as that object. `--revive` relaunches it as `codex resume
+<id> -C <cwd>` right after the `codex` word, the other options kept, any
+old subcommand (`resume`, `fork`), session id, `--last`, `-C` and prompt
+dropped, `--no-daemon` added as for any Codex, under the recorded
+`CODEX_HOME` when it differs from the current one. The resume message goes
+in as Codex's PROMPT argument (after `--` when it starts with `-`), never
+typed, so dch-lite sends it too; `--no-message` leaves it out. The line reads
+`revived as <n> in <cwd>, codex resumed <id>; resume message passed as its
+prompt`, and `--json`'s `session_id` is the thread id. With no id recorded
+(Codex never ran a turn, so nothing is resumable) the session comes back
+with its argv as before; `codex resume --last` is not used, since it picks
+the newest thread of the cwd, not this one. A Codex typed into a shell keeps
+its id in the record, but the shell comes back alone: the line names `codex
+resume <id>` to run by hand.
+
 `--revive`, and a relaunch into a held session (`--restart --include-agents`,
 `--respawn`), start Claude with `MCP_CONNECTION_NONBLOCKING=0` unless that is
 already set: Claude then connects its MCP servers before its first request, so

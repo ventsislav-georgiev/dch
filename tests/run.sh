@@ -538,6 +538,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--history/--revive, prune to --json" revive_more_test.py
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "--revive --as renames claude's --name too" revive_name_test.py
+    pyrun "--history/--revive keep and resume a Codex thread (#655)" codex_resume_test.py
     pyrun "claude's one-shot prompt is never sent again (#138)" oneshot_prompt_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "a local a:b session stays local, remote hosts off or not (#122)" colon_name_test.py

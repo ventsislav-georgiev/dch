@@ -1175,8 +1175,9 @@ static const char *const codex_not_tui[] = {
    `headroom wrap codex ...` (which hands unknown options to codex). The
    first word that is not an option must not name a non-TUI subcommand (an
    option's value counts as that word: harmless either way); --remote, which
-   Codex refuses next to --no-daemon, and an explicit --no-daemon keep argv. */
-static int codex_tui_slot(char **argv) {
+   Codex refuses next to --no-daemon, and an explicit --no-daemon keep argv
+   (nd: an explicit --no-daemon is fine, for --revive's resume, #655). */
+static int codex_slot(char **argv, int nd) {
   int at, first = 1;
   if (!argv || !argv[0])
     return -1;
@@ -1189,7 +1190,8 @@ static int codex_tui_slot(char **argv) {
   else
     return -1;
   for (int i = at + 1; argv[i]; i++) {
-    if (!strcmp(argv[i], "--no-daemon") || !strcmp(argv[i], "--remote") ||
+    if ((!nd && !strcmp(argv[i], "--no-daemon")) ||
+        !strcmp(argv[i], "--remote") ||
         !strncmp(argv[i], "--remote=", 9))
       return -1;
     if (first && argv[i][0] != '-') {
@@ -1201,6 +1203,10 @@ static int codex_tui_slot(char **argv) {
   }
   return at;
 }
+
+static int codex_tui_slot(char **argv) { return codex_slot(argv, 0); }
+
+int dch_codex_tui_word(char **argv) { return codex_slot(argv, 1); }
 
 /* The child's argv with `--no-daemon` after the codex word, when that
    Codex's own --help lists the flag; argv itself otherwise (older Codex
