@@ -21,6 +21,8 @@ masters running tests/fake_codex.c as `codex`, all under a temp HOME:
     rotation (a new thread: reset rotated, the new id's snapshot), a rollout
     that appears after the follower started, and a shell's follower as a
     Codex starts and exits in it (the ring pauses for a Codex, 7.3)
+  - a reverted thread (LOW-WP1): the original beside its _<rid> file, in
+    one day dir or the next: the newer by mtime, either way
   - nothing written, and nothing in the Codex dir ever run
 
 Run:  python3 tests/xray_codex_test.py          (uses ./dch; run.sh isolates)
@@ -38,6 +40,8 @@ TID3 = "019a2222-3333-7444-8555-666677778803"
 TIDA = "019a2222-3333-7444-8555-666677778804"
 TIDB = "019a2222-3333-7444-8555-666677778805"
 TIDC = "019a2222-3333-7444-8555-666677778806"
+TIDR = "019a2222-3333-7444-8555-666677778807"
+RID = "019a2222-3333-7444-8555-666677778899"
 CLSID = "11111111-2222-4333-8444-555555555590"
 fails = [0]
 
@@ -108,9 +112,10 @@ def user(sec, text):
                                                     "text": text}]})
 
 
-def rollout(tid, cwd, body, day=DAY):
+def rollout(tid, cwd, body, day=DAY, suffix=""):
     os.makedirs(day, exist_ok=True)
-    p = os.path.join(day, "rollout-2026-11-10T10-00-00-%s.jsonl" % tid)
+    p = os.path.join(day, "rollout-2026-11-10T10-00-00-%s%s.jsonl"
+                     % (tid, suffix))
     with open(p, "w") as f:
         f.write(line(0, "session_meta", {"id": tid, "cwd": cwd,
                                          "cli_version": "0.167.0"}) + body)
@@ -467,6 +472,36 @@ def test_relative_home():
               o and o["corpus"] == "none" and o["session_id"] == "" and
               "xray codex lookup" not in open(trace).read() and
               "xray seam:" not in open(trace).read(), (r.stdout, r.stderr))
+    finally:
+        dch("-k", n)
+
+
+def test_revert():
+    """LOW-WP1: Codex's thread/revert writes -<tid>_<rid>.jsonl and keeps
+    the original: the live X-ray reads the newer, never nothing."""
+    n = "xx-rv"
+    proj = os.path.join(T, "rvproj")
+    pid, marker = spawn(n, proj)
+    day11 = os.path.join(CODEX, "sessions", "2026", "11", "11")
+    try:
+        snapshot(TIDR, n, marker)
+        orig = rollout(TIDR, proj, user(1, "the original"))
+        for what, day in (("one day dir", DAY), ("the next day dir", day11)):
+            rev = rollout(TIDR, proj, user(1, "the reverted one"), day,
+                          "_" + RID)
+            for old, title in ((orig, "the reverted one"),
+                               (rev, "the original")):
+                t = time.time() - 600
+                os.utime(old, (t, t))
+                rc, o, err = xray(n, "--json")
+                check("live revert, %s: %s newer is read" % (
+                      what, "_<rid>" if old is orig else "the original"),
+                      rc == 0 and o and o["corpus"] == "codex" and
+                      o["session_id"] == TIDR and
+                      [c["title"] for c in o["chapters"]] == [title],
+                      (rc, o, err))
+                os.utime(old, None)
+            os.unlink(rev)
     finally:
         dch("-k", n)
 
@@ -1097,6 +1132,7 @@ def main():
     try:
         test_live()
         test_relative_home()
+        test_revert()
         test_tasks()
         test_scope()
         test_follow()

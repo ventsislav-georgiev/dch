@@ -1942,7 +1942,8 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 	DIR *sd, *yd, *md, *dd;
 	struct dirent *de;
 	struct stat s;
-	int y, m, day, days = 0, ups = 0, hits = 0;
+	int y, m, day, days = 0, ups = 0, hits = 0, bad = 0, tie = 0, plains = 0,
+	    rid, brid = 0;
 	size_t tl = strlen(tid);
 
 	if (!xr_config_ok(home) || !xr_uuid_shaped(tid) ||
@@ -1953,7 +1954,7 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 	/* year and month dirs opened count too, against a bound of their own:
 	** empty ones open no day dir (QA 1.55.0 LOW-11) */
 	for (y = 9999; y >= 0 && days < XR_CODEX_DAYS && ups < XR_CODEX_DAYS &&
-	     hits < 2; y--)
+	     !bad; y--)
 	{
 		unsigned char mb[13] = {0};
 
@@ -1963,7 +1964,7 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 		ups++;
 		cx_names(yd, 2, mb);
 		for (m = 99; m >= 0 && days < XR_CODEX_DAYS && ups < XR_CODEX_DAYS &&
-		     hits < 2; m--)
+		     !bad; m--)
 		{
 			unsigned char db[13] = {0};
 
@@ -1972,7 +1973,7 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				continue;
 			ups++;
 			cx_names(md, 2, db);
-			for (day = 99; day >= 0 && days < XR_CODEX_DAYS && hits < 2;
+			for (day = 99; day >= 0 && days < XR_CODEX_DAYS && !bad;
 			     day--)
 			{
 				snprintf(ds, sizeof ds, "%02d", day);
@@ -1983,7 +1984,7 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				/* "<any>-<tid>[_<rollout-id>].jsonl[.zst]" (#656), a regular
 				** file, not a link; ours and not group- or world-writable,
 				** as a snapshot (QA 1.55.0 NIT-6) */
-				while ((de = readdir(dd)) && hits < 2)
+				while ((de = readdir(dd)) && !bad)
 				{
 					size_t n = cx_stem(de->d_name, tid, tl);
 					int dfd = dirfd(dd);
@@ -1996,11 +1997,27 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 					    !S_ISREG(s.st_mode) || s.st_uid != getuid() ||
 					    (s.st_mode & 022))
 						continue;
-					if (hits++ == 0 &&
-					    snprintf(path, pathsz, "%s/%s/%s/%s/%s", dir, ys,
+					/* a reverted thread keeps its original beside each
+					** revert's _<rid> file, all this thread (LOW-WP1): the
+					** newest is the one Codex writes, a _<rid> one on a
+					** tie. Two originals, or two _<rid> files of the same
+					** second, stay ambiguous: no path beats a wrong one */
+					rid = memcmp(de->d_name + n - tl, tid, tl) != 0;
+					hits++;
+					if (!rid && plains++)
+						bad = 1;
+					if (hits > 1 && (s.st_mtime < st->st_mtime ||
+					    (s.st_mtime == st->st_mtime && (!rid || brid))))
+					{
+						tie |= s.st_mtime == st->st_mtime && rid;
+						continue;
+					}
+					if (snprintf(path, pathsz, "%s/%s/%s/%s/%s", dir, ys,
 					             ms, ds, de->d_name) >= (int)pathsz)
-						hits = 2;	/* cut short: no path */
+						bad = 1;	/* cut short: no path */
 					*st = s;
+					brid = rid;
+					tie = 0;
 				}
 				closedir(dd);
 			}
@@ -2009,9 +2026,9 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 		closedir(yd);
 	}
 	closedir(sd);
-	dch_trace("xray codex lookup: %d hit%s, %d day dirs", hits,
-	          hits == 1 ? "" : "s", days);
-	return hits == 1 ? 0 : -1;
+	dch_trace("xray codex lookup: %d hit%s, %d day dirs%s", hits,
+	          hits == 1 ? "" : "s", days, tie ? ", ambiguous" : "");
+	return hits && !bad && !tie ? 0 : -1;
 }
 
 /* ---- chapters ------------------------------------------------------------ */

@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -2953,6 +2954,43 @@ t_codex_lookup(void)
 	CHECK("codex lookup: two rollouts for one id are no hit",
 	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
 	unlink(q);
+	/* LOW-WP1: a revert's _<rid> file beside the original (p, day
+	** 2000/01/02), here a day dir newer: the newer by mtime, either way */
+	{
+		struct timeval tv[2] = {{1000, 0}, {1000, 0}};
+		char r2[512];
+
+		snprintf(q, sizeof q, "%s/sessions/2000/41/01/rollout-2000-02-11T00-00"
+		         "-00-%s_019a0000-1111-7222-8333-444455550000.jsonl", d, tid);
+		mkfile(q);
+		utimes(p, tv);
+		CHECK("codex lookup: original + newer _<rid>: the _<rid>",
+		      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+		      !strcmp(path, q));
+		tv[0].tv_sec = tv[1].tv_sec = 2000000000;
+		utimes(p, tv);
+		CHECK("codex lookup: original newer than its _<rid>: the original",
+		      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+		      !strcmp(path, p));
+		utimes(q, tv);
+		CHECK("codex lookup: original and _<rid> of one second: the _<rid>",
+		      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+		      !strcmp(path, q));
+		snprintf(r2, sizeof r2, "%s/sessions/2000/41/01/rollout-2000-02-11T00"
+		         "-00-00-%s_019a0000-1111-7222-8333-444455550001.jsonl", d,
+		         tid);
+		mkfile(r2);
+		utimes(r2, tv);
+		CHECK("codex lookup: two _<rid> files of one second are no hit",
+		      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+		tv[0].tv_sec = tv[1].tv_sec = 2000000001;
+		utimes(r2, tv);
+		CHECK("codex lookup: the newer of two _<rid> files",
+		      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+		      !strcmp(path, r2));
+		unlink(r2);
+		unlink(q);
+	}
 	/* a symlink in place of the file, or of a day dir: refused */
 	(void)!symlink(p, q);
 	unlink(p);
