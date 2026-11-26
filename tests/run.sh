@@ -544,6 +544,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "a local a:b session stays local, remote hosts off or not (#122)" colon_name_test.py
     pyrun "new sessions: statusline links, no OSC 8 into pipes (#122)" hyperlink_env_test.py
     pyrun "--say messages Claude sessions (busy too), gated" say_test.py
+    pyrun "--say types into Codex: Enter idle, Tab busy, never a dialog (#658)" say_codex_test.py
     pyrun "--run into a Claude session goes through the gate (#112)" run_agent_test.py
     pyrun "--say/--run/--revive stop safely on a signal (#126)" verb_signal_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py

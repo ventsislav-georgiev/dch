@@ -7604,6 +7604,10 @@ static const char *const cg_why[] = {
 static const char *const cg_code[] = {	/* --stop's reasons, as --say's */
 	"", "prompt", "draft", "queued", "no_screen",
 };
+/* In a --say child (#658): the agent is Codex, and the key that submits
+** (NULL: Enter; Tab queues into a busy Codex, where Enter would steer). */
+static int ty_codex;
+static const char *ty_key;
 
 struct agent
 {
@@ -7847,6 +7851,46 @@ screen_modal(const char *txt)
 	return res;
 }
 
+/* Codex's composer (#658, spec A1): the bottom-most row starting "› "
+** (blanks before it allowed), its wrapped rows indented two, up to the
+** footer ("context left", "for shortcuts") or the first row that is not
+** one. Returns the "›", *end where it ends; NULL none. An approval list's
+** "› 1. Yes" matches too: callers check for dialogs first. */
+static char *
+codex_composer_find(char *txt, char **end)
+{
+	char *ls, *nx, *comp = NULL, *g;
+	size_t w;
+
+	for (ls = txt; ls; ls = nx)
+	{
+		nx = strchr(ls, '\n');
+		nx = nx ? nx + 1 : NULL;
+		g = ls + strspn(ls, " ");
+		if (strncmp(g, "\xe2\x80\xba ", 4) == 0)
+			comp = g;
+	}
+	if (!comp)
+		return NULL;
+	for (ls = comp; (nx = strchr(ls, '\n')); ls = nx)
+	{
+		char keep;
+		int stop;
+
+		nx++;
+		w = strcspn(nx, "\n");
+		keep = nx[w];
+		nx[w] = '\0';	/* the row alone, for strstr */
+		stop = strncmp(nx, "  ", 2) || !nx[strspn(nx, " ")] ||
+		       strstr(nx, "context left") || strstr(nx, "for shortcuts");
+		nx[w] = keep;
+		if (stop)
+			break;
+	}
+	*end = nx ? nx : ls + strlen(ls);
+	return comp;
+}
+
 /* Is the Claude Code screen at `path` safe to type into? Positive evidence
 ** only: the composer must be on screen and empty (nothing after the glyph,
 ** or only Claude's dim placeholder: a typed draft is not dim), with no
@@ -7864,6 +7908,16 @@ gate_screen(char *txt, const char *dim, int queue_ok)
 
 	if ((res = screen_modal(txt)) == CG_QUEUED && queue_ok)
 		res = CG_UNKNOWN;
+	/* Codex: empty is its main placeholder; the side conversation's
+	** ("Ask a follow-up question") sends to a side thread, not the agent */
+	if (res == CG_UNKNOWN && ty_codex &&
+	    (comp = codex_composer_find(txt, &end)))
+		return strncmp(comp + 4, "Ask Codex to do anything", 24) == 0
+		       ? CG_EMPTY
+		       : strncmp(comp + 4, "Ask a follow-up question", 24) == 0
+		       ? CG_UNKNOWN : CG_DRAFT;
+	if (ty_codex)
+		return res;
 	/* bash mode (a "!" prefix) is a human's: a /command would run there */
 	if (res == CG_UNKNOWN && (comp = composer_find(txt, &end)) &&
 	    *comp == '!')
@@ -7948,13 +8002,16 @@ composer_holds_at(const char *path, const char *text)
 		return -2;
 	if (screen_modal(txt) == CG_DIALOG)
 		;
-	else if (!(comp = composer_find(txt, &end)))
+	else if (!(comp = ty_codex ? codex_composer_find(txt, &end)
+	                           : composer_find(txt, &end)))
 		ok = -1;
 	else if ((have = squeeze(composer_text(comp),
 	                         (size_t)(end - composer_text(comp)), (size_t)-1)) &&
 	         (want = squeeze(text, strlen(text), 32)))
 		ok = *want && (strncmp(have, want, strlen(want)) == 0 ||
-		               strncmp(have, "[Pastedtext#", 12) == 0);
+		               strncmp(have, "[Pastedtext#", 12) == 0 ||
+		               /* Codex's past 1000 chars (spec A4) */
+		               strncmp(have, "[PastedContent", 14) == 0);
 	free(have);
 	free(want);
 	free(txt);
@@ -7985,12 +8042,14 @@ composer_left(const char *path, const char *text)
 		return -1;
 	if ((g = gate_screen(txt, dim, 1)) == CG_EMPTY)
 		res = 0;
-	else if (g == CG_DRAFT && (comp = composer_find(txt, &end)) &&
+	else if (g == CG_DRAFT && (comp = ty_codex ? codex_composer_find(txt, &end)
+	                                           : composer_find(txt, &end)) &&
 	         (have = squeeze(composer_text(comp),
 	                         (size_t)(end - composer_text(comp)), (size_t)-1)) &&
 	         (want = squeeze(text, strlen(text), (size_t)-1)) &&
 	         (strncmp(want, have, strlen(have)) == 0 ||
-	          strncmp(have, "[Pastedtext#", 12) == 0))
+	          strncmp(have, "[Pastedtext#", 12) == 0 ||
+	          strncmp(have, "[PastedContent", 14) == 0))
 		res = *comp == '!' && strcmp(have, "!") == 0 ? 2 : 1;
 	free(have);
 	free(want);
@@ -8099,7 +8158,7 @@ ag_type(const char *path, const char *text, int paste)
 	}
 	for (n = 0; ; n++)
 	{
-		if ((t = ty_push(path, NULL, 1)) == -4)
+		if ((t = ty_push(path, ty_key, !ty_key)) == -4)
 			return ty_take_back(path, text, land);
 		if (t < 0)
 			return -1;
@@ -9278,7 +9337,9 @@ restart_agents(int force, const char *only, int json)
 ** (Enter would answer it) or a draft (ours would join it) — those are
 ** skipped and the caller retries. Every session types in a child of its
 ** own, so --all costs the slowest session, not the sum (ag_type alone may
-** take ~25 s). */
+** take ~25 s). A Codex session (#658) goes through the same gate and
+** typing, its composer read by codex_composer_find, every text pasted, and
+** Tab in place of Enter while busy (say_type). */
 
 /* Outcomes; from SAY_NO_SESSION on they are failures. */
 enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
@@ -9379,6 +9440,21 @@ say_type(const char *path, const char *text, int paste)
 	default:
 		return SAY_NO_SCREEN;
 	}
+	if (ty_codex && *text != '/')
+	{
+		/* busy: Enter would steer the running turn, Tab queues it for
+		** its end, as Claude's Enter does (spec A5). A "/" text keeps
+		** Enter: the slash popup takes Tab. shortcut: the busy row is
+		** hidden while an answer streams, so Enter steers then; upgrade
+		** by reading the rollout's last task event. */
+		int novt;
+		char *f = screen_tail(path, &novt);
+
+		if (f && det_match(det_working, sizeof(det_working) /
+		                   sizeof(det_working[0]), f))
+			ty_key = "\t";
+		free(f);
+	}
 	t = ag_type(path, text, paste);
 	/* a "!" text left behind is a loaded shell command: the person's next
 	** Enter runs it with no permission prompt, so take it back (#635).
@@ -9476,6 +9552,7 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	{
 		struct cmd_info ci;
 		struct crec r;
+		long cx = 0;
 
 		session_sock_path(names[k], path, sizeof path);
 		if (self && *self &&
@@ -9492,9 +9569,11 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			/* any status: a busy Claude queues the message. A
 			** suspended one reads nothing: the shell in front would
 			** (#282) */
-			c = ci.pid <= 0 || claude_find(ci.pid, 1, &r) == 0
-			    ? SAY_NOT_CLAUDE
-			    : proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : -1;
+			c = ci.pid <= 0 ? SAY_NOT_CLAUDE
+			    : claude_find(ci.pid, 1, &r) != 0
+			    ? (proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : -1)
+			    : (cx = dch_codex_below(ci.pid)) <= 0 ? SAY_NOT_CLAUDE
+			    : proc_fg(ci.pid, cx) == 0 ? SAY_NOT_FG : -1;
 			cmd_info_free(&ci);
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -9507,8 +9586,11 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			ty_kids = NULL;
 			ty_nkids = 0;
 			sigprocmask(SIG_SETMASK, &old, NULL);
+			/* Codex: always pasted. A pasted "/cmd" still runs as
+			** one, a pasted "!" opens no shell mode (spec A4) */
+			ty_codex = cx > 0;
 			_exit(SAY_EXIT + say_type(path, text,
-			      !say_raw(text)));
+			      ty_codex || !say_raw(text)));
 		}
 		if (c < 0)
 			sigprocmask(SIG_SETMASK, &old, NULL);

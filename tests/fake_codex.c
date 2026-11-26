@@ -6,12 +6,16 @@
 ** `--help` prints no --no-daemon (dch leaves the argv alone); otherwise it
 ** appends "<pid> <DCH_NATIVE_BRIDGE_ID or -> <DCH_SESSION or ->" to
 ** $FAKE_CODEX_LOG and waits for a signal. It reads and runs nothing.
+** With $FAKE_CODEX_TUI set it runs that script with python3 as its child
+** on the same terminal (the --say tests' painted Codex screens, #658) and
+** exits when it does.
 **
 **   cc -o <dir>/codex tests/fake_codex.c
 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 int
@@ -32,6 +36,20 @@ main(int argc, char **argv)
 		fprintf(f, "%ld %s %s\n", (long)getpid(), m && *m ? m : "-",
 		        s && *s ? s : "-");
 		fclose(f);
+	}
+	if ((m = getenv("FAKE_CODEX_TUI")) && *m)
+	{
+		int st;
+		pid_t p = fork();
+
+		if (p == 0)
+		{
+			execlp("python3", "python3", m, (char *)NULL);
+			_exit(127);
+		}
+		while (p > 0 && waitpid(p, &st, 0) < 0)
+			;
+		return 0;
 	}
 	for (;;)
 		pause();
