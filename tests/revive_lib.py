@@ -1197,7 +1197,11 @@ def main(part):
             for n, kw, want in (
                     ("rlu", dict(launch=False, argv=["sleep", "60"]),
                      ("failed", "launch_unknown", False, True)),
-                    ("rrf", dict(argv=[sh_, "-c", "echo up"]),
+                    # a shell gone before any output: revive types into
+                    # no session. Not "echo up": revive types 300 ms after
+                    # output, and a loaded runner's master can outlive
+                    # that, so lite said ok no_screen (#650)
+                    ("rrf", dict(argv=[sh_, "-c", "exit 0"]),
                      ("failed", "relaunch_failed", False, True))):
                 got = rfinal(n, **kw)
                 check("--revive --json %s: running %s, the last key [%r]"

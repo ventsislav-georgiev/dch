@@ -12022,7 +12022,9 @@ shell_type_launch(const char *name, char **launch, char *id, const char *cd,
 static int
 revive_type_launch(struct hrec *r)
 {
-	while (!ty_sig && activity_epoch(r->as) == 0 && wall_ms() < r->deadline)
+	/* a shell already gone has nothing to type into: no step-long wait */
+	while (!ty_sig && activity_epoch(r->as) == 0 && wall_ms() < r->deadline &&
+	       name_live(r->as))
 		poll(NULL, 0, 100);
 	if (!ty_sig)
 		poll(NULL, 0, 300);
