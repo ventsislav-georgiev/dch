@@ -47,6 +47,8 @@ struct xcmd_ctx
 	const char *command;
 	const char *session, *cwd, *agent, *agent_sid;
 	const char *ref, *shape, *key;
+	const char *harness, *alias;	/* DCH_SESSION_HARNESS / _ALIAS: the
+				** --ls-json values; NULL reads as "" */
 };
 
 struct xcmd_result

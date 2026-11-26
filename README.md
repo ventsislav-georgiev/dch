@@ -2388,8 +2388,10 @@ memory_command = ~/bin/my-notes
   session's folder (else your home), stdin `/dev/null`, in its own process
   group. Its environment adds `DCH_SESSION` (the session name),
   `DCH_SESSION_CWD`, `DCH_AGENT` (`claude`, `codex` or empty),
-  `DCH_AGENT_SESSION_ID` (the agent's conversation id, or empty) and
-  `DCH_ROWS_MAX`. A config line over 1023
+  `DCH_AGENT_SESSION_ID` (the agent's conversation id, or empty),
+  `DCH_SESSION_HARNESS` (the Claude Code or Codex session name, as
+  `--ls-json`'s `harness`) and `DCH_SESSION_ALIAS` (its `alias`), both
+  always set, empty when unknown, and `DCH_ROWS_MAX`. A config line over 1023
   bytes is never run cut: the built-in answer says `not a command line
   (the config line is over 1023 bytes)`.
 - **Lines.** One JSON object per line on stdout; rows show as they arrive.

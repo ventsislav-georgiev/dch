@@ -13791,6 +13791,24 @@ xr_since_one(const char *path, const struct stat *st, int codex,
 	return rc < 0 ? xr_failed() : xr_out_exit(rc == 0);
 }
 
+/* DCH_SESSION_HARNESS and DCH_SESSION_ALIAS: what --ls-json prints as
+** "harness" and "alias" for session ("" when none or not live). Called only
+** when a command is about to run. */
+static void
+xr_names(const char *session, char *harness, char *alias, size_t cap)
+{
+	struct slist sl = {0};
+
+	harness[0] = alias[0] = '\0';
+	slist_push(&sl, session);
+	load_aliases(&sl);
+	load_harness_names(&sl);
+	load_codex_names(&sl);
+	snprintf(harness, cap, "%s", sl.harness[0] ? sl.harness[0] : "");
+	snprintf(alias, cap, "%s", sl.alias[0] ? sl.alias[0] : "");
+	slist_free(&sl);
+}
+
 /* #405: a ref no file read defined: the user's define_command (their own
 ** dch config only), run with the ref as written (the --ref text, a peer's
 ** through dch serve; #411) as its last word and DCH_REF, X-ray's key text
@@ -13812,13 +13830,15 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 {
 	struct xcmd_result res;
 	struct stat st;
-	char cmd[1024], warn[XCMD_WARN_MAX] = "", ref[260];
+	char cmd[1024], warn[XCMD_WARN_MAX] = "", ref[260], hn[600] = "",
+	     an[600] = "";
 	/* a session cwd not known or gone (an ended session's worktree):
 	** HOME */
 	struct xcmd_ctx c = { cmd, session, label[0] == '/' &&
 	                      stat(label, &st) == 0 && S_ISDIR(st.st_mode)
 	                      ? label : getenv("HOME"), agent, asid,
-	                      ref, xr_shape_name[sp->shape], xr_span_text(sp) };
+	                      ref, xr_shape_name[sp->shape], xr_span_text(sp),
+	                      hn, an };
 	int set, d0 = xr_scan_defs(sc);
 
 	if (xr_scan_cancelled(sc))
@@ -13834,6 +13854,7 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 	else if (set > 0 && cmd[0])
 	{
 		xr_scan_lead(sc);
+		xr_names(session, hn, an, sizeof hn);
 		if (xcmd_rows(XCMD_DEFINE, &c, xr_cmd_def, sc, &res) == 0)
 			snprintf(warn, sizeof warn, "%s", res.warn[0] ? res.warn
 			         : "define_command: no definition printed");
@@ -14699,11 +14720,12 @@ xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
 	struct xr_tkc k = { kind, session, sid, &res, 0, o };
 	char cmd[1024];
 	const char *what = kind == XCMD_TASK ? "tasks_command" : "memory_command";
+	char hn[600], an[600];
 	int set;
 	/* a session cwd not known: HOME, never the querying process's (a
 	** dch serve ctl's is the peer's choice) */
 	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
-	                      agent, asid, NULL, NULL, NULL };
+	                      agent, asid, NULL, NULL, NULL, hn, an };
 
 	warn[0] = '\0';
 	if ((set = dch_config_get(what, cmd, sizeof cmd)) < 0)
@@ -14711,6 +14733,7 @@ xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
 		         "over 1023 bytes)", what);
 	if (set <= 0 || !cmd[0])
 		return 0;
+	xr_names(session, hn, an, sizeof hn);
 	if (xcmd_rows(kind, &c, xr_tkc_row, &k, &res) == 0)
 	{
 		snprintf(warn, cap, "%s", res.warn);

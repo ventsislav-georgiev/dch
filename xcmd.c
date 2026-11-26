@@ -623,7 +623,8 @@ xc_env(const char *name, const char *v)
 
 static const char *const xc_names[] = {"DCH_SESSION", "DCH_SESSION_CWD",
                                        "DCH_AGENT", "DCH_AGENT_SESSION_ID",
-                                       "DCH_ROWS_MAX", "DCH_REF",
+                                       "DCH_ROWS_MAX", "DCH_SESSION_HARNESS",
+                                       "DCH_SESSION_ALIAS", "DCH_REF",
                                        "DCH_REF_SHAPE", "DCH_REF_KEY"};
 #define XC_NAMES (sizeof xc_names / sizeof *xc_names)
 
@@ -642,9 +643,11 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 	v[2] = c->agent;
 	v[3] = c->agent_sid;
 	v[4] = rows;
-	v[5] = c->ref;
-	v[6] = c->shape;
-	v[7] = c->key;
+	v[5] = c->harness ? c->harness : "";	/* always set */
+	v[6] = c->alias ? c->alias : "";
+	v[7] = c->ref;
+	v[8] = c->shape;
+	v[9] = c->key;
 	for (k = 0; k < mn; k++)
 		if (!(mine[k] = xc_env(xc_names[k], v[k])))
 			return NULL;

@@ -4435,7 +4435,15 @@ in its own process group, with
 .RB ( claude ,
 .B codex
 or empty),
-.B DCH_AGENT_SESSION_ID
+.BR DCH_AGENT_SESSION_ID ,
+.B DCH_SESSION_HARNESS
+(the Claude Code or Codex session name, as
+.BR \-\-ls\-json 's
+.IR harness ),
+.B DCH_SESSION_ALIAS
+(its
+.IR alias ;
+both always set, empty when unknown)
 and
 .B DCH_ROWS_MAX
 added to its environment.
