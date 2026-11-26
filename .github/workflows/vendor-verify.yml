@@ -44,3 +44,16 @@ jobs:
 
       - name: Full suite against the rebuilt blob
         run: ./configure && make && make test
+
+  # vendor/zstd is allowlisted wholesale in .gitleaks.toml; this is the check
+  # behind "pinned sha256": every file matches the README list, none unlisted.
+  zstd-pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: vendor/zstd files match the README sha256 list
+        run: |
+          cd vendor/zstd
+          grep -E '^[0-9a-f]{64}  ' README | sha256sum -c -
+          test "$(grep -E '^[0-9a-f]{64}  ' README | cut -c67- | sort)" = "$(ls -A | grep -vx README | sort)"
