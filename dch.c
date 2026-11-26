@@ -9644,7 +9644,7 @@ restart_agents(int force, const char *only, int json)
 	struct slist sl = {0};
 	struct cmd_info ci;
 	char path[1100], onlyb[256];
-	int k, hit = 0, h;
+	int k, hit = 0, h, cx;
 
 	(void)force;
 	if (only)
@@ -9660,16 +9660,21 @@ restart_agents(int force, const char *only, int json)
 		if (cmd_query(path, &ci) == 0)
 		{
 			h = dch_claude_tok(ci.argv, ci.argc) < ci.argc;
+			cx = !h && ci.pid > 0 && strcmp(ci.state, "held") != 0 &&
+			     dch_codex_below(ci.pid) > 0;
 			cmd_info_free(&ci);
-			if (h && json)
+			if ((h || cx) && json)
 			{
-				stop_ag = "claude";
+				stop_ag = cx ? "codex" : "claude";
 				stop_print(sl.v[k], "skipped", "no_screen", "dch-lite "
 				           "has no terminal mirror to watch it with", "",
 				           "", 1);
 				stop_ag = NULL;
 			}
-			hit |= h;
+			else if (json)	/* as the full build's non-agent line */
+				stop_print(sl.v[k], "skipped", "not_claude", "no claude "
+				           "runs in the session", "", "", 1);
+			hit |= h || cx;
 		}
 	}
 	slist_free(&sl);
