@@ -528,7 +528,9 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
 
     def same(label, *args, n="xr1", mask=False):
         """args with "@" for the name: n there, srv:n here."""
-        t0 = int(time.time())
+        # 1 s slack: the host's "at" is time(NULL), on glibc the coarse
+        # clock, a tick behind time.time(), so it can read t0 - 1
+        t0 = int(time.time()) - 1
         loc = dch(senv, "--xray", *[n if a == "@" else a for a in args])
         rem = dch(xenv, "--xray", *["srv:" + n if a == "@" else a
                                     for a in args])
@@ -1100,7 +1102,9 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
 
     def same(req, argv, mask=False):
         """argv on the warm connection, as the host's own run of it"""
-        t0 = int(time.time())
+        # 1 s slack: the host's "at" is time(NULL), on glibc the coarse
+        # clock, a tick behind time.time(), so it can read t0 - 1
+        t0 = int(time.time()) - 1
         loc = subprocess.run([DCH, "--xray", "xq1"] + argv, env=senv,
                              capture_output=True, stdin=subprocess.DEVNULL)
         rq.send({"req": req, "argv": argv})
