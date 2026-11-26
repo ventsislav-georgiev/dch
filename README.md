@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.177.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.178.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -637,8 +637,10 @@ error (`--history` and `--agent-list` take their own).
 `"agent":"claude"` or `"agent":"codex"`, the agent kind where dch knows it:
 `ok`, `failed`, `interrupted` and `skipped` alike (a Codex's `codex_daemon`,
 `no_thread`, `cwd_unknown` too). A line with no agent (a session running none,
-an error before detection such as `old_master`, `respawn_pending`, `self`,
-`not_claude`) carries `"agent":null`: the key is never left out. Plain
+an error before detection such as `old_master`, `respawn_pending`,
+`not_claude`; `--stop`'s `self` too) carries `"agent":null`: the key is never
+left out. `--restart`'s `self` skip carries the agent, as its detection runs
+first. Plain
 `--restart` and every other verb are unchanged.
 
 A typical agent loop:

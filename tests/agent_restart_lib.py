@@ -834,6 +834,66 @@ def main(part):
                 run("-k", n)
                 names.remove(n)
 
+            # --- a skipped Codex must not taint the next session (#672) ------
+            # --all walks the socket dir in readdir order, so the roles go to
+            # names in the order this filesystem lists them: a Codex skipped
+            # no_thread (no shell snapshot), then a shell and a Claude, and a
+            # shell, a Codex, a Claude
+            if not lite:
+                cxb = subprocess.run(
+                    ["cc", "-o", os.path.join(bindir, "codex"),
+                     os.path.join(HERE, "fake_codex.c")], capture_output=True)
+                scr = os.path.join(tmp, "ord")
+                os.mkdir(scr)
+                cand = ["lk%s%d" % (TAG, i) for i in range(8)]
+                for c in cand:
+                    open(os.path.join(scr, c + ".sock"), "w").close()
+                order = [e.name[:-5] for e in os.scandir(scr)]
+                for c in cand:
+                    os.remove(os.path.join(scr, c + ".sock"))
+                os.rmdir(scr)
+                for label, roles in (("codex, shell, claude", "xsc"),
+                                     ("shell, codex, claude", "sxc")):
+                    nm = dict(zip(roles, order[:3]))
+                    order = order[3:] + order[:3]
+                    d = os.path.join(tmp, "cxdir")
+                    os.makedirs(d, exist_ok=True)
+                    os.environ["FAKE_CODEX_DIR"] = d
+                    for r in roles:
+                        names.append(nm[r])
+                        argv = {"x": ["codex", "--no-daemon"], "s": ["sh"],
+                                "c": ["claude"]}[r]
+                        subprocess.run([DCH, "--spawn", nm[r], "--size",
+                                        "100x30"] + argv,
+                                       capture_output=True, check=True)
+                        if r == "c":
+                            up(nm[r])
+                    del os.environ["FAKE_CODEX_DIR"]
+                    time.sleep(0.5)
+                    seen = [e.name[:-5] for e in os.scandir(sockdir)
+                            if e.name.endswith(".sock") and
+                            e.name[:-5] in nm.values()]
+                    r = restart_all("-f", "--json")
+                    fin = agent_finals(ndjson(r.stdout))
+                    xs, ss, cs = (fin.get(nm[k], {}) for k in "xsc")
+                    check("--all -f --json, %s (listed %s): the Codex skipped "
+                          "no_thread/codex, the shell not_claude/null, the "
+                          "Claude ok/claude and restarted" %
+                          (label, ",".join(roles[[nm[k] for k in roles]
+                           .index(n)] for n in seen)),
+                          cxb.returncode == 0 and
+                          (xs.get("result"), xs.get("reason"),
+                           xs.get("agent")) ==
+                          ("skipped", "no_thread", "codex") and
+                          (ss.get("result"), ss.get("reason"),
+                           ss.get("agent", 1)) ==
+                          ("skipped", "not_claude", None) and
+                          (cs.get("result"), cs.get("agent")) ==
+                          ("ok", "claude") and len(starts(nm["c"])) == 2)
+                    for r in roles:
+                        run("-k", nm[r])
+                        names.remove(nm[r])
+
             # --- self-restart: the orchestrator runs under the agent ---------
             s = sess("ags", "claude")
             up(s)
