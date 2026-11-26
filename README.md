@@ -348,9 +348,18 @@ note and the default).
 A `DCH_TEST_TIMES` that is neither empty nor `0` prints each row group's seconds, longest first, before the
 counts.
 
-**Dependencies:** a C compiler (`clang` or `gcc`) and `autoconf`.
-- macOS: `xcode-select --install` (clang + make) + `brew install autoconf`.
-- Debian/Ubuntu: `sudo apt install build-essential autoconf`.
+**Dependencies:** a C compiler (`clang` or `gcc`) and `autoconf`, plus
+libzstd (optional) for X-ray over Codex's compressed rollouts.
+- macOS: `xcode-select --install` (clang + make) + `brew install autoconf zstd`.
+- Debian/Ubuntu: `sudo apt install build-essential autoconf libzstd-dev`.
+
+`./configure` links libzstd's static archive when it finds one (the
+compiler's search path, then Homebrew's `zstd` keg), else `-lzstd`. The
+release binaries and bottles carry it statically and need no libzstd at
+run time; the Homebrew formulas depend on `zstd` for source builds. Without
+libzstd dch still builds and runs: an ended Codex whose rollout Codex has
+compressed (`.jsonl.zst`) then answers `corpus: "none"`, `reason:
+"compressed"`.
 
 ## Install with an agent
 
@@ -1448,11 +1457,31 @@ The corpus:
     must be absolute with no `..` component, or nothing under it is read.
   - The rollout is found by names only: `sessions/YYYY/MM/DD`, newest first,
     at most 400 day directories and 400 year and month directories, a file
-    whose name ends `-<id>.jsonl`. It must be the only one, a regular file
+    whose name ends `-<id>.jsonl` or `-<id>_<rollout id>.jsonl` (a reverted
+    thread), or either name plus `.zst` when the plain file is not beside
+    it (Codex compresses a rollout untouched for 7 days and keeps only the
+    `.zst`; a plain `.jsonl` wins, as in Codex). It must be the only one, a regular file
     that is yours and not group- or world-writable, under real directories (a
     symlinked day directory or file is not followed); otherwise the answer is
     `corpus: "none"` with the id. It is opened and read like a Claude Code
     transcript, with the same limits.
+  - A `.zst` rollout is decoded (libzstd, streamed, at most 1 GiB out) once
+    into a private copy, `$TMPDIR/dch-zst-<uid>/` (0700, files 0600, named
+    by the `.zst`'s device, inode, size and mtime), and that copy is read.
+    The copy is reused, so chapter anchors hold from one query to the
+    next; Codex never rewrites a compressed rollout. A bad or truncated
+    frame gives what decoded before it with `complete: false`, `why:
+    "corrupt"`, or, when nothing decoded, `corpus: "none"`, `reason:
+    "corrupt"`; a copy cut at 1 GiB has `why: "range"`. A build without
+    libzstd answers `reason: "compressed"`. `--ref` and `--search` print
+    `dch: the Codex rollout is <reason>` before `no x-ray corpus`.
+- **Ended Codex** (#656). A History record that kept a Codex thread id and
+  `CODEX_HOME` (`"codex":{"thread_id","home"}`, #655) answers from that
+  thread's rollout, found and read as above: `corpus: "codex"`, `live:
+  false`, `session_id` the thread id. `--ref`, `--search`, `--chapter`,
+  `--tasks`, `--memory` and `--follow` (its one snapshot) read it too. No
+  rollout (or two for the id) is `corpus: "none"`, `reason: null`, with the
+  thread id.
   - A user turn is a `response_item` user message, its text parts joined.
     The parts Codex adds itself (its `AGENTS.md` instructions, and any part
     wrapped in one tag, as `<environment_context>` or an `<image>`
@@ -1558,9 +1587,11 @@ The corpus:
     when the read began. A query stays under 16 MB whatever `xray_ring` is.
 - **None.** An ended or History shell (`reason: "ended"`), dch-lite
   (`"lite"`), `xray_ring 0` (`"off"`), a Claude session whose transcript is
-  gone, or a Codex with no thread id or rollout (`reason: null`). An ended
-  Codex session has no corpus either: History records carry only a Claude
-  agent, so it answers as an ended shell (`reason: "ended"`).
+  gone, or a Codex with no thread id or rollout (`reason: null`); a Codex
+  whose only rollout is a `.zst` this build cannot decode (`"compressed"`)
+  or a `.zst` that decodes to nothing (`"corrupt"`). An ended Codex whose
+  History record has no thread id answers as an ended shell (`reason:
+  "ended"`).
   - **`claudes`.** Only while a shell's ring is paused for an agent: how many
     live Claude Code sessions dch found under the session. X-ray reads one:
     `2` or more means several unrelated ones run there; `0` means it found

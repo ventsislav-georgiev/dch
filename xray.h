@@ -364,7 +364,8 @@ const struct xr_chapters *xr_claude_chapters(struct xr_claude *d);
 
 /* ---- Codex (7.4, K9) --------------------------------------------------- */
 #define XR_CODEX_DAYS  400		/* day dirs a lookup reads, newest first */
-/* <home>/sessions/YYYY/MM/DD/<any>-<tid>.jsonl: home checked as
+/* <home>/sessions/YYYY/MM/DD/<any>-<tid>[_<rollout-id>].jsonl, or that
+** name plus .zst when no plain one is beside it (#656): home checked as
 ** xr_config_ok and tid uuid-shaped before any readdir; names only, digits
 ** only, newest first, at most XR_CODEX_DAYS day dirs and XR_CODEX_DAYS
 ** year and month dirs; no symlinked dir followed; exactly one regular hit,

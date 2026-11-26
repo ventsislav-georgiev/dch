@@ -30,6 +30,9 @@
 #include <libproc.h>
 #include <sys/sysctl.h>
 #endif
+#ifdef HAVE_ZSTD
+#include <zstd.h>	/* Codex's compressed rollouts (#656) */
+#endif
 #ifdef __linux__
 #include <sys/inotify.h>	/* --xray --follow's tail (#136) */
 #else
@@ -13334,6 +13337,158 @@ xr_crec_cfg(const struct crec *c, char *cfg, size_t cfgsz)
 		cfg[0] = '\0';
 }
 
+/* Why the last xr_cx_lookup gave no rollout or a cut one (#656):
+** "compressed" (a .zst only, and no libzstd in this build), "corrupt" (a
+** bad or truncated frame), "range" (the copy hit xr_lim.bytes); else NULL. */
+static const char *xr_cx_why;
+
+#ifdef HAVE_ZSTD
+/* fd's zstd frames into tfd, streamed, at most cap bytes out: 0, 1 a bad
+** or truncated frame, 2 a local failure; *n the bytes written, *cut set
+** when the cap stopped it. */
+static int
+xr_zst_copy(int fd, int tfd, uint64_t cap, uint64_t *n, int *cut)
+{
+	size_t isz = ZSTD_DStreamInSize(), osz = ZSTD_DStreamOutSize(), r = 1;
+	ZSTD_DStream *z = ZSTD_createDStream();
+	char *ib = malloc(isz), *ob = malloc(osz);
+	int bad = !z || !ib || !ob || ZSTD_isError(ZSTD_initDStream(z)) ? 2 : 0;
+	ssize_t got = 0;
+
+	while (!bad && !*cut && (got = read(fd, ib, isz)) != 0)
+	{
+		ZSTD_inBuffer in = {ib, 0, 0};
+
+		if (got < 0 && errno == EINTR)
+			continue;
+		if (got < 0)
+			bad = 1;
+		else
+			in.size = (size_t)got;
+		while (!bad && !*cut && in.pos < in.size)
+		{
+			ZSTD_outBuffer out = {ob, osz, 0};
+			size_t w = 0;
+			ssize_t wr;
+
+			if (ZSTD_isError(r = ZSTD_decompressStream(z, &out, &in)))
+				bad = 1;
+			else if (out.pos > cap - *n)
+			{
+				out.pos = (size_t)(cap - *n);
+				*cut = 1;
+			}
+			while (!bad && w < out.pos)
+				if ((wr = write(tfd, ob + w, out.pos - w)) > 0)
+					w += (size_t)wr;
+				else if (wr < 0 && errno != EINTR)
+					bad = 2;
+			*n += w;
+		}
+	}
+	if (!bad && !*cut && r != 0)
+		bad = 1;	/* the input ended inside a frame */
+	ZSTD_freeDStream(z);
+	free(ib);
+	free(ob);
+	return bad;
+}
+#endif
+
+/* path (a .zst rollout, *st its stat) as its decoded copy: path and *st the
+** copy's. The copy is cached in $TMPDIR/dch-zst-<uid> (0700) by the .zst's
+** identity, so a chapter's anchor (its inode) holds from one run to the
+** next; Codex never rewrites a compressed rollout. 0, else -1. */
+static int
+xr_zst_decode(char *path, size_t pathsz, struct stat *st)
+{
+#ifndef HAVE_ZSTD
+	(void)path;
+	(void)pathsz;
+	(void)st;
+	xr_cx_why = "compressed";
+	return -1;
+#else
+	static const char *const whys[] = {"ok", "corrupt", "range"};
+	const char *td = getenv("TMPDIR");
+	char dir[1100], fin[1300], tmp[1300];
+	struct stat ds;
+	uint64_t n = 0;
+	int k, fd, tfd, bad, cut = 0;
+
+	if (!td || td[0] != '/')
+		td = "/tmp";
+	if (snprintf(dir, sizeof dir, "%s/dch-zst-%lu", td,
+	             (unsigned long)getuid()) >= (int)sizeof dir)
+		return -1;
+	(void)mkdir(dir, 0700);
+	if (lstat(dir, &ds) < 0 || !S_ISDIR(ds.st_mode) ||
+	    ds.st_uid != getuid() || (ds.st_mode & 077))
+		return -1;
+	for (k = 0; k < 3; k++)
+	{
+		snprintf(fin, sizeof fin, "%s/%llx-%llx-%llx-%llx.%s.jsonl", dir,
+		         (unsigned long long)st->st_dev,
+		         (unsigned long long)st->st_ino,
+		         (unsigned long long)st->st_size,
+		         (unsigned long long)st->st_mtime, whys[k]);
+		if (lstat(fin, &ds) == 0 && S_ISREG(ds.st_mode) &&
+		    ds.st_uid == getuid() && !(ds.st_mode & 077))
+			break;
+	}
+	if (k == 3)
+	{
+		if ((fd = xr_seam_open(path, st)) < 0)
+			return -1;
+		snprintf(tmp, sizeof tmp, "%s/.dec.XXXXXX", dir);
+		if ((tfd = mkstemp(tmp)) < 0)
+		{
+			close(fd);
+			return -1;
+		}
+		bad = xr_zst_copy(fd, tfd, xr_lim.bytes, &n, &cut);
+		close(fd);
+		k = bad ? 1 : cut ? 2 : 0;
+		snprintf(fin, sizeof fin, "%s/%llx-%llx-%llx-%llx.%s.jsonl", dir,
+		         (unsigned long long)st->st_dev,
+		         (unsigned long long)st->st_ino,
+		         (unsigned long long)st->st_size,
+		         (unsigned long long)st->st_mtime, whys[k]);
+		if (close(tfd) < 0 || bad == 2 || n == 0 || rename(tmp, fin) < 0 ||
+		    lstat(fin, &ds) < 0)
+		{
+			(void)unlink(tmp);
+			xr_cx_why = bad == 1 ? "corrupt" : NULL;
+			dch_trace("xray zst: no copy (bad %d, %llu bytes)", bad,
+			          (unsigned long long)n);
+			return -1;
+		}
+	}
+	if (snprintf(path, pathsz, "%s", fin) >= (int)pathsz)
+		return -1;
+	xr_cx_why = k ? whys[k] : NULL;
+	*st = ds;
+	dch_trace("xray zst: copy %s, %llu bytes", whys[k],
+	          (unsigned long long)ds.st_size);
+	return 0;
+#endif
+}
+
+/* xr_codex_lookup, then a .zst hit as its decoded copy (#656). */
+static int
+xr_cx_lookup(const char *home, const char *tid, char *path, size_t pathsz,
+             struct stat *st)
+{
+	size_t n;
+
+	xr_cx_why = NULL;
+	if (xr_codex_lookup(home, tid, path, pathsz, st) < 0)
+		return -1;
+	n = strlen(path);
+	return n > 4 && !strcmp(path + n - 4, ".zst")
+	       ? xr_zst_decode(path, pathsz, st) : 0;
+}
+
 /* The live Codex under a session's child (7.4, K9): the shallowest codex,
 ** its CODEX_HOME (validated before any read: mutant 36) and the one thread
 ** id dch_codex_snapshot_id's strict rule gives (ambiguous or absent: no
@@ -13344,6 +13499,20 @@ struct xr_cx
 	long pid;
 	char home[1400], tid[64], cwd[PATH_MAX];
 };
+
+/* An ended Codex's thread and home, from its History record (#655): 1, or
+** 0 when the record names none. */
+static int
+xr_ended_codex(const struct hrec *h, struct xr_cx *x)
+{
+	memset(x, 0, sizeof *x);
+	if (!h->cx[0] || !h->cxhome[0])
+		return 0;
+	snprintf(x->home, sizeof x->home, "%s", h->cxhome);
+	snprintf(x->tid, sizeof x->tid, "%s", h->cx);
+	snprintf(x->cwd, sizeof x->cwd, "%s", h->acwd[0] ? h->acwd : h->cwd);
+	return 1;
+}
 
 static int
 xr_live_codex(const struct cmd_info *ci, struct xr_cx *x)
@@ -13808,7 +13977,8 @@ xr_cand_cmp(const void *a, const void *b)
 
 /* The other sessions' Claude and Codex files (7.6), each mapped like <n>'s
 ** by names only (xr_claude_lookup: a uuid, a valid config_dir, one regular
-** <sid>.jsonl, no symlink; xr_codex_lookup for a Codex; nothing opened), in
+** <sid>.jsonl, no symlink; xr_cx_lookup for a Codex; nothing opened but a
+** .zst rollout, decoded once into its cached copy), in
 ** 3.4's order: <n>'s project dir newest lastSeen first, then (all) the
 ** other dirs, newest first. The count, *out to free. */
 static int
@@ -13820,8 +13990,8 @@ xr_mapped(const char *self, const char *project, int all,
 
 	for (k = 0; k < n; k++)
 	{
-		if (v[k].codex ? xr_codex_lookup(v[k].cfg, v[k].sid, v[k].path,
-		                                 sizeof v[k].path, &v[k].st) < 0
+		if (v[k].codex ? xr_cx_lookup(v[k].cfg, v[k].sid, v[k].path,
+		                              sizeof v[k].path, &v[k].st) < 0
 		    : xr_claude_lookup(v[k].cfg, v[k].sid, v[k].path,
 		                       sizeof v[k].path, &v[k].st, v[k].project,
 		                       sizeof v[k].project) < 0)
@@ -14168,7 +14338,7 @@ xr_codex_read(const struct xr_cx *x, struct xr_claude **d, struct stat *st,
 	int fd, rc;
 
 	*d = NULL;
-	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, st) < 0)
+	if (xr_cx_lookup(x->home, x->tid, path, sizeof path, st) < 0)
 		return -1;
 	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
 		return errno == EACCES || errno == EPERM || errno == EIO ? -2 : -1;
@@ -14210,23 +14380,25 @@ xr_codex_answer(const struct xr_cx *x, struct xr_answer *a,
 	if (rc < 0)
 	{
 		xr_chapters_free(ch);
+		a->reason = xr_cx_why;	/* #656: "compressed", "corrupt" or null */
 		return rc;
 	}
 	a->corpus = "codex";
 	a->available = 1;
 	a->mentions_only = 0;	/* #657: a Codex rollout defines too */
 	a->refs = refs;
-	a->complete = !capped && ch->total == ch->n;
-	a->why = a->complete ? NULL : "range";
+	a->complete = !capped && ch->total == ch->n && !xr_cx_why;
+	a->why = xr_cx_why ? xr_cx_why : a->complete ? NULL : "range";
 	a->ch = ch;
 	return 0;
 }
 
-/* --ref over a live Codex's rollout (3.4, 7.4): as over a transcript, then
-** (--scope project|all) the other sessions' Claude and Codex files. */
+/* --ref over a Codex's rollout (3.4, 7.4; live 0: an ended one's, #656): as
+** over a transcript, then (--scope project|all) the other sessions' Claude
+** and Codex files. */
 static int
 xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
-             const struct xr_refq *q)
+             int live, const struct xr_refq *q)
 {
 	char path[2048], project[1200];
 	struct xr_scan *sc;
@@ -14234,16 +14406,21 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	struct stat st;
 	int rc;
 
-	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
+	if (xr_cx_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
+	{
+		if (xr_cx_why)
+			fprintf(stderr, "dch: the Codex rollout is %s\n", xr_cx_why);
 		return xr_no_corpus();
+	}
 	xr_project_key(label, project, sizeof project);
 	if (q->since >= 0)
 		return xr_since_one(path, &st, 1, session, q->since);
 	if (q->search)
-		return xr_search_one(path, &st, 1, session, x->tid, q, project, 1);
+		return xr_search_one(path, &st, 1, session, x->tid, q, project,
+		                     live);
 	if (!xr_ref_parse(q->text, label, &sp))
 		return xr_not_ref();
-	if (!(sc = xr_scan_new(stdout, sp.key, session, project, 1, q->full,
+	if (!(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
 	                       0, q->budget, xr_t0)))
 		return xr_failed();
 	xr_scan_scope(sc, q->scope);
@@ -14251,11 +14428,11 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 		return xr_ref_exit(sc, -1);
 	rc = xr_ref_file(sc, path, &st, 1);
 	if (rc == 0)	/* XR6, --full: as over a transcript */
-		xr_scan_resolved(sc, &sp, q->text, label, 1);
+		xr_scan_resolved(sc, &sp, q->text, label, live);
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, x->tid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, q->text, session, label, "codex", x->tid, 1);
+		xr_define(sc, &sp, q->text, session, label, "codex", x->tid, live);
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
@@ -14538,13 +14715,24 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 	if (t->kind == XR_ENDED)
 	{
 		const struct hrec *h = t->rec;
+		struct xr_cx xc;
 
 		snprintf(label, sizeof label, "%s", h->acwd[0] ? h->acwd : h->cwd);
+		if (q && !h->sid[0] && xr_ended_codex(h, &xc))
+			return xr_codex_ref(&xc, t->name, label, 0, q);
 		if (q)
 			return h->sid[0] ? xr_claude_ref(h->acfg, h->sid, t->name, 0,
 			                                 label, q)
 			                 : xr_no_corpus();
-		if (h->sid[0])
+		if (!h->sid[0] && xr_ended_codex(h, &xc))
+		{
+			/* #656: its rollout, through History's thread and home */
+			snprintf(sid, sizeof sid, "%s", xc.tid);
+			if (!(refs = xr_index_new()))
+				return xr_failed();
+			rc = xr_codex_answer(&xc, &a, &ch, label, sizeof label, refs);
+		}
+		else if (h->sid[0])
 		{
 			snprintf(sid, sizeof sid, "%s", h->sid);
 			if (!(refs = xr_index_new()))
@@ -14604,7 +14792,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 			if (q)
 			{
 				cmd_info_free(&ci);
-				return cx > 0 ? xr_codex_ref(&xc, t->name, label, q)
+				return cx > 0 ? xr_codex_ref(&xc, t->name, label, 1, q)
 				              : xr_no_corpus();
 			}
 			if (cx > 0 && !(refs = xr_index_new()))
@@ -14789,6 +14977,16 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 	char cfg[1400];
 	int qc, fr, rc, cx;
 
+	if (t->kind == XR_ENDED && !t->rec->sid[0] &&
+	    xr_ended_codex(t->rec, &xc))
+	{
+		char path[2048];
+		struct stat st;
+
+		return xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0
+		       ? xr_chapter_file(path, &st, 1, xc.tid, t->name, anchor)
+		       : xr_no_corpus();
+	}
 	if (t->kind == XR_ENDED)
 		return t->rec->sid[0] ? xr_chapter_claude(t->rec->acfg, t->rec->sid,
 		                                          t->name, anchor)
@@ -14810,8 +15008,8 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 		struct stat st;
 
 		cmd_info_free(&ci);
-		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
-		                                 &st) == 0
+		return cx > 0 && xr_cx_lookup(xc.home, xc.tid, path, sizeof path,
+		                              &st) == 0
 		       ? xr_chapter_file(path, &st, 1, xc.tid, t->name, anchor)
 		       : xr_no_corpus();
 	}
@@ -15020,6 +15218,19 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind)
 	struct stat st;
 	int qc, cx = 0, claude = 0, rc;
 
+	if (t->kind == XR_ENDED && !t->rec->sid[0] &&
+	    xr_ended_codex(t->rec, &xc))
+	{
+		/* #656: an ended Codex's rollout, as a live one's below */
+		if (xr_cmd(stdout, kind, t->name, xc.tid, xc.cwd, "codex", xc.tid,
+		           warn, sizeof warn, &rc))
+			return rc;
+		if (kind == XCMD_QUESTION)
+			return xr_qs_none(t->name, xc.tid, warn);
+		return xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0
+		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
+		       : xr_tasks_none(t->name, xc.tid, warn);
+	}
 	if (t->kind == XR_ENDED)
 	{
 		snprintf(cwd, sizeof cwd, "%s",
@@ -15066,8 +15277,8 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind)
 			return rc;
 		if (kind == XCMD_QUESTION)
 			return xr_qs_none(t->name, xc.tid, warn);
-		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
-		                                 &st) == 0
+		return cx > 0 && xr_cx_lookup(xc.home, xc.tid, path, sizeof path,
+		                              &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
 		       : xr_tasks_none(t->name, xc.tid, warn);
 	}
@@ -15114,6 +15325,18 @@ xr_memory(const struct xr_target *t)
 			snprintf(cfg, sizeof cfg, "%s", h->acfg);
 			snprintf(sid, sizeof sid, "%s", h->sid);
 		}
+		else if (xr_ended_codex(h, &xc))
+		{
+			/* #656: as a live Codex's, below */
+			q.agent = "codex";
+			snprintf(cfg, sizeof cfg, "%s", xc.home);
+			snprintf(sid, sizeof sid, "%s", xc.tid);
+			if (xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0)
+			{
+				q.path = path;
+				q.st = &st;
+			}
+		}
 	}
 	else
 	{
@@ -15136,8 +15359,8 @@ xr_memory(const struct xr_target *t)
 				snprintf(cwd, sizeof cwd, "%s", xc.cwd);
 			snprintf(cfg, sizeof cfg, "%s", xc.home);
 			snprintf(sid, sizeof sid, "%s", xc.tid);	/* DCH_AGENT_SESSION_ID */
-			if (xc.tid[0] && xr_codex_lookup(xc.home, xc.tid, path,
-			                                 sizeof path, &st) == 0)
+			if (xc.tid[0] && xr_cx_lookup(xc.home, xc.tid, path,
+			                              sizeof path, &st) == 0)
 			{
 				q.path = path;
 				q.st = &st;
@@ -16507,7 +16730,7 @@ xf_cl_same(const struct xr_target *t, struct xf_cl *s)
 		return 1;
 	if (s->cx && !s->sid[0])
 		return 0;
-	if (s->cx ? xr_codex_lookup(s->cx->home, s->sid, path, sizeof path, &st)
+	if (s->cx ? xr_cx_lookup(s->cx->home, s->sid, path, sizeof path, &st)
 	            < 0
 	          : xr_claude_lookup(s->cfg, s->sid, path, sizeof path, &st,
 	                             project, sizeof project) < 0)
@@ -16554,8 +16777,8 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 		s.cx = x;
 		snprintf(s.sid, sizeof s.sid, "%s", x->tid);
 		snprintf(s.label, sizeof s.label, "%s", x->cwd[0] ? x->cwd : label);
-		if (!s.sid[0] || xr_codex_lookup(x->home, s.sid, s.path,
-		                                 sizeof s.path, &st) < 0)
+		if (!s.sid[0] || xr_cx_lookup(x->home, s.sid, s.path,
+		                              sizeof s.path, &st) < 0)
 		{
 			xf_cx_dir(x, dir, sizeof dir);
 			snprintf(s.watch, sizeof s.watch, "%s", dir);

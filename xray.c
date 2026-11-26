@@ -1901,6 +1901,38 @@ cx_names(DIR *d, size_t w, unsigned char *bits)
 
 #define CX_HAS(b, v) ((b)[(v) / 8] & (1u << ((v) % 8)))
 
+/* name's stem length (up to ".jsonl", then nothing or ".zst") when the stem
+** ends "-<tid>" or "-<tid>_<rollout-id>" (Codex's reverted threads); else 0 */
+static size_t
+cx_stem(const char *name, const char *tid, size_t tl)
+{
+	size_t n = strlen(name), p;
+
+	if (n > 4 && !strcmp(name + n - 4, ".zst"))
+		n -= 4;
+	if (n < tl + 8 || strncmp(name + n - 6, ".jsonl", 6))
+		return 0;
+	n -= 6;
+	for (p = 1; p + tl <= n; p++)
+		if (name[p - 1] == '-' && !memcmp(name + p, tid, tl) &&
+		    (p + tl == n || (name[p + tl] == '_' && p + tl + 1 < n)))
+			return n;
+	return 0;
+}
+
+/* A .zst whose plain .jsonl is beside it (stem length n): Codex reads the
+** plain one first, and so does X-ray (the pair is one hit, never two) */
+static int
+cx_plain(int dfd, const char *zst, size_t n)
+{
+	char plain[NAME_MAX + 1];
+	struct stat s;
+
+	return snprintf(plain, sizeof plain, "%.*s.jsonl", (int)n, zst) <
+	       (int)sizeof plain && fstatat(dfd, plain, &s, AT_SYMLINK_NOFOLLOW) == 0
+	       && S_ISREG(s.st_mode);
+}
+
 int
 xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
                 struct stat *st)
@@ -1948,18 +1980,17 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				    !(dd = cx_dir(dirfd(md), ds)))
 					continue;
 				days++;
-				/* "<any>-<tid>.jsonl", a regular file, not a link; ours and
-				** not group- or world-writable, as a snapshot (QA 1.55.0
-				** NIT-6) */
+				/* "<any>-<tid>[_<rollout-id>].jsonl[.zst]" (#656), a regular
+				** file, not a link; ours and not group- or world-writable,
+				** as a snapshot (QA 1.55.0 NIT-6) */
 				while ((de = readdir(dd)) && hits < 2)
 				{
-					size_t n = strlen(de->d_name);
+					size_t n = cx_stem(de->d_name, tid, tl);
 					int dfd = dirfd(dd);
 
 					/* dfd < 0: dirfd() failing, as in cx_dir */
-					if (n < tl + 7 || de->d_name[n - tl - 7] != '-' ||
-					    memcmp(de->d_name + n - tl - 6, tid, tl) ||
-					    strcmp(de->d_name + n - 6, ".jsonl") || dfd < 0 ||
+					if (!n || dfd < 0 ||
+					    (de->d_name[n + 6] && cx_plain(dfd, de->d_name, n)) ||
 					    fstatat(dfd, de->d_name, &s,
 					            AT_SYMLINK_NOFOLLOW) < 0 ||
 					    !S_ISREG(s.st_mode) || s.st_uid != getuid() ||

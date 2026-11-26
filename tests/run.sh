@@ -1374,6 +1374,9 @@ pyrun "the --xray answer's claudes and the view's line for it, local and over a 
 # a live Codex's rollout (#160, 7.4): the one-UUID mapping, the seam, --ref,
 # --follow; its ring-pause part skips itself without the mirror
 pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex_test.py
+# an ended Codex's rollout through its History record (#656): plain, .zst,
+# the _<rollout-id> name, .jsonl over .zst, a corrupt .zst
+pyrun "xray: an ended Codex's rollout via History, .jsonl.zst too" xray_codex_ended_test.py
 # --memory (#322): memories and instruction files, Claude and Codex, serve
 pyrun "xray --memory: memories, instruction files, Claude, Codex, serve" xray_memory_test.py
 # the file window's guard (#178): QA's repro with FAKE files, local and over
