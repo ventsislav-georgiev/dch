@@ -4228,7 +4228,45 @@ composer_find(char *txt, char **end)
 	return comp;
 }
 
-static char *codex_composer_find(char *txt, char **end);
+/* Codex's composer (#658, spec A1): the bottom-most row starting "› "
+** (blanks before it allowed), its wrapped rows indented two, up to the
+** footer ("context left", "for shortcuts") or the first row that is not
+** one. Returns the "›", *end where it ends; NULL none. An approval list's
+** "› 1. Yes" matches too: callers check for dialogs first. */
+static char *
+codex_composer_find(char *txt, char **end)
+{
+	char *ls, *nx, *comp = NULL, *g;
+	size_t w;
+
+	for (ls = txt; ls; ls = nx)
+	{
+		nx = strchr(ls, '\n');
+		nx = nx ? nx + 1 : NULL;
+		g = ls + strspn(ls, " ");
+		if (strncmp(g, "\xe2\x80\xba ", 4) == 0)
+			comp = g;
+	}
+	if (!comp)
+		return NULL;
+	for (ls = comp; (nx = strchr(ls, '\n')); ls = nx)
+	{
+		char keep;
+		int stop;
+
+		nx++;
+		w = strcspn(nx, "\n");
+		keep = nx[w];
+		nx[w] = '\0';	/* the row alone, for strstr */
+		stop = strncmp(nx, "  ", 2) || !nx[strspn(nx, " ")] ||
+		       strstr(nx, "context left") || strstr(nx, "for shortcuts");
+		nx[w] = keep;
+		if (stop)
+			break;
+	}
+	*end = nx ? nx : ls + strlen(ls);
+	return comp;
+}
 
 /* A blocker phrase on folded screen text. Claude Code's composer ("❯")
 ** and Codex's ("› ", not a dialog's "› 1." option) give way to a live
@@ -7942,46 +7980,6 @@ screen_modal(const char *txt)
 		res = CG_QUEUED;
 	free(fold);
 	return res;
-}
-
-/* Codex's composer (#658, spec A1): the bottom-most row starting "› "
-** (blanks before it allowed), its wrapped rows indented two, up to the
-** footer ("context left", "for shortcuts") or the first row that is not
-** one. Returns the "›", *end where it ends; NULL none. An approval list's
-** "› 1. Yes" matches too: callers check for dialogs first. */
-static char *
-codex_composer_find(char *txt, char **end)
-{
-	char *ls, *nx, *comp = NULL, *g;
-	size_t w;
-
-	for (ls = txt; ls; ls = nx)
-	{
-		nx = strchr(ls, '\n');
-		nx = nx ? nx + 1 : NULL;
-		g = ls + strspn(ls, " ");
-		if (strncmp(g, "\xe2\x80\xba ", 4) == 0)
-			comp = g;
-	}
-	if (!comp)
-		return NULL;
-	for (ls = comp; (nx = strchr(ls, '\n')); ls = nx)
-	{
-		char keep;
-		int stop;
-
-		nx++;
-		w = strcspn(nx, "\n");
-		keep = nx[w];
-		nx[w] = '\0';	/* the row alone, for strstr */
-		stop = strncmp(nx, "  ", 2) || !nx[strspn(nx, " ")] ||
-		       strstr(nx, "context left") || strstr(nx, "for shortcuts");
-		nx[w] = keep;
-		if (stop)
-			break;
-	}
-	*end = nx ? nx : ls + strlen(ls);
-	return comp;
 }
 
 /* Is the Claude Code screen at `path` safe to type into? Positive evidence
