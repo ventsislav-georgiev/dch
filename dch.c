@@ -2205,10 +2205,9 @@ load_codex_pid(long pid, void *arg)
 	    mk[0])
 		marker = mk;
 	if (target < 0 ||
-	    (proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
-	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0 &&
-	     dch_codex_snapshot_id(codexdir, sess, marker, id, sizeof(id), 0) !=
-	         0) ||
+	    /* snapshot only: an env thread ID is inherited from a parent Codex */
+	    dch_codex_snapshot_id(codexdir, sess, marker, id, sizeof(id), 0) !=
+	        0 ||
 	    dch_codex_thread_name(codexdir, id, title, sizeof(title)) != 0)
 		return 0;
 	for (char *c = title; *c; c++)
