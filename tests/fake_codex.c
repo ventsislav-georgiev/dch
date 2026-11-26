@@ -8,7 +8,8 @@
 ** $FAKE_CODEX_LOG and waits for a signal. It reads and runs nothing.
 ** With $FAKE_CODEX_TUI set it runs that script with python3 as its child
 ** on the same terminal (the --say tests' painted Codex screens, #658) and
-** exits when it does.
+** exits when it does; with $FAKE_CODEX_DIR set it first appends its argv,
+** \x1f-joined, to $FAKE_CODEX_DIR/argv.log (the --stop tests, #659).
 **
 **   cc -o <dir>/codex tests/fake_codex.c
 */
@@ -24,7 +25,10 @@ main(int argc, char **argv)
 	const char *log = getenv("FAKE_CODEX_LOG");
 	const char *m = getenv("DCH_NATIVE_BRIDGE_ID");
 	const char *s = getenv("DCH_SESSION");
+	const char *dir = getenv("FAKE_CODEX_DIR");
+	char ap[4096];
 	FILE *f;
+	int k;
 
 	if (argc > 1 && !strcmp(argv[1], "--help"))
 	{
@@ -35,6 +39,14 @@ main(int argc, char **argv)
 	{
 		fprintf(f, "%ld %s %s\n", (long)getpid(), m && *m ? m : "-",
 		        s && *s ? s : "-");
+		fclose(f);
+	}
+	if (dir && snprintf(ap, sizeof ap, "%s/argv.log", dir) < (int)sizeof ap &&
+	    (f = fopen(ap, "a")))
+	{
+		for (k = 0; k < argc; k++)
+			fprintf(f, "%s%s", k ? "\x1f" : "", argv[k]);
+		fputc('\n', f);
 		fclose(f);
 	}
 	if ((m = getenv("FAKE_CODEX_TUI")) && *m)

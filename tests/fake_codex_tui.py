@@ -7,7 +7,11 @@ side (the side conversation's composer), stream (an answer streaming: no
 busy row, the plain composer, fresh output; Tab queues there). Every read from the terminal is
 appended to $FAKE_CODEX_DIR/keys.log as one JSON string per line. A paste
 fills the composer; Enter submits it (shown as history), Tab queues it while
-busy (shown under "Queued follow-up inputs"); a dialog takes no input.
+busy (shown under "Queued follow-up inputs"); a dialog takes no input. Back to
+idle, the queue is submitted (#659). "/quit" (or "/exit") and Enter print
+Codex's exit summary on the normal screen, `codex resume $FAKE_CODEX_TID`
+(spec B; `Session ID: <none>` without one), and exit. A Ctrl-C byte is never
+expected: it writes $FAKE_CODEX_DIR/CTRL-C and carries on, so a test sees it.
 """
 import json, os, select, sys, time, tty
 
@@ -60,6 +64,9 @@ def main():
         m = mode()
         if m == "exit":
             return
+        if m == "idle" and queued:
+            hist += queued
+            queued = []
         st = (m, draft, len(hist), len(queued),
               int(time.time() * 10) if m == "stream" else 0)
         if st != last:
@@ -73,6 +80,8 @@ def main():
             return
         log.write(json.dumps(data) + "\n")
         log.flush()
+        if "\x03" in data:
+            open(os.path.join(D, "CTRL-C"), "a").write(json.dumps(data) + "\n")
         if m in ("dialog", "none"):
             continue
         buf += data
@@ -83,6 +92,15 @@ def main():
                     break
                 draft += buf[6:e]
                 buf = buf[e + 6:]
+            elif buf[0] == "\r" and draft.strip() in ("/quit", "/exit"):
+                tid = os.environ.get("FAKE_CODEX_TID")
+                sys.stdout.write("\x1b[H\x1b[2J\x1b[?2004l"
+                                 "Token usage: total=12 input=10 output=2\r\n" +
+                                 ("To continue this session, run:\r\n"
+                                  "  \x1b[36mcodex resume %s\x1b[39m\r\n" % tid
+                                  if tid else "Session ID: <none>\r\n"))
+                sys.stdout.flush()
+                return
             elif buf[0] == "\r" and draft:
                 hist.append(draft)
                 draft, buf = "", buf[1:]

@@ -7427,6 +7427,9 @@ json_final(const char *name, const char *xk, const char *xv,
 /* A --stop that ended `name` and found no record of it (DCH_NO_HISTORY,
 ** a failed write) promises no --revive: its ok line says so instead (L1,
 ** #067). 1 when it printed that line. */
+/* The agent word in --stop's lines: "codex" while ag_say reports one. */
+static const char *stop_who = "claude";
+
 static int
 stop_ok_norec(const char *name, const char *sid, int json)
 {
@@ -7439,8 +7442,9 @@ stop_ok_norec(const char *name, const char *sid, int json)
 	    lstat(p, &st) == 0)
 		return 0;
 	snprintf(d, sizeof d, "no session record kept, so dch --revive cannot "
-	         "bring it back%s%s", *sid ? "; resume by hand: claude --resume "
-	         : "", sid);
+	         "bring it back%s%s%s%s", *sid ? "; resume by hand: " : "",
+	         *sid ? stop_who : "", !*sid ? "" : strcmp(stop_who, "codex") == 0
+	         ? " resume " : " --resume ", sid);
 	if (json)
 		json_final(name, NULL, NULL, "ok", "", d, sid);
 	else
@@ -7467,13 +7471,15 @@ stop_print(const char *name, const char *res, const char *code,
 		json_final(name, NULL, NULL, res, code, detail, sid);
 	else if (strcmp(res, "ok") != 0)
 		/* the id, once known, on every line: it may be all that is left */
-		printf("%s: %s — %s%s%s%s\n", name, res, detail,
-		       *sid && !strstr(detail, sid) ? " (claude " : "",
+		printf("%s: %s — %s%s%s%s%s%s\n", name, res, detail,
+		       *sid && !strstr(detail, sid) ? " (" : "",
+		       *sid && !strstr(detail, sid) ? stop_who : "",
+		       *sid && !strstr(detail, sid) ? " " : "",
 		       *sid && !strstr(detail, sid) ? sid : "",
 		       *sid && !strstr(detail, sid) ? ")" : "");
 	else
-		printf("%s: stopped (%s%s%s%s%s%s)%s%s\n",
-		       name, *sid ? "claude " : "", aname, *sid && *aname ? " " : "",
+		printf("%s: stopped (%s%s%s%s%s%s%s)%s%s\n",
+		       name, *sid ? stop_who : "", *sid ? " " : "", aname, *sid && *aname ? " " : "",
 		       sid, *sid ? "; " : "", hint, *detail ? " " : "", detail);
 	fflush(stdout);
 }
@@ -7679,7 +7685,27 @@ struct agent
 	long mpid;		/* the master, to wait out its exit */
 	struct dch_agent ag;	/* probed right before /exit */
 	const char *res, *code;	/* the result, when not by failed/step */
+	/* #659: the agent is a --no-daemon Codex (cpid): /quit, its exit
+	** line's `codex resume <id>`, relaunched `codex resume <id> -C cwd
+	** <resume message>`; scr: its last screen's hash, for the settle */
+	int codex;
+	unsigned long scr;
+	char cwd[PATH_MAX];
+	const char *rmsg;	/* the resume message: a Codex's PROMPT */
 };
+#define AG_WHO(a)  ((a)->codex ? "codex" : "claude")
+#define AG_QUIT(a) ((a)->codex ? "/quit" : "/exit")
+#define AG_RCMD(a) ((a)->codex ? "codex resume" : "claude --resume")
+
+/* The typing mode for agent a (one run mixes Claudes and Codexes): a
+** Codex's composer and gate; sub: its messages submit with Tab, which
+** queues into a busy Codex where Enter would steer (spec A5). */
+static void
+ag_mode(const struct agent *a, int sub)
+{
+	ty_codex = a->codex;
+	ty_key = a->codex && sub ? "\t" : NULL;
+}
 
 #endif /* HAVE_LIBGHOSTTY_VT */
 
@@ -7899,7 +7925,11 @@ screen_modal(const char *txt)
 	             det_blocker(fold)))
 		res = CG_DIALOG;
 	else if (fold && (strstr(fold, "press up to edit queued messages") ||
-	                  strstr(fold, "ctrl+enter to send now")))
+	                  strstr(fold, "ctrl+enter to send now") ||
+	                  /* Codex's queue and steer blocks (spec A5) */
+	                  (ty_codex &&
+	                   (strstr(fold, "queued follow-up inputs") ||
+	                    strstr(fold, "messages to be submitted")))))
 		res = CG_QUEUED;
 	free(fold);
 	return res;
@@ -8326,12 +8356,14 @@ is_uuid(const char *u)
 	return 1;
 }
 
-/* The id from the LAST `--resume <uuid>` in the exit tail. The tail is raw
+/* The id from the LAST `<key> <uuid>` (`--resume`, Codex's `codex resume`)
+** in the exit tail. The tail is raw
 ** pty bytes: Ink dims the line and may style the id apart from the command,
 ** and a narrow pane hard-wraps it, so escapes and control bytes (CR/LF) go
 ** first and a split or wrapped id reads whole. */
 static int
-resume_id(const unsigned char *t, size_t n, char *out, size_t outsz)
+resume_id(const unsigned char *t, size_t n, const char *key, char *out,
+          size_t outsz)
 {
 	char *p = malloc(n + 1), *q, *hit = NULL;
 	size_t i = 0, k = 0;
@@ -8346,9 +8378,9 @@ resume_id(const unsigned char *t, size_t n, char *out, size_t outsz)
 		else
 			p[k++] = (char)t[i++];
 	p[k] = '\0';
-	for (q = p; (q = strstr(q, "--resume")); q += 8)
+	for (q = p; (q = strstr(q, key)); q += strlen(key))
 	{
-		char *u = q + 8;
+		char *u = q + strlen(key);
 
 		while (*u == ' ')
 			u++;
@@ -8448,6 +8480,38 @@ claude_installed(const char *tok, const char *mpath, const char *mcwd,
 	return 0;
 }
 
+/* A Codex's report line in its own words: the shared steps' texts name
+** Claude's (`claude --resume`, /exit, claude). In place, cut at cap. */
+static void
+ag_codex_words(char *d, size_t cap)
+{
+	static const char *const w[][2] = {
+		{ "claude --resume", "codex resume" }, { "/exit", "/quit" },
+		{ "with --resume", "with codex resume" }, { "claude", "codex" },
+	};
+	char out[2048];
+	const char *p = d;
+	size_t o = 0, i, l;
+
+	while (*p && o + 1 < sizeof out)
+	{
+		for (i = 0; i < 4 && strncmp(p, w[i][0], strlen(w[i][0])); i++)
+			;
+		if (i == 4)
+		{
+			out[o++] = *p++;
+			continue;
+		}
+		if (o + (l = strlen(w[i][1])) >= sizeof out)
+			break;
+		memcpy(out + o, w[i][1], l);
+		o += l;
+		p += strlen(w[i][0]);
+	}
+	out[o] = '\0';
+	snprintf(d, cap, "%s", out);
+}
+
 /* One report line per agent; done = it reached a terminal state. */
 static DCH_PRINTF(3, 4) void
 ag_say(struct agent *a, int failed, const char *fmt, ...)
@@ -8459,6 +8523,9 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(d, sizeof d, fmt, ap);
 	va_end(ap);
+	if (a->codex)
+		ag_codex_words(d, sizeof d);
+	stop_who = AG_WHO(a);
 	if (a->stop && strcmp(res, "ok") == 0 &&
 	    stop_ok_norec(a->name, a->id[0] ? a->id : a->sid, a->json))
 		;
@@ -8473,6 +8540,7 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 		printf("%s: %s%s\n", a->name, failed ? "NOT restarted — " : "", d);
 		fflush(stdout);
 	}
+	stop_who = "claude";
 	a->step = AG_DONE;
 }
 
@@ -8485,7 +8553,7 @@ ag_type_resume(struct agent *a, const char *resume)
 	int t;
 
 	if (!a->exit_ans)
-		return ag_type(a->path, resume, 1);
+		return ag_type(a->path, resume, 1);	/* ty_key: ag_mode */
 	if (!(m = malloc(strlen(resume) + sizeof a->work + 120)))
 		return -1;
 	sprintf(m, "%s At exit, Claude Code stopped background work that was "
@@ -8501,6 +8569,7 @@ ag_type_resume(struct agent *a, const char *resume)
 static const char *
 ag_resume(struct agent *a, const char *resume)
 {
+	ag_mode(a, 1);
 	if (claude_gate(a->path) != CG_EMPTY)
 		return "NOT typed";
 	switch (ag_type_resume(a, resume))
@@ -8581,20 +8650,28 @@ ag_quiet(const struct agent *a, int st)
 static int
 ag_relaunch(struct agent *a)
 {
-	char **nv;
-	int nc, st;
+	char **nv = NULL, *m = NULL;
+	int nc = 0, st;
 
-	nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
+	/* Codex: the resume message goes as its PROMPT, nothing typed */
+	if (!a->codex)
+		nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
+	else if ((m = strdup(a->rmsg)) &&
+	         (nv = calloc((size_t)a->argc + 7, sizeof *nv)))
+		nc = dch_codex_resume(a->argv, a->argc, a->tok, a->id, a->cwd, m,
+		                      nv);
 	st = nv ? respawn_req(a->path, 'a', nv, nc) : -3;
 	free(nv);
+	free(m);
 	if (st == DCH_ST_OK || ag_quiet(a, st))
 	{
 		a->step = AG_START;
 		return 0;
 	}
 	respawn_req(a->path, 'c', NULL, 0);
-	ag_say(a, 1, "relaunch with --resume %s was refused (%d); "
-	       "session ended", a->id, st);
+	ag_say(a, 1, a->codex ? "relaunch with codex resume %s was refused "
+	       "(%d); session ended" : "relaunch with --resume %s was refused "
+	       "(%d); session ended", a->id, st);
 	return 1;
 }
 
@@ -8602,12 +8679,14 @@ ag_relaunch(struct agent *a)
 ** would end the session with no hold, so take it back out. The report's
 ** suffix. */
 static const char *
-exit_back(const char *path)
+exit_back(const char *path, const char *quit)
 {
-	if (!composer_holds(path, "/exit"))
+	if (!composer_holds(path, quit))
 		return "";
-	return ty_take_back(path, "/exit", env_ms("DCH_AGENT_LAND_MS", 30000))
-	       == -5 ? "; /exit taken back out of the composer"
+	return ty_take_back(path, quit, env_ms("DCH_AGENT_LAND_MS", 30000))
+	       == -5 ? (quit[1] == 'q' ? "; /quit taken back out of the composer"
+	                          : "; /exit taken back out of the composer")
+	             : quit[1] == 'q' ? "; /quit may still sit in the composer"
 	             : "; /exit may still sit in the composer";
 }
 
@@ -8619,12 +8698,14 @@ ag_read_id(struct agent *a, const struct cmd_info *ci)
 {
 	char tid[64];
 
-	if (resume_id(ci->tail, ci->tail_len, tid, sizeof tid) < 0)
+	if (resume_id(ci->tail, ci->tail_len, a->codex ? "codex resume"
+	              : "--resume", tid, sizeof tid) < 0)
 	{
 		snprintf(a->id, sizeof a->id, "%s", a->sid);
 		snprintf(a->note + strlen(a->note), sizeof a->note -
-		         strlen(a->note), " (no resume line in the exit output; "
-		         "used the session record's id)");
+		         strlen(a->note), a->codex ? " (no resume line in the exit "
+		         "output; used the thread id seen live)" : " (no resume line"
+		         " in the exit output; used the session record's id)");
 	}
 	else
 	{
@@ -8671,7 +8752,7 @@ ag_exited(struct agent *a, const char *step_s)
 			respawn_req(a->path, 'c', NULL, 0);
 			ag_say(a, 1, "/exit did not end claude within %s; hold "
 			       "cancelled, claude left running (session %s)%s%s",
-			       step_s, a->sid, a->note, exit_back(a->path));
+			       step_s, a->sid, a->note, exit_back(a->path, AG_QUIT(a)));
 		}
 		cmd_info_free(&ci);
 		return a->step == AG_DONE;
@@ -8741,7 +8822,7 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 		respawn_req(a->path, 'c', NULL, 0);
 		if (kill((pid_t)a->cpid, 0) == 0)
 			stop_mark(a->path, NULL, 1);
-		why = exit_back(a->path);	/* before the resume message */
+		why = exit_back(a->path, AG_QUIT(a));	/* before the resume message */
 		ag_say(a, 1, "/exit did not end claude within %s%s%s; resume "
 		       "message %s", step_s, a->note, why, ag_resume(a, resume));
 		return 1;
@@ -8790,7 +8871,7 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	cmd_info_free(&ci);
 	snprintf(a->ag.sid, sizeof a->ag.sid, "%s", a->id);
 	json_phase(a->name, "ending", a->json);
-	if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
+	if ((why = stop_end(a->name, a->path, a->mpid, a->codex ? NULL : &a->ag)))
 	{
 		a->code = "end_failed";
 		ag_say(a, 1, "claude quit (claude --resume %s), but %s", a->id,
@@ -8801,6 +8882,79 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	a->code = "";
 	ag_say(a, 0, "%s", a->note[0] ? a->note + 1 : "");
 	return 0;
+}
+
+/* Is the Codex of a provably idle on this read (#659)? Its empty main
+** composer (gate: no dialog, draft, queue or steer block), no busy row
+** (` to interrupt)`, spec A2), and the screen the same as the last read:
+** a streaming answer hides the busy row but repaints. Held for the settle
+** by the caller. shortcut: screen only, no rollout task_complete read;
+** a turn silent between tool calls with its busy row hidden would pass
+** after the settle; upgrade by reading the rollout's last task event. */
+static int
+codex_idle(struct agent *a)
+{
+	char *txt, *dim, *fold;
+	unsigned long h = 5381;
+	const char *c;
+	int g, busy, steady;
+
+	if (!(txt = screen_faint(a->path, &dim, &g)))
+	{
+		snprintf(a->why, sizeof a->why, "%s", g == CG_NOVT ? "no mirror"
+		         : cg_why[CG_UNKNOWN]);
+		a->scr = 0;
+		return 0;
+	}
+	g = gate_screen(txt, dim, 0);
+	fold = tail_fold(txt, strlen(txt));
+	busy = !fold || det_match(det_working, sizeof(det_working) /
+	                          sizeof(det_working[0]), fold);
+	for (c = txt; *c; c++)
+		h = h * 33 + (unsigned char)*c;
+	free(fold);
+	free(txt);
+	free(dim);
+	steady = h == a->scr;
+	a->scr = h;
+	snprintf(a->why, sizeof a->why, "%s", busy ? "working (its busy row is "
+	         "on screen)" : g != CG_EMPTY ? cg_why[g] : !steady
+	         ? "its screen is still changing" : "");
+	return !busy && g == CG_EMPTY && steady;
+}
+
+/* Why the Codex at pid is not paused and /quit (#659), or NULL. Only a
+** --no-daemon one ends its turn with the TUI: attached to the daemon or a
+** --remote server, /quit leaves the turn running (spec B). */
+static const char *
+codex_daemon(long pid)
+{
+	char **v = proc_argv(pid);
+	int k, nd = 0, rem = 0;
+
+	for (k = 0; v && v[k] && strcmp(v[k], "--") != 0; k++)
+	{
+		nd |= strcmp(v[k], "--no-daemon") == 0;
+		rem |= strcmp(v[k], "--remote") == 0 ||
+		       strncmp(v[k], "--remote=", 9) == 0;
+	}
+	free(v);
+	return !v ? "codex's command line cannot be read"
+	       : rem ? "codex runs with --remote: /quit would leave its turn "
+	               "running on the server"
+	       : !nd ? "codex runs attached to its daemon (no --no-daemon): "
+	               "/quit would leave its turn running"
+	       : NULL;
+}
+
+/* A Codex's word in the session argv (its index), argc when it runs inside
+** the session's shell. */
+static int
+codex_tok(char **argv, int argc)
+{
+	int at = dch_codex_tui_word(argv);
+
+	return at >= 0 && at < argc ? at : argc;
 }
 
 /* One poll of one agent. Returns 1 when it ended in failure. */
@@ -8814,12 +8968,14 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	int g, ready, idle, busy;
 
 	snprintf(step_s, sizeof step_s, "%lds", step / 1000);
+	ag_mode(a, 0);
 	if (a->step == AG_EXIT)
 	{
 		/* Our /exit asked Claude to quit; with background work left it
 		** asks first. The pause already told the agent to stop it all,
 		** so confirm the exit, as /exit did before the prompt existed. */
-		if (!a->exit_ans && exit_prompt(a->path, a->work, sizeof a->work) &&
+		if (!a->codex && !a->exit_ans &&
+		    exit_prompt(a->path, a->work, sizeof a->work) &&
 		    ty_push(a->path, "1", 0) == 0)
 		{
 			a->exit_ans = 1;
@@ -8871,6 +9027,25 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		** only disarms (a held session would end on it). */
 		if (strcmp(ci.state, "armed") == 0)
 			respawn_req(a->path, 'c', NULL, 0);
+		/* Codex: the resume message went as its PROMPT; it is back once
+		** a Codex runs in the session again */
+		if (a->codex)
+		{
+			long cx = ci.pid > 0 ? dch_codex_below(ci.pid) : 0;
+
+			cmd_info_free(&ci);
+			if (cx > 0)
+			{
+				ag_say(a, 0, "codex resumed %s, the resume message as its "
+				       "prompt%s", a->id, a->note);
+				return 0;
+			}
+			if (now < a->deadline)
+				return 0;
+			ag_say(a, 1, "relaunched with codex resume %s, but no codex "
+			       "runs in the session within %s", a->id, step_s);
+			return 1;
+		}
 		g = CG_UNKNOWN;
 		busy = ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0;
 		if (busy && !(busy = strcmp(r.status, "idle") != 0) &&
@@ -8925,33 +9100,41 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	}
 
 	/* AG_WAIT: is the pause consumed and the agent idle, for a while? */
-	if (claude_find(a->cpid, 0, &r) == 0 || r.pid != a->cpid)
+	if (a->codex ? kill((pid_t)a->cpid, 0) < 0
+	             : claude_find(a->cpid, 0, &r) == 0 || r.pid != a->cpid)
 	{
-		a->code = "claude_exited";
+		a->code = a->codex ? "codex_exited" : "claude_exited";
 		ag_say(a, 1, "claude exited while pausing");
 		return 1;
 	}
-	if (strcmp(r.status, "busy") == 0 && r.upd >= a->t_sent)
-		a->saw_busy = 1;
-	g = claude_gate(a->path);
-	/* Busy after the push proves the message was taken; an idle stamp
-	** newer than the push does too, unless the message sits queued —
-	** a turn that ends with one queued is idle for a moment first. */
-	/* "shell": idle, a background shell still running. The pause told the
-	** agent to stop them; one still there DCH_AGENT_SHELL_MS after its
-	** status says so is one it does not see (civ2-qa: "no background
-	** shells" over Claude's "2 shells still running"), and /exit's prompt
-	** stops it (ag_tick). */
-	idle = strcmp(r.status, "idle") == 0 ||
-	       (strcmp(r.status, "shell") == 0 && r.upd > a->t_sent &&
-	        now - r.upd >= env_ms("DCH_AGENT_SHELL_MS", 60000));
-	ready = (a->saw_busy || (r.upd > a->t_sent && g != CG_QUEUED)) &&
-	        idle && g == CG_EMPTY;
-	if (!ready && g == CG_EMPTY)
-		snprintf(a->why, sizeof a->why, "status %s", r.status);
-	else if (!ready)
-		snprintf(a->why, sizeof a->why, "status %s, %s", r.status,
-		         g == CG_NOVT ? "no mirror" : cg_why[g]);
+	if (a->codex)
+		ready = codex_idle(a);
+	else
+	{
+		if (strcmp(r.status, "busy") == 0 && r.upd >= a->t_sent)
+			a->saw_busy = 1;
+		g = claude_gate(a->path);
+		/* Busy after the push proves the message was taken; an idle stamp
+		** newer than the push does too, unless the message sits queued —
+		** a turn that ends with one queued is idle for a moment first. */
+		/* "shell": idle, a background shell still running. The pause told the
+		** agent to stop them; one still there DCH_AGENT_SHELL_MS after its
+		** status says so is one it does not see (civ2-qa: "no background
+		** shells" over Claude's "2 shells still running"), and /exit's prompt
+		** stops it (ag_tick). */
+		idle = strcmp(r.status, "idle") == 0 ||
+		       (strcmp(r.status, "shell") == 0 && r.upd > a->t_sent &&
+		        now - r.upd >= env_ms("DCH_AGENT_SHELL_MS", 60000));
+		ready = (a->saw_busy || (r.upd > a->t_sent && g != CG_QUEUED)) &&
+		        idle && g == CG_EMPTY;
+		if (!ready && g == CG_EMPTY)
+			snprintf(a->why, sizeof a->why, "status %s", r.status);
+		else if (!ready)
+			snprintf(a->why, sizeof a->why, "status %s, %s", r.status,
+			         g == CG_NOVT ? "no mirror" : cg_why[g]);
+	}
+	if (!ready)
+		;
 	else if ((g = detect_agents(a->name)) > 0)
 	{
 		ready = 0;
@@ -8967,28 +9150,36 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	if (ready && now - a->ok_since >= settle)
 	{
 		const char *why;
+		char cxh[1200];
 		int st;
 
 		a->code = "exit_failed";
 		/* --stop keeps the agent for --revive: its launch command can
 		** only be read while claude runs. */
-		if (a->stop && dch_agent_probe(a->ci.pid, &a->ag) < 0)
+		if (a->stop && !a->codex && dch_agent_probe(a->ci.pid, &a->ag) < 0)
 		{
 			ag_say(a, 1, "could not read claude's launch command; "
 			       "resume message %s", ag_resume(a, resume));
 			return 1;
 		}
-		/* Taken now, not at pause time: /clear rotates it. */
-		snprintf(a->sid, sizeof a->sid, "%s", r.sid);
+		/* Taken now, not at pause time: /clear rotates it. A Codex's
+		** thread seen live (#655), the fallback to its exit line's. */
+		if (!a->codex)
+			snprintf(a->sid, sizeof a->sid, "%s", r.sid);
+		else if (dch_codex_thread(a->cpid, a->sid, sizeof a->sid, cxh,
+		                          sizeof cxh) < 0)
+			a->sid[0] = '\0';
 		/* --stop, claude typed into the shell: no /exit, the shell would
 		** run whatever followed claude on its line. The record's id goes
 		** into the marker and the hangup ends shell and claude together. */
 		if (a->stop && a->tok == a->argc)
 		{
-			snprintf(a->id, sizeof a->id, "%s", r.sid);
-			snprintf(a->ag.sid, sizeof a->ag.sid, "%s", r.sid);
+			snprintf(a->id, sizeof a->id, "%s", a->sid);
+			snprintf(a->ag.sid, sizeof a->ag.sid, "%s", a->sid);
 			json_phase(a->name, "ending", a->json);
-			if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
+			/* a Codex's marker is empty: the record keeps its thread */
+			if ((why = stop_end(a->name, a->path, a->mpid,
+			                    a->codex ? NULL : &a->ag)))
 			{
 				a->code = "end_failed";
 				ag_say(a, 1, "%s; resume message %s", why,
@@ -9009,7 +9200,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			return 1;
 		}
 		/* --stop: a record refresh after /exit must keep the agent */
-		if (a->stop && stop_mark(a->path, &a->ag, 0) < 0)
+		if (a->stop && stop_mark(a->path, a->codex ? NULL : &a->ag, 0) < 0)
 		{
 			stop_mark(a->path, NULL, 1);
 			respawn_req(a->path, 'c', NULL, 0);
@@ -9020,7 +9211,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		/* -3 (still in the composer) goes on to AG_EXIT: claude may be
 		** gone already, and a cancel would end a held session; AG_EXIT
 		** cancels safely if it never exits. */
-		if ((st = ag_type(a->path, "/exit", 0)) != 0 && st != -3)
+		if ((st = ag_type(a->path, AG_QUIT(a), 0)) != 0 && st != -3)
 		{
 			if (a->stop)
 				stop_mark(a->path, NULL, 1);
@@ -9099,7 +9290,7 @@ restart_agents(int force, const char *only, int json)
 		char mpath[8192], mcwd[PATH_MAX], jcwd[PATH_MAX], rc[PATH_MAX];
 		const char *skip = NULL, *code = NULL;
 		struct crec r;
-		long mpid;
+		long mpid, cx = 0;
 		int st, n;
 
 		if (only && strcmp(sl.v[k], only) != 0)
@@ -9124,7 +9315,14 @@ restart_agents(int force, const char *only, int json)
 		n = a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0
 		    ? claude_find(a->ci.pid, 1, &r) : 0;
 		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
-		if (n == 0 && a->tok == a->argc)
+		/* no Claude: a Codex is paused, /quit and resumed (#659) */
+		if (n == 0 && a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0 &&
+		    (cx = dch_codex_below(a->ci.pid)) > 0)
+		{
+			a->codex = 1;
+			a->tok = codex_tok(a->argv, a->argc);
+		}
+		if (n == 0 && !a->codex && a->tok == a->argc)
 		{
 			if (json)
 				stop_print(a->name, "skipped", "not_claude", "no claude "
@@ -9152,7 +9350,25 @@ restart_agents(int force, const char *only, int json)
 		if (mpid > 1 && proc_cwd(mpid, rc, sizeof rc) == 0 &&
 		    !realpath(rc, mcwd))
 			mcwd[0] = '\0';
-		if (n == 0)
+		/* A Codex has no version record (spec G): -f or not, it is
+		** restarted. Resumed in its own cwd (-C), so no cwd check. */
+		if (cx > 0)
+		{
+			if ((skip = codex_daemon(cx)))
+				code = "codex_daemon";
+			else if (a->tok == a->argc)
+				skip = "codex was started inside the session's shell, "
+				       "not as its command", code = "in_shell";
+			else if (proc_depth((long)getpid(), cx) >= 0 ||
+			         (self && strcmp(self, a->name) == 0))
+				skip = "run from outside dch to restart this one",
+				code = "self";
+			else if (proc_cwd(cx, rc, sizeof rc) < 0 ||
+			         !realpath(rc, a->cwd))
+				skip = "codex's cwd cannot be read",
+				code = "cwd_unknown";
+		}
+		else if (n == 0)
 			skip = "claude is its command, but no live claude "
 			       "session record joins it", code = "no_record";
 		/* No /exit there: the shell would run whatever followed claude
@@ -9176,6 +9392,12 @@ restart_agents(int force, const char *only, int json)
 		{
 			stop_print(a->name, "skipped", code, skip, "", "", json);
 			cmd_info_free(&a->ci);
+			continue;
+		}
+		if (cx > 0)
+		{
+			a->cpid = cx;
+			na++;
 			continue;
 		}
 		a->cpid = r.pid;
@@ -9241,7 +9463,11 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 	for (k = 0; k < na; k++)
 	{
 		struct agent *a = &ag[k];
-		int g = ag_sig ? CG_UNKNOWN : claude_gate(a->path);
+		int g;
+
+		a->rmsg = rmsg;
+		ag_mode(a, 1);	/* the pause message: Tab into a Codex */
+		g = ag_sig ? CG_UNKNOWN : claude_gate(a->path);
 
 		if (ag_sig)
 		{
@@ -9281,8 +9507,8 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 		}
 		if (a->stop || a->json)
 			continue;
-		printf("%s: pause message sent; waiting for claude %s to go "
-		       "idle\n", a->name, a->ver);
+		printf("%s: pause message sent; waiting for %s%s%s to go idle\n",
+		       a->name, AG_WHO(a), a->ver[0] ? " " : "", a->ver);
 		fflush(stdout);
 	}
 	do
@@ -9808,7 +10034,7 @@ do_stop_verb(char **names, int nnames, int json)
 		struct cmd_info ci;
 		struct crec r;
 		const char *why;
-		long mpid;
+		long mpid, cx = 0;
 		int c = -1, st = -1;
 
 		session_sock_path(names[k], path, sizeof path);
@@ -9849,7 +10075,9 @@ do_stop_verb(char **names, int nnames, int json)
 			continue;
 		}
 		mpid = proc_ppid(ci.pid);
-		if (claude_find(ci.pid, 1, &r) == 0)
+		/* no Claude: a Codex is paused and /quit the same way (#659) */
+		if (claude_find(ci.pid, 1, &r) == 0 &&
+		    (cx = dch_codex_below(ci.pid)) <= 0)
 		{
 			int cp = claude_proc(ci.pid) > 0;
 
@@ -9874,7 +10102,7 @@ do_stop_verb(char **names, int nnames, int json)
 			bad |= why != NULL;
 			continue;
 		}
-		if (proc_fg(ci.pid, r.pid) == 0)
+		if (proc_fg(ci.pid, cx > 0 ? cx : r.pid) == 0)
 		{
 			/* the pause message and /exit would go to the shell in
 			** front (#282) */
@@ -9885,6 +10113,14 @@ do_stop_verb(char **names, int nnames, int json)
 			continue;
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
+		if (cx > 0 && (why = codex_daemon(cx)))
+		{
+			/* left running: its session stays, nothing typed */
+			cmd_info_free(&ci);
+			stop_print(names[k], "skipped", "codex_daemon", why, "", "",
+			           json);
+			continue;
+		}
 		if (claude_gate(path) != CG_NOVT)
 		{
 			struct agent *a = &ag[na++];
@@ -9894,9 +10130,12 @@ do_stop_verb(char **names, int nnames, int json)
 			a->ci = ci;
 			a->argv = ci.argv;
 			a->argc = ci.argc;
-			a->tok = dch_claude_tok(a->argv, a->argc);
-			a->cpid = r.pid;
-			snprintf(a->ver, sizeof a->ver, "%s", r.ver);
+			a->codex = cx > 0;
+			a->tok = a->codex ? codex_tok(a->argv, a->argc)
+			                  : dch_claude_tok(a->argv, a->argc);
+			a->cpid = a->codex ? cx : r.pid;
+			if (!a->codex)
+				snprintf(a->ver, sizeof a->ver, "%s", r.ver);
 			a->mpid = mpid;
 			a->stop = 1;
 			a->json = json;
@@ -10157,10 +10396,10 @@ stop_recorded(const char *path, long since, char *sid, size_t sidsz)
 	    (dfd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) < 0)
 		return -1;
 	ok = hrec_load(dfd, fn, &h) == 0 && strcmp(h.end, "stopped") == 0 &&
-	     h.sid[0] && h.ended >= since;
+	     (h.sid[0] || h.cx[0]) && h.ended >= since;
 	close(dfd);
-	if (ok)
-		snprintf(sid, sidsz, "%s", h.sid);
+	if (ok)	/* a Codex's: its thread (#659) */
+		snprintf(sid, sidsz, "%s", h.sid[0] ? h.sid : h.cx);
 	free(h.body);
 	free(h.argv);
 	free(h.launch);
