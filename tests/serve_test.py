@@ -1062,6 +1062,11 @@ def main():
             {"url": "https://github.com/o/r/pull/7/files", "title": "Y"}]}}
         r = subprocess.run([DCH, "--meta", "svc-ret", json.dumps(meta)],
                            env=env, capture_output=True, timeout=10)
+        # #714: group and group_manual on every row, null when none
+        with open(env["DCH_CONFIG"], "a") as f:
+            f.write("\ngroup = Ops = ^svc-nomatch$\n")
+        rg = subprocess.run([DCH, "--group-set", "svc-ret", "ops"], env=env,
+                            capture_output=True, timeout=10)
         c = conn(port)
         send(c, 0x03)
         t, pl = frame(c)
@@ -1073,6 +1078,14 @@ def main():
                   "merged": 2, "open": [{"num": 5, "repo": "o/r",
                                          "title": "T", "url":
                                          "https://github.com/o/r/pull/5"}]}})
+        check("#714: 0x11 rows: group and group_manual, the manual Ops",
+              rg.returncode == 0 and row.get("group") == "Ops" and
+              row.get("group_manual") == "Ops", row)
+        check("#714: 0x11 rows: a row with no group has both null",
+              all(x.get("group", 1) is None and
+                  x.get("group_manual", 1) is None
+                  for n, x in rows.items() if n != "svc-ret") and
+              len(rows) > 1, rows)
         check("0x11 rows: keys sorted, compact",
               pl == json.dumps(json.loads(pl), sort_keys=True,
                                separators=(",", ":"),

@@ -87,6 +87,10 @@ dch \- detachable terminal sessions with a headless agent API
 .I name...
 .RB [ \-\-json ]
 .br
+.B dch \-\-group\-set
+.I name group\fR|\fP\fB\-\-auto\fP
+.RB [ \-\-json ]
+.br
 .B dch \-\-forget
 .IR name... " [" \fB\-f\fP "]|" \fB\-\-all\fP
 .RB [ \-\-json ]
@@ -951,7 +955,7 @@ All verbs take the session
 .I name
 first, never attach, and are safe to run while a human is attached.
 .TP
-.BI \-\-spawn " name" " " [ \-\-size " CxR" ] " " [ cmd... ]
+.BI \-\-spawn " name" " " [ \-\-size " CxR" ] " " [ \-\-group " g" ] " " [ cmd... ]
 Start a headless session running
 .I cmd
 (default:
@@ -983,6 +987,11 @@ may assume Ghostty\-only features the attaching terminal lacks.
 dch sets no
 .BR FORCE_HYPERLINK ;
 a caller's own value reaches the session.
+.B \-\-group
+sets the new session's manual group as
+.B \-\-group\-set
+does; a group the config does not name exits 1 (no_group) before
+anything is spawned.
 .TP
 .BI \-\-xray " name"
 The X\-ray view: a full\-screen view of session
@@ -3586,6 +3595,28 @@ needs a record, live or ended
 .B \-\-unpin
 succeeds with or without a pin, but not without a record or a stray pin
 .RB ( not_found ).
+.TP
+.BI \-\-group\-set " name group" "\fR|\fP" \-\-auto " " [ \-\-json ]
+Set the session's picker group by hand, or with
+.B \-\-auto
+let the config's group patterns decide again. The group is matched to the
+config's
+.B group
+lines ignoring case and stored in the config's spelling, in
+.IB name .group
+beside the session's history record, so it survives stop, revive and
+restart;
+.B \-\-forget
+drops it.
+.B \-\-ls\-json
+rows carry it as
+.B group_manual
+and the effective group (manual while the config has it, else the first
+pattern match, else null) as
+.BR group .
+.B \-\-json
+prints {"name","group","result","reason"}, reason no_session or no_group
+on failure. Exits 0 ok, 1 failed, 2 usage error.
 .TP
 .BI \-\-forget " name..." " " [ \-f "] [" \-\-json ]
 .TQ

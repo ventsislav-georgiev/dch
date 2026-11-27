@@ -102,10 +102,12 @@ def main():
                           sockdir.replace("/", "-"))
     names, fails = [], [0]
 
-    def check(msg, cond):
+    def check(msg, cond, *extra):
         print("  %s %s" % ("ok  " if cond else "FAIL", msg))
         if not cond:
             fails[0] += 1
+            for x in extra:
+                print("       ", repr(x)[:300])
 
     def spawn(n, *cmd):
         names.append(n)
@@ -699,6 +701,230 @@ def main():
               r.stdout == "-x: stopped (a name starting with '-' is not "
               "revived)\n")
         run("--forget", "--", "-x")
+
+        # --- #714: --group-set, --ls-json group/group_manual, --spawn --group
+        cfg = os.environ.setdefault("DCH_CONFIG", os.path.join(tmp, "config"))
+
+        def setcfg(text):
+            with open(cfg, "w") as f:
+                f.write(text)
+
+        def lsrow(n):
+            try:
+                return {e["name"]: e for e in
+                        json.loads(run("--ls-json").stdout)}.get(n)
+            except ValueError:
+                return None
+
+        def gs(*a):
+            r = run("--group-set", *a)
+            return r.returncode, (ndjson(r.stdout) or [None])[0], r
+
+        setcfg("group = API = gr-api\ngroup = QA = -qa\n")
+        spawn("gr-api-x", "sleep", "600")
+        spawn("w-qa", "sleep", "600")
+        spawn("plain", "sleep", "600")
+        until(lambda: rec("gr-api-x") and rec("plain"))
+        for args in ([], ["gr-api-x"], ["gr-api-x", "QA", "API"],
+                     ["gr-api-x", "QA", "--auto"], ["--auto"],
+                     ["gr-api-x", "-x"]):
+            r = run("--group-set", *args)
+            check("#714: usage: dch --group-set %s exits 2, nothing on "
+                  "stdout" % " ".join(args),
+                  r.returncode == 2 and r.stdout == "" and
+                  "usage: dch --group-set" in r.stderr)
+        rc, o, _ = gs("nobody", "QA", "--json")
+        check("#714: --group-set of no session: failed no_session, exit 1",
+              rc == 1 and o == dict(name="nobody", group=None,
+                                    result="failed", reason="no_session"))
+        rc, o, _ = gs("gr-api-x", "Nope", "--json")
+        check("#714: --group-set to no config group: failed no_group, exit 1,"
+              " nothing stored", rc == 1 and o == dict(
+                  name="gr-api-x", group=None, result="failed",
+                  reason="no_group") and
+              not os.path.exists(path("gr-api-x", ".group")))
+        w = lsrow("gr-api-x") or {}
+        check("#714: --ls-json: group by pattern, group_manual null",
+              w.get("group") == "API" and "group_manual" in w and
+              w["group_manual"] is None, w)
+        w = lsrow("plain") or {}
+        check("#714: --ls-json: no group matches: group null",
+              "group" in w and w["group"] is None and
+              w.get("group_manual", 1) is None, w)
+        rc, o, _ = gs("gr-api-x", "qa", "--json")
+        check("#714: --group-set gr-api-x qa --json: ok, the config's "
+              "spelling stored", rc == 0 and o == dict(
+                  name="gr-api-x", group="QA", result="ok", reason="") and
+              open(path("gr-api-x", ".group")).read() == "QA\n")
+        w = lsrow("gr-api-x") or {}
+        check("#714: --ls-json: the manual group beats the pattern",
+              w.get("group") == "QA" and w.get("group_manual") == "QA", w)
+        check("#714: --ls-json: a pattern-only row has no group_manual",
+              (lsrow("w-qa") or {}).get("group") == "QA" and
+              (lsrow("w-qa") or {}).get("group_manual", 1) is None)
+        r = run("--group-set", "gr-api-x", "api")
+        check("#714: text: 'gr-api-x: group API', exit 0",
+              r.returncode == 0 and r.stdout == "gr-api-x: group API\n")
+        r = run("--group-set", "nobody", "api")
+        check("#714: text failure: '<name>: failed — …', exit 1",
+              r.returncode == 1 and r.stdout.startswith("nobody: failed — "))
+        gs("gr-api-x", "QA")
+        setcfg("group = API = gr-api\n")
+        w = lsrow("gr-api-x") or {}
+        check("#714: a group gone from the config: the pattern applies, "
+              "group_manual kept", w.get("group") == "API" and
+              w.get("group_manual") == "QA", w)
+        setcfg("group = API = gr-api\ngroup = QA = -qa\n")
+        check("#714: ... and back in the config it applies again",
+              (lsrow("gr-api-x") or {}).get("group") == "QA")
+        rc, o, _ = gs("gr-api-x", "--auto", "--json")
+        w = lsrow("gr-api-x") or {}
+        check("#714: --auto: ok, group null, the pattern applies again",
+              rc == 0 and o == dict(name="gr-api-x", group=None,
+                                    result="ok", reason="") and
+              w.get("group") == "API" and w.get("group_manual", 1) is None
+              and not os.path.exists(path("gr-api-x", ".group")))
+        check("#714: --auto text: 'gr-api-x: group auto (by pattern)'",
+              run("--group-set", "gr-api-x", "--auto").stdout ==
+              "gr-api-x: group auto (by pattern)\n")
+        gs("gr-api-x", "QA")
+        r = run("--stop", "gr-api-x")
+        stopped = until(lambda: lsrow("gr-api-x") is None)
+        rc, o, _ = gs("gr-api-x", "api", "--json")
+        check("#714: a stopped session (its record) takes --group-set",
+              r.returncode == 0 and stopped and rc == 0 and
+              o["group"] == "API")
+        gs("gr-api-x", "QA")
+        r = run("--revive", "gr-api-x")
+        w = until(lambda: lsrow("gr-api-x"))
+        check("#714: the manual group survives stop and revive",
+              r.returncode == 0 and w and w.get("group") == "QA" and
+              w.get("group_manual") == "QA", r.stdout, w)
+        run("-k", "gr-api-x")
+        until(lambda: lsrow("gr-api-x") is None)
+        had = os.path.exists(path("gr-api-x", ".group"))
+        r = run("--forget", "gr-api-x")
+        check("#714: --forget drops the manual group",
+              had and r.returncode == 0 and
+              not os.path.exists(path("gr-api-x", ".group")))
+        # the prune that takes a name's last record takes its group too;
+        # a live session's group and a pinned name's stay
+        plant("gold-qa")
+        plant("gpin")
+        gs("gold-qa", "API")
+        gs("gpin", "API")
+        gs("w-qa", "API")
+        run("--pin", "gpin")
+        t = time.time() - 31 * 86400
+        for n in ("gold-qa", "gpin", "w-qa"):
+            os.utime(path(n), (t, t))
+        had = all(os.path.exists(path(n, ".group"))
+                  for n in ("gold-qa", "gpin", "w-qa"))
+        spawn("gcold", "sleep", "600")
+        gone = until(lambda: rec("gold-qa") is None and
+                     not os.path.exists(path("gold-qa", ".group")))
+        check("#714: a cold start's prune of a name's last record drops its "
+              ".group; a pinned name's and a live session's are kept",
+              had and gone and rec("gpin") is not None and
+              os.path.exists(path("gpin", ".group")) and
+              rec("w-qa") is not None and
+              os.path.exists(path("w-qa", ".group")))
+        spawn("gold-qa", "sleep", "600")
+        w = until(lambda: lsrow("gold-qa"))
+        check("#714: ... a new session under that name: group by pattern, "
+              "group_manual null", w and w.get("group") == "QA" and
+              "group_manual" in w and w["group_manual"] is None, w)
+        r = run("--spawn", "sg-x", "--group", "qa", "sleep", "600")
+        names.append("sg-x")
+        w = until(lambda: lsrow("sg-x"))
+        check("#714: --spawn --group qa: exit 0, group QA stored",
+              r.returncode == 0 and w and w.get("group") == "QA" and
+              w.get("group_manual") == "QA", r.stderr, w)
+        r = run("--spawn", "sg-n", "--group", "Nope", "sleep", "600")
+        check("#714: --spawn --group Nope: exit 1, no_group, nothing "
+              "spawned", r.returncode == 1 and "no_group" in r.stderr and
+              not os.path.exists(os.path.join(sockdir, "sg-n.sock")) and
+              lsrow("sg-n") is None, r.stderr)
+        # --- #716: --group-rename
+        raw = ("# keep\n\n  group =  API  =  gr-api  # tail\ngroup = QA = -qa\n"
+               "group_color = api = #112233\ngroup_color = QA = #445566\n"
+               "auto_allow = true\nno newline at the end = x")
+        setcfg(raw)
+        for n in ("rn-a", "rn-b", "rn-c"):
+            spawn(n, "sleep", "600")
+        until(lambda: rec("rn-a") and rec("rn-b") and rec("rn-c"))
+        gs("rn-a", "api")
+        gs("rn-b", "API")
+        gs("rn-c", "QA")
+        # #714's rows leave API files too (gpin, w-qa): moved counts them
+        left = len([f for f in os.listdir(os.path.dirname(path("rn-a", ".group")))
+                    if f.endswith(".group") and
+                    open(os.path.join(os.path.dirname(path("rn-a", ".group")), f)
+                         ).read().strip().lower() == "api" and
+                    not f.startswith("rn-")])
+        mv = 2 + left
+
+        def rn(*a):
+            r = run("--group-rename", *a, "--json")
+            return r.returncode, (ndjson(r.stdout) or [None])[0], r
+
+        for args in ([], ["API"], ["API", "Core", "x"], ["", "Core"]):
+            r = run("--group-rename", *args)
+            check("#716: usage: dch --group-rename %s exits 2" %
+                  " ".join(args), r.returncode == 2 and r.stdout == "" and
+                  "usage: dch --group-rename" in r.stderr)
+        for old, new, why in (("Nope", "Core", "no_group"),
+                              ("API", "QA", "exists"), ("API", "qa", "exists"),
+                              ("API", "", "bad_name"),
+                              ("API", "x" * 33, "bad_name"),
+                              ("API", "a=b", "bad_name"),
+                              ("API", "a\nb", "bad_name"),
+                              ("API", "sessions", "bad_name"),
+                              ("API", "History", "bad_name")):
+            rc, o, _ = rn(old, new)
+            check("#716: --group-rename %r %r: failed %s, exit 1, config "
+                  "untouched" % (old, new[:6], why),
+                  rc == 1 and o == dict(old=old, new=new, moved=0,
+                                        result="failed", reason=why) and
+                  open(cfg).read() == raw, o)
+        rc, o, _ = rn("api", "Core")
+        got = open(cfg).read()
+        check("#716: --group-rename api Core: moved 2 (+ the others), ok", rc == 0 and
+              o == dict(old="api", new="Core", moved=mv, result="ok",
+                        reason=""), o)
+        check("#716: the config's group and group_color lines renamed, the "
+              "rest of each line and every other line byte-identical",
+              got == raw.replace("  API  =", "  Core  =").replace(
+                  "group_color = api =", "group_color = Core ="), got)
+        a, b = lsrow("rn-a") or {}, lsrow("rn-b") or {}
+        check("#716: --ls-json: both moved sessions show Core in group and "
+              "group_manual", a.get("group") == b.get("group") ==
+              a.get("group_manual") == b.get("group_manual") == "Core",
+              (a, b))
+        c = lsrow("rn-c") or {}
+        check("#716: a session in another group is untouched",
+              c.get("group") == "QA" and c.get("group_manual") == "QA" and
+              open(path("rn-c", ".group")).read() == "QA\n")
+        rc, o, _ = rn("CORE", "core")
+        check("#716: a case-only rename is allowed: moved 2, spelling "
+              "changed", rc == 0 and o["moved"] == mv and
+              "group =  core  =" in open(cfg).read() and
+              open(path("rn-a", ".group")).read() == "core\n")
+        r = run("--group-rename", "core", "API")
+        check("#716: text: 'core: renamed to API (2 moved)', exit 0",
+              r.returncode == 0 and r.stdout == "core: renamed to API "
+              "(%d moved)\n" % mv, r.stdout)
+        r = run("--group-rename", "Nope", "X")
+        check("#716: text failure: '<old>: failed — …', exit 1",
+              r.returncode == 1 and r.stdout.startswith("Nope: failed — "))
+        for n in ("rn-a", "rn-b", "rn-c"):
+            run("-k", n)
+        os.unlink(cfg)
+        rc, o, _ = rn("Sidekicks", "X")
+        check("#716: no config file, rename Sidekicks: failed no_group, "
+              "exit 1", rc == 1 and o == dict(old="Sidekicks", new="X",
+              moved=0, result="failed", reason="no_group") and
+              not os.path.exists(cfg), o)
     except Exception:
         traceback.print_exc()
         fails[0] += 1

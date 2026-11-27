@@ -703,6 +703,27 @@ def groups():
     check("#544: left from Sessions goes History, then the last group",
           "[QA" in s, s.split("\n")[0])
 
+    # #714: a manual group (dch --group-set) moves a session to its tab,
+    # ahead of every pattern; --auto puts it back by pattern
+    r = dch("--group-set", "gr-web", "qa")
+    s = wait_screen("pk13", lambda s: "gr-web" in rows(s))
+    check("#714: --group-set gr-web qa: gr-web on the QA tab",
+          r.returncode == 0 and "[QA" in s and "gr-web" in rows(s), s)
+    r = dch("--group-set", "gr-api-qa", "QA")
+    s = wait_screen("pk13", lambda s: "gr-api-qa" in rows(s))
+    check("#714: a manual QA beats API's matching pattern: gr-api-qa on QA",
+          "gr-api-qa" in rows(s) and "API" not in tabs(s), s)
+    dch("--group-set", "gr-web", "--auto")
+    dch("--group-set", "gr-api-qa", "--auto")
+    s = wait_screen("pk13", lambda s: "API" in tabs(s) and
+                    "gr-web" not in rows(s))
+    check("#714: --auto: back by pattern, gr-web off QA, API's tab back",
+          "gr-web" not in rows(s) and "gr-api-qa" not in rows(s) and
+          "API" in tabs(s), s)
+    s = to_tab("pk13", "Sessions")
+    check("#714: ... and gr-web on Sessions again", "gr-web" in rows(s), s)
+    s = to_tab("pk13", "QA")
+
     # a bad line is skipped, the later ones still count
     setcfg("group = %s = gr-api\ngroup = Long = (gr-api|%s)\n"
            "group = = gr-api\ngroup = NoRe =\ngroup = gr-api\n"
@@ -840,6 +861,48 @@ def groups():
     r = dch("--config", "group", "x")
     check("#544: group is not a --config key: dch --config group refuses",
           r.returncode != 0 and config() == c, r.stdout, r.stderr, config())
+
+
+def groupcolor():
+    """19. group_color = <name> = #rrggbb colours that group's tab (#715)."""
+    def websgr(cfg, *env):
+        with open(ENV["DCH_CONFIG"], "w") as f:
+            f.write("group = Web = gc-web\ngroup = Other = gc-none\n" + cfg)
+        dch("-k", "pk19c")
+        picker("pk19c", "100x14", *env)
+        wait_screen("pk19c", lambda s: "Web" in s)
+        a = screen("pk19c", ansi=True).split("\n")[0]
+        m = re.search(r"\x1b\[([0-9;]*)m Web", a)
+        return m.group(1) if m else a
+
+    dch("--spawn", "gc-web", "--size", "80x24", "sh", "-c", "sleep 600")
+    tc = ("TERM=xterm-256color", "COLORTERM=truecolor")
+    s = websgr("group_color = web =  #12ab56 \n", *tc)
+    check("#715: a group_color line colours the tab (truecolor), name "
+          "matched ignoring case", s == "38;2;18;171;86", s)
+    s = websgr("group_color = Web = #12ab56\n", "TERM=xterm-256color")
+    check("#715: 256 colours: the nearest cube entry", s == "38;5;35", s)
+    s = websgr("group_color = Web = #808080\n", "TERM=xterm-256color")
+    check("#715: 256 colours: a grey takes the grey ramp", s == "38;5;244", s)
+    s = websgr("group_color = Web = #ff0000\n", "TERM=xterm")
+    check("#715: basic colours: the nearest ANSI colour", s == "38;5;1", s)
+    s = websgr("group_color = Web = #12ab56\n", "NO_COLOR=1", *tc)
+    check("#715: NO_COLOR draws no colour", "38;" not in s and s != "38;2;18;171;86", s)
+    for bad in ("#12ab5", "#12ab567", "12ab56", "#12ab5g", "red", "",
+                "#12ab56 x"):
+        s = websgr("group_color = Web = %s\n" % bad, *tc)
+        check("#715: invalid colour %r ignored" % bad, "38;2;18" not in s, s)
+    s = websgr("group_color = Nope = #12ab56\n", *tc)
+    check("#715: an unknown group name is ignored", "38;2;18" not in s, s)
+    s = websgr("group_color = Web = #111111\ngroup_color = WEB = #222222\n",
+               *tc)
+    check("#715: a repeated name: the last line wins",
+          s == "38;2;34;34;34", s)
+    s = websgr("group_color = Web = #111111\ngroup_color = Web = bad\n", *tc)
+    check("#715: a later invalid line does not undo an earlier valid one",
+          s == "38;2;17;17;17", s)
+    dch("-k", "pk19c")
+    dch("-k", "gc-web")
 
 
 def groupscroll():
@@ -1372,6 +1435,7 @@ def main():
     footshells()
     groups()
     groupscroll()
+    groupcolor()
     return 1 if failures else 0
 
 
@@ -1382,7 +1446,7 @@ if __name__ == "__main__":
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
                   "pk9", "pk10", "pk11", "pk12", "s2", "s10", "zwbom", "zwj",
                   "zwheb", "zwdev", "zwsym", "zwfmt", "zwhf", "zwmc", "helper-qa", "a4k-2", "perm", "form", "zkbd",
-                  "pk13", "gr-api-qa", "gr-web"):
+                  "pk13", "gr-api-qa", "gr-web", "pk19c", "gc-web"):
             dch("-k", n)
         for pr in procs:
             pr.kill()

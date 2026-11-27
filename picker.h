@@ -50,6 +50,7 @@ struct pk
 	struct pkrow *r[PK_TABS];
 	int n[PK_TABS], sel[PK_TABS], top[PK_TABS];
 	char gname[PK_GMAX][33];	/* the groups' names, "" past them */
+	char gcol[PK_GMAX][8];	/* their "#rrggbb" tab colours, "" none (#715) */
 	int tab, byname, color, interrupted, win, status_row, asking;
 	int settings, cfsel, cftop;	/* the settings view (#082) */
 	int askcfg;		/* asking about config key askcfg - 1 */
@@ -107,6 +108,7 @@ extern const char *pk_bg;
 const char *pk_p(int i);
 int pk_colors(int vt);
 void pk_tab(const char *name, int n, int on);
+void pk_tabc(const char *name, int n, int on, const char *hex);
 void pk_begin(int fd, int color);
 void pk_fend(int fd, int force);
 void pk_flush(int fd, int force);
