@@ -756,5 +756,10 @@ void xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn,
 int xr_scheds_print(FILE *f, const struct xr_scheds *s, const char *session,
                     const char *session_id, int partial, const char *warn,
                     int live, long long now);
+/* #695: xr_scheds_print after xr_scheds_durable, on s unchanged after (the
+** follow's block); the durable warn is the header's warn. */
+int xr_scheds_print_durable(FILE *f, struct xr_scheds *s, const char *cwd,
+                            const char *session, const char *session_id,
+                            int partial, int live, long long now);
 
 #endif /* DCH_XRAY_H */

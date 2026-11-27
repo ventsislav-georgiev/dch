@@ -2911,6 +2911,10 @@ its version probe.
   cap), its `done` line when it changes, and the whole block again when
   its header changes or its rows' order does. Its rows come from the
   follow's own read of the transcript; it has no command and no timer.
+  Durable crons (#689) are reconciled with the session's
+  `.claude/scheduled_tasks.json` on every block build, as the one-shot does
+  (the file is reread then; a change alone builds nothing, the next
+  transcript line does).
 - The session's Claude (or Codex) leaving: the master wakes the follow,
   which sends `reset` `rotated` and the shell's snapshot, then this block
   again, whole: the agent's rows with `"live":false`, its pending crons and

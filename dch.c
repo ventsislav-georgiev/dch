@@ -16932,10 +16932,10 @@ xf_blk_text(struct xf *f, int b)
 	/* live: the Claude followed now; one that left, or the session's end,
 	** prints its pending rows ended (#686) */
 	if (b == 2)
-		(void)xr_scheds_print(m, f->cl ? f->cl->sc : f->sc_gone,
-		                      f->t->name, f->cl || !f->sc_gone ? f->sid
-		                      : f->sid_gone, f->cl ? capped
-		                      : f->capped_gone, NULL, f->cl && !f->dead,
+		(void)xr_scheds_print_durable(m, f->cl ? f->cl->sc : f->sc_gone,
+		                      f->cwd, f->t->name, f->cl || !f->sc_gone
+		                      ? f->sid : f->sid_gone, f->cl ? capped
+		                      : f->capped_gone, f->cl && !f->dead,
 		                      (long long)time(NULL));
 	else if (b)
 	{

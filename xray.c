@@ -17342,6 +17342,37 @@ sch_put(FILE *f, const struct xr_scheds *s, const struct sch_row *r,
 	fputs("}}\n", f);
 }
 
+/* #695: the follow's block: xr_scheds_durable on a copy of the rows' four
+** moving fields, restored after, so the follow's own state stays the transcript's */
+int
+xr_scheds_print_durable(FILE *f, struct xr_scheds *s, const char *cwd,
+                        const char *session, const char *session_id,
+                        int partial, int live, long long now)
+{
+	struct sch_save { int status, perm; long long next, last; } *sv = NULL;
+	char dw[128] = "";
+	size_t k;
+	int rc;
+
+	if (s && !s->codex && s->n && (sv = malloc(s->n * sizeof *sv)))
+	{
+		for (k = 0; k < s->n; k++)
+			sv[k] = (struct sch_save){ s->v[k].status, s->v[k].perm,
+			                           s->v[k].next, s->v[k].last };
+		xr_scheds_durable(s, cwd, dw, sizeof dw);
+	}
+	rc = xr_scheds_print(f, s, session, session_id, partial, dw, live, now);
+	for (k = 0; sv && k < s->n; k++)
+	{
+		s->v[k].status = sv[k].status;
+		s->v[k].perm = sv[k].perm;
+		s->v[k].next = sv[k].next;
+		s->v[k].last = sv[k].last;
+	}
+	free(sv);
+	return rc;
+}
+
 int
 xr_scheds_print(FILE *f, const struct xr_scheds *s, const char *session,
                 const char *session_id, int partial, const char *warn,
