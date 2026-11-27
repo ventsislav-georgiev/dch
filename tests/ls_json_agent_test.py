@@ -141,6 +141,20 @@ def main():
         check("a Codex below a Claude: claude", agent_is(cl, "claude") and
               rows().get(cl, {}).get("agent") == "claude", rows().get(cl))
 
+        # #679: a Codex behind 70 background jobs of its shell is still seen
+        up = os.path.join(tmp, "many.up")
+        many = spawn("many", "sh", "-c", "codex </dev/tty & sleep 1; "
+                     "i=0; while [ $i -lt 70 ]; do sleep 60 & "
+                     "i=$((i+1)); done; : > %s; wait" % up,
+                     extra={"FAKE_CODEX_TUI": ""})
+        # all 70 jobs started: only then is the Codex past the old 64 cap
+        check("the 70 jobs run", until(lambda: os.path.exists(up)))
+        check("a Codex behind 70 sibling jobs: codex (--ls-json)",
+              rows().get(many, {}).get("agent") == "codex", rows().get(many))
+        r = run("--stop", many, "--json")
+        check("a Codex behind 70 sibling jobs: --stop sees it (agent codex)",
+              '"agent":"codex"' in r.stdout, r.stdout)
+
         rs = rows()
         bad = [n for n in names
                if n in rs and list(rs[n])[-2:] != ["agent", "cwd"]]
