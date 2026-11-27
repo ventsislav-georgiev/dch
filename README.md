@@ -1234,8 +1234,8 @@ crons, a /loop wake-up or Codex heartbeats:
   it (on a host that refuses that stream: read again every 30 seconds
   while the tab shows). A shell session, no memory and a host older
   than this dch have no Memory tab; dch-lite has both tabs.
-- **Schedules** (the last tab, only when `--schedules` lists something, or
-  for Codex with no heartbeat, empty with the reason): the session's crons,
+- **Schedules** (the last tab, only when `--schedules` lists something; a
+  Codex with no heartbeat has none): the session's crons,
   its /loop wake-up and Codex heartbeats, under faint group lines, each
   counted: Pending, Fired, then Ended (deleted, expired and ended rows,
   faint). Each row is a mark, the id, the prompt, and at the right the
@@ -1247,11 +1247,11 @@ crons, a /loop wake-up or Codex heartbeats:
   card with the prompt in full, the whole cron, schedule, next, created,
   expires, last fired, fires and reason, where `Enter` reads the prompt
   too. `/` filters on the id, prompt, schedule, reason and cron; `o` works
-  as on Prompts. The list is its own `--schedules` query, asked with
-  Tasks' timing: once the prompts are in, then while the session runs
-  again after the stream has said something, at most every 5 seconds
-  while the tab shows. A shell session, no schedule and a host whose dch
-  knows no `--schedules` have no Schedules tab.
+  as on Prompts. The list comes in the same stream as Tasks; a cron
+  created or deleted, a fire and the session's end show as the stream
+  sends them (on a host whose stream refuses it: one `--schedules` query
+  of its own, once the prompts are in). A shell session, no schedule and
+  a host whose dch knows no `--schedules` have no Schedules tab.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file, URL or term,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while

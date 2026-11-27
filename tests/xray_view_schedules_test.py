@@ -9,14 +9,19 @@
   - Enter reads the row's turn, q back; c opens the card (the whole cron,
     its schedule, created, expires), Enter there reads the turn too
   - xv-sn, no schedule: no Schedules tab, Tab never lands on one
-  - xv-cx, an ended Codex with no heartbeat: the tab, empty, with the warn
+  - xv-cx, an ended Codex with no heartbeat and an AGENTS.md: no Schedules
+    tab (its warn is no row), Memory the last tab
+  - xv-sl, a live Claude: a CronCreate appended reaches the shown tab from
+    the follow's schedules block, no --schedules child forked
 
 Run:  python3 tests/xray_view_schedules_test.py      (uses ./dch)
 """
+import threading
 from xray_view_lib import *  # noqa: F401,F403 (harness, fixtures, T)
 
 SCSID = "11111111-2222-4333-8444-5555555555e7"
 SNSID = "11111111-2222-4333-8444-5555555555e8"
+SLSID = "11111111-2222-4333-8444-5555555555e9"
 CXTID = "019a3333-4444-7555-8666-7777888899e7"
 NOW = time.time()
 
@@ -50,6 +55,10 @@ def fire(ts, tid, **kw):
 
 def codex_rec(name, tid):
     """an ended Codex with no heartbeat: its History record, a rollout"""
+    cwd = os.path.join(T, "cxwork")
+    os.makedirs(cwd, exist_ok=True)
+    with open(os.path.join(cwd, "AGENTS.md"), "w") as f:
+        f.write("codex agents text\n")
     home = os.path.join(T, "codexhome")
     day = os.path.join(home, "sessions", "2026", "11", "10")
     os.makedirs(day, exist_ok=True)
@@ -60,7 +69,7 @@ def codex_rec(name, tid):
     p = os.path.join(day, "rollout-2026-11-10T10-00-00-%s.jsonl" % tid)
     with open(p, "w") as f:
         f.write(json.dumps({"timestamp": iso(600), "type": "session_meta",
-                            "payload": {"id": tid, "cwd": T,
+                            "payload": {"id": tid, "cwd": cwd,
                                         "cli_version": "0.167.2"}}) + "\n" +
                 msg("user", "input_text", "fix the parser") +
                 msg("assistant", "output_text", "done"))
@@ -68,7 +77,7 @@ def codex_rec(name, tid):
     hdir = os.path.join(T, "state", "dch", "sessions",
                         sockdir.replace("/", "-"))
     os.makedirs(hdir, exist_ok=True)
-    rec = dict(name=name, sock_dir=sockdir, alias="", cwd=T, argv=["codex"],
+    rec = dict(name=name, sock_dir=sockdir, alias="", cwd=cwd, argv=["codex"],
                started=int(NOW) - 660, updated=int(NOW) - 60,
                ended=int(NOW) - 60, end="exit 0", agent=None,
                codex={"thread_id": tid, "home": home})
@@ -189,24 +198,102 @@ def test_none():
         v.close()
 
 
-def test_codex_warn():
+def test_codex_none():
     v = Pty([DCH, "--xray", "xv-cx"], rows=30, cols=110)
     try:
-        ok = tabbar(v, "Schedules 0")
+        ok = tabbar(v, "Memory 1")
+        v.pump(1.5)
+        t = rows(v.out).get(2, "")
         v.key(b"\033[Z", 0.8)
-        r = tasks_rows(v)
-        check("Schedules: a Codex with no heartbeat: the tab, empty, the "
-              "reason in place of rows", ok and r ==
-              ["Codex CLI has no session scheduler; Codex app automations "
-               "show when they fire"], (rows(v.out).get(2), r))
+        r = [x.lstrip("▌ ") for x in tasks_rows(v)]
+        check("Schedules: a Codex with no heartbeat: no tab; Memory the "
+              "last tab", ok and "Schedules" not in t and
+              re.search(r"Memory 1\s*$", t) and r[:1] == ["Instructions 1"],
+              (t, r))
         v.key(b"q")
         v.exit()
     finally:
         v.close()
 
 
+def test_live():
+    """a live Claude's CronCreate reaches the shown tab from the follow
+    (#686's block [2]); the view forks no --schedules child"""
+    cwd = os.path.realpath(os.path.join(T, "slive"))
+    os.makedirs(cwd, exist_ok=True)
+    proj = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"))
+    os.makedirs(proj, exist_ok=True)
+    path = os.path.join(proj, SLSID + ".jsonl")
+
+    def add(recs, mode="a"):
+        with open(path, mode) as f:
+            for o in recs:
+                f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) +
+                        "\n")
+
+    t0 = iso(600)
+    add(turn("watch it", t0, *cron(t0, "c1", "dddd0001", "first watch",
+                                    True, "*/5 * * * *", "every 5 minutes",
+                                    ms(-300), False)), "w")
+    dch("--spawn", "xv-sl", "/bin/sleep", "300")
+    pid = until(lambda: json.loads(dch("--cmd", "xv-sl").stdout or "{}")
+                .get("pid"), 5)
+    start = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    sd = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "%d.json" % pid), "w") as f:
+        json.dump({"pid": pid, "sessionId": SLSID, "cwd": cwd,
+                   "procStart": start, "version": "2.1.0",
+                   "kind": "interactive", "status": "busy",
+                   "statusUpdatedAt": 1}, f)
+    v = Pty([DCH, "--xray", "xv-sl"], rows=30, cols=110)
+    seen, stop = {}, []
+
+    def sample():  # every child of the view and its command line
+        while not stop:
+            r = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,args="],
+                               capture_output=True, text=True)
+            for x in r.stdout.splitlines():
+                f = x.split(None, 2)
+                if len(f) == 3 and int(f[1]) == v.pid:
+                    seen[int(f[0])] = f[2][:160]
+            time.sleep(0.02)
+
+    th = threading.Thread(target=sample, daemon=True)
+    try:
+        ok = tabbar(v, "Schedules 1", 15)
+        th.start()
+        v.key(b"\033[Z", 0.8)
+        check("live: the tab from the follow, its one cron", ok and any(
+            "first watch" in x for x in tasks_rows(v)), tasks_rows(v))
+        ts = iso(1)
+        add(turn("one more", ts, *cron(ts, "c2", "eeee0002",
+                                       "second watch", True, "0 * * * *",
+                                       "every hour", ms(-3000), False)))
+        ok = tabbar(v, "Schedules 2", 15)
+        until(lambda: (v.pump(0.1), any("second watch" in x
+                                        for x in tasks_rows(v)))[1], 10)
+        r = tasks_rows(v)
+        check("live: a CronCreate appended reaches the shown tab without "
+              "reopening", ok and any("eeee0002 second watch" in x
+                                      for x in r), r)
+        stop.append(1)
+        th.join(2)
+        check("live: one child, the follow, the whole time: no "
+              "--schedules query forked", len(seen) == 1, seen)
+        v.key(b"q")
+        check("live: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        stop.append(1)
+        v.close()
+        dch("-k", "xv-sl")
+
+
 def main():
-    run_steps(fixture_sched, test_sched, test_none, test_codex_warn)
+    run_steps(fixture_sched, test_sched, test_none, test_codex_none,
+              test_live)
 
 
 if __name__ == "__main__":

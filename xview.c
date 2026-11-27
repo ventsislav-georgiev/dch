@@ -284,9 +284,11 @@ struct xv
 	int tvgen, vtab, mtop;	/* mtop: a memory card's text scrolled */
 	char tvf[256];		/* the filter vis was made with */
 	int tg[4];		/* vis's first row of each st, -1 none */
-	/* the follow carries Tasks and Memory (#448): blk, the block it is
-	** sending (0 tasks, 1 memory, -1 none); poll, a host that refused
-	** that follow (an older dch): the lists' own children instead */
+	/* the follow carries Tasks, Memory (#448) and Schedules (#687): blk,
+	** the block it is sending (0 tasks, 1 memory, 2 schedules, -1 none);
+	** poll, a host that refused that follow (an older dch): 1 the follow
+	** with Tasks and Memory, Schedules one own query; 2 the follow alone,
+	** the lists' own children */
 	int blk, poll;
 };
 
@@ -919,7 +921,7 @@ xv_fline(struct xv *v, const struct json_parser *p)
 	int o, k, j;
 
 	/* Tasks', Memory's and Schedules' cue to re-read (#320, #323, #687) */
-	v->tq[0].fol = v->tq[1].fol = v->tq[2].fol = 1;
+	v->tq[0].fol = v->tq[1].fol = 1;
 	if ((o = xv_obj(p, 0, "snapshot", JSON_OBJECT)) >= 0)
 		xv_snapshot(v, p, o);
 	else if ((o = xv_obj(p, 0, "chapter", JSON_OBJECT)) >= 0)
@@ -1710,21 +1712,18 @@ xv_tord(struct xv_tl *l, int mem)
 	return 0;
 }
 
-/* Tasks (i 0), Memory (1) or Schedules (2) is a tab: its list has a row;
-** Schedules too with a warn and none (Codex: its reason, #687) */
+/* Tasks (i 0), Memory (1) or Schedules (2) is a tab: its list has a row */
 static int
 xv_ttab(const struct xv *v, int i)
 {
-	return v->tq[i].tl.n > 0 ||
-	       (i == 2 && v->tq[2].tl.warn && v->tq[2].tl.warn[0]);
+	return v->tq[i].tl.n > 0;
 }
 
-/* List i is still coming: its child runs, or the follow is sending it
-** (never Schedules': always its own child) */
+/* List i is still coming: its child runs, or the follow is sending it */
 static int
 xv_tbusy(const struct xv *v, int i)
 {
-	return v->poll || i == 2 ? v->kid[XV_TK + i].pid > 0
+	return v->poll >= (i == 2 ? 1 : 2) ? v->kid[XV_TK + i].pid > 0
 	               : v->blk == i && v->kid[XV_FK].pid > 0;
 }
 
@@ -1741,7 +1740,8 @@ xv_tbeg(struct xv *v, int i)
 }
 
 /* `--tasks --json` (i 0) or `--memory --json` (1) in XV_TK + i, for a host
-** whose follow carries neither; `--schedules --json` (2) always (#687) */
+** whose follow carries neither; `--schedules --json` (2) once, for a host
+** whose follow carries no schedules (#687) */
 static void
 xv_tasks(struct xv *v, int i)
 {
@@ -1853,7 +1853,7 @@ xv_tdelta(struct xv *v, int i, const struct json_parser *p, int o)
 			l->hi++;
 		}
 		xv_trow(l, p, o, i, &t);
-		t.seq = i ? --l->lo : seq;
+		t.seq = i == 1 ? --l->lo : seq;
 		l->t[k] = t;
 		l->nst[t.st]++;
 	}
@@ -1871,11 +1871,16 @@ static int
 xv_tfline(struct xv *v, const struct json_parser *p)
 {
 	int o = -1, i, end = 0;
+	char *b;
 
 	if (xv_num(p, 0, "schema", -1) >= 0)
 	{
-		/* a tasks header says its session; a memory one never */
-		i = v->blk = dch_json_field(p, 0, "session") >= 0 ? 0 : 1;
+		/* a tasks header says its session; a memory one never; a
+		** schedules one its block (#686) */
+		b = xv_str(p, 0, "block");
+		i = v->blk = !strcmp(b, "schedules") ? 2
+		             : dch_json_field(p, 0, "session") >= 0 ? 0 : 1;
+		xv_sfree(b);
 		if (xv_rtab(v))
 			xv_tbeg(v, i);
 	}
@@ -1889,6 +1894,8 @@ xv_tfline(struct xv *v, const struct json_parser *p)
 		i = 0;
 	else if ((o = xv_obj(p, 0, "memory", JSON_OBJECT)) >= 0)
 		i = 1;
+	else if ((o = xv_obj(p, 0, "schedule", JSON_OBJECT)) >= 0)
+		i = 2;
 	else
 		return 0;
 	/* a shell session's view has neither tab (asked only of prompts) */
@@ -4180,8 +4187,7 @@ xv_draw_tasks(struct xv *v, int win)
 		pk_eol();
 		win--;
 	}
-	/* no row (Schedules' Codex): the warn in their place */
-	if (l->warn && l->warn[0] && l->n)
+	if (l->warn && l->warn[0])
 		snprintf(f[nf++], sizeof *f, "  %s", l->warn);
 	if (l->partial)
 		snprintf(f[nf++], sizeof *f, "  the history was too long to read "
@@ -4234,12 +4240,6 @@ xv_draw_tasks(struct xv *v, int win)
 			xv_row_mem(v, &l->t[v->vis[i]], i == *sel);
 		else if (k < n + ng && sch)
 			xv_row_sched(v, &l->t[v->vis[i]], i == *sel);
-		else if (k == 0 && !l->n)
-		{
-			pk_set("2");
-			pk_txt("    ");
-			pk_fit(l->warn ? l->warn : "", pk_w - pk_col);
-		}
 		else if (k < n + ng)
 			xv_row_task(&l->t[v->vis[i]], i == *sel);
 		else if (k == 0)
@@ -5494,10 +5494,8 @@ xv_key(struct xv *v, int c)
 		if (v->tab == 1)
 			xv_screen_load(v);
 		/* a running session's list, re-read (the follow's is current) */
-		if (v->poll && v->tab == 4 && xv_live(v))
+		if (v->poll > 1 && v->tab == 4 && xv_live(v))
 			xv_tasks(v, 0);
-		if (v->tab == 6 && v->tq[2].fol && xv_live(v))
-			xv_tasks(v, 2);
 		return 0;
 	}
 	if (c == 'q')
@@ -5771,20 +5769,20 @@ xv_drop_keys(int fd, int any)
 	}
 }
 
-/* The view's follow (#448): its lines carry Tasks and Memory, but for a
-** host that refused that (v->poll). 0, -1 with the status said. */
+/* The view's follow (#448): its lines carry Tasks, Memory and Schedules
+** (#687), but for a host that refused that (v->poll: then without
+** Schedules, then alone). 0, -1 with the status said. */
 static int
 xv_follow(struct xv *v)
 {
-	char *av[] = { v->n, "--follow", "--tasks", "--memory", "--json",
-	               NULL };
+	char *av[] = { v->n, "--follow", "--tasks", "--memory", "--schedules",
+	               "--json", NULL };
+	static const int na[] = { 6, 5, 3 };	/* by v->poll */
+	int n = na[v->poll];
 
-	if (v->poll)
-	{
-		av[2] = "--json";
-		av[3] = NULL;
-	}
-	return xv_start(v, XV_FK, av, v->poll ? 3 : 5, xv_fline);
+	av[n - 1] = "--json";
+	av[n] = NULL;
+	return xv_start(v, XV_FK, av, n, xv_fline);
 }
 
 int
@@ -5857,7 +5855,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		** again after --follow has said something, at most every
 		** XV_TEVERY while shown (a whole transcript read each time),
 		** else less often */
-		if (v->poll && xv_rtab(v) && !v->tq[0].no &&
+		if (v->poll > 1 && xv_rtab(v) && !v->tq[0].no &&
 		    v->kid[XV_TK].pid <= 0 &&
 		    (!v->tq[0].at || (v->tq[0].fol && xv_live(v) && now_ms() -
 		     v->tq[0].at >= (v->tab == 4 ? 1 : 6) * XV_TEVERY)))
@@ -5865,16 +5863,14 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		/* Memory (#323): the same start; again every XV_MEVERY while
 		** shown, a transcript line or not: memory files change apart
 		** from it (LOW-V28) */
-		if (v->poll && xv_rtab(v) && !v->tq[1].no &&
+		if (v->poll > 1 && xv_rtab(v) && !v->tq[1].no &&
 		    v->kid[XV_MK].pid <= 0 &&
 		    (!v->tq[1].at || (xv_live(v) &&
 		     v->tab == 5 && now_ms() - v->tq[1].at >= xv_mevery())))
 			xv_tasks(v, 1);
-		/* Schedules (#687): Tasks' times, from its own child always
-		** (the follow carries no schedules) */
-		if (xv_rtab(v) && !v->tq[2].no && v->kid[XV_HK].pid <= 0 &&
-		    (!v->tq[2].at || (v->tq[2].fol && xv_live(v) && now_ms() -
-		     v->tq[2].at >= (v->tab == 6 ? 1 : 6) * XV_TEVERY)))
+		/* Schedules (#687): one query, for a host whose follow carries
+		** none (its live changes need a dch that streams them) */
+		if (v->poll && xv_rtab(v) && !v->tq[2].at)
 			xv_tasks(v, 2);
 		xv_draw(v, force);
 		FD_ZERO(&rs);
@@ -5913,13 +5909,15 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 				xv_tend(v, v->blk, 1, "");
 			v->blk = -1;
 			/* a host whose dch refused the follow with the lists (an
-			** older dch: "--tasks and --follow", or it does not know
-			** them): the follow alone and the lists' own children */
-			if (!v->have && !v->poll &&
+			** older dch: "--schedules and --tasks", "--tasks and
+			** --follow", or it does not know them): the follow with
+			** fewer, then alone, and the lists' own children */
+			if (!v->have && v->poll < 2 &&
 			    (strstr(f->err, "--follow") ||
+			     strstr(f->err, "--schedules") ||
 			     strstr(f->err, "does not know")))
 			{
-				v->poll = 1;
+				v->poll++;
 				if (xv_follow(v) == 0)
 					continue;
 				snprintf(err, errsz, "dch: %s", v->status);
