@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.190.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.191.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -2477,9 +2477,13 @@ the host's dch does not know --tasks` (exit 1).
   project's `.claude/scheduled_tasks.json` (the session's cwd): one the
   file lists stays `pending` (live or not), with its `lastFiredAt` as
   `last_fired`; one it no longer lists is `ended`; a job only the file
-  names is not added. An absent file, a symlink, a non-regular file or one
-  over 1 MiB leaves the transcript's answer; one that does not parse does
-  too, with a `warn` in the header.
+  names is not added. An absent file, a symlink (or a symlinked `.claude`),
+  a non-regular file or one over 1 MiB leaves the transcript's answer; one
+  that does not parse does too, with a `warn` in the header (over 100000
+  tokens, nesting past 1024 and an invalid UTF-8 byte count as not parsing).
+  A recurring cron past 7 days stays `expired` unless the file lists it as
+  `permanent`; a repeated id: the last entry wins; a `lastFiredAt` more than
+  60 s in the future is ignored.
 - **Order.** Pending crons by `next`, soonest first; the wake-up; the rest,
   newest change first.
 - **Codex.** The rollout's `<heartbeat>` envelopes (Codex app automations)
@@ -2642,7 +2646,8 @@ questions_command = ~/bin/my-questions
   wrapped as `{"question":{…}}`, cut and checked as task rows are. Optional, left
   out when absent or malformed: `options` (at most 8 strings, 300 bytes each),
   `recommended` (a string, 300 bytes) and `asker` (a session-like name, 64
-  bytes). The header gains `"answer":true` when `answer_command` is set.
+  bytes). Control characters, C1 and bidi controls are removed from them as
+  from titles. The header gains `"answer":true` when `answer_command` is set.
 - **Output.** `--tasks`' header (`schema`, `session`, `session_id`,
   `source`, `title`, `partial`), one row per question, the `done` line:
   ```json
@@ -2672,8 +2677,9 @@ printf 'Yes, ship it.' | dch --xray api --answer OQ-7 - --json
   the command's last argv word; the answer is never in argv (`ps` would
   show it): `-` is always standard input, read to its end (5 s at most).
   One trailing newline is dropped. The text must be 1 to 4000 bytes of
-  UTF-8 with no control character but LF and tab (`dch: bad answer: …`,
-  exit 2, nothing runs).
+  UTF-8 with no control character but LF and tab, and not only blanks (spaces,
+  tabs, newlines: `dch: bad answer: …`, exit 2, nothing runs); `host:name`
+  trims the same one newline.
 - **The run.** `questions_command`'s: the same session, environment
   (`DCH_SESSION`, `DCH_SESSION_CWD`, `DCH_AGENT`, …), cwd, no shell and
   5 s clock. Its stdin holds the text and one newline, then ends. Its
@@ -3318,11 +3324,19 @@ take two flags for that, applied to a Codex's resume argv only (with
   starts with `model_providers.`. Other `-c` words stay.
 - `--codex-config K=V` (repeatable, at most 16) appends `-c K=V` after the
   kept options and before the PROMPT (and its `--`), in the order given.
-  `K` is `[A-Za-z0-9_.-]+`, the value at most 1024 bytes in all, no control
-  character; otherwise exit 2 and nothing runs.
+  `K` is `[A-Za-z0-9_.-]+` and does not start with `-`; the whole word is
+  at most 1024 bytes of valid UTF-8 with no control character (C0, DEL, C1,
+  bidi); otherwise exit 2 and nothing runs. The value may hold `:`, so a
+  provider URL goes over `--revive host:name` too.
+  A `-c K=V` already in the argv with the same key (in any of the four forms
+  above) is replaced, not repeated, so a second revive with the same flag
+  keeps one; the same key twice in one call keeps the last. There is no flag
+  to remove a non-provider `-c`: replace it with a new value.
+- `--stop`, `--say` and `--forget` with either flag are a usage error,
+  exit 2, before anything is sent (a remote `--spawn host:name` too).
 
 A Claude or shell session ignores them; its `--json` result line then
-carries `"codex_ignored": <count>` (the drop flag counts one, each
+(not one that failed with no record to read, `no_history`) carries `"codex_ignored": <count>` (the drop flag counts one, each
 `--codex-config` one). The revived session runs, and its new record keeps,
 the argv as changed, so a later `--revive` without the flags resumes with the
 words dropped and the `--codex-config` ones still there. A `--restart

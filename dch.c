@@ -7492,6 +7492,17 @@ json_phase(const char *name, const char *phase, int json)
 static int cx_drop, cx_ncfg;
 static char *cx_cfg[16];
 
+/* #701: the codex words, a usage error (exit 2) in --say/--stop/--forget. */
+static int
+cx_word_refused(const char *a)
+{
+	if (strcmp(a, "--codex-config") && strcmp(a, "--codex-drop-provider"))
+		return 0;
+	fprintf(stderr, "dch: --codex-drop-provider and --codex-config only "
+	        "work with --revive and --restart --include-agents\n");
+	return 1;
+}
+
 /* --json's "codex_ignored": the codex options a session that is not a
 ** Codex left unused (#696), only when some were given. */
 static void
@@ -12387,7 +12398,8 @@ rv_json_final(const char *name, const char *as, const char *res,
               int argv, const char *ag)
 {
 	json_final_open(name, "as", as, res, code, detail, sid);
-	cx_ignored_json(ag);
+	if (ag)		/* no record read: nothing was ignored (#701) */
+		cx_ignored_json(ag);
 	/* "running" stays the last key (#182) */
 	fputs(",\"agent\":", stdout);
 	if (ag)
@@ -19198,6 +19210,8 @@ main_run(int argc, char **argv)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)
 					opt_json = 1;
+				else if (cx_word_refused(argv[i]))
+					return 2;
 				else if (argv[i][0] == '-' || argv[i][0] == '\0')
 				{
 					fprintf(stderr, "dch: --say: unexpected "
@@ -19231,6 +19245,8 @@ main_run(int argc, char **argv)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)
 					opt_json = 1;
+				else if (cx_word_refused(argv[i]))
+					return 2;
 				else if (argv[i][0] == '-' || argv[i][0] == '\0')
 				{
 					fprintf(stderr, "dch: --stop: unexpected "
@@ -19271,6 +19287,8 @@ main_run(int argc, char **argv)
 					opt_json = 1;
 				else if (strcmp(argv[i], "-f") == 0)
 					force = 1;
+				else if (cx_word_refused(argv[i]))
+					return 2;
 				else if (argv[i][0] == '-' || argv[i][0] == '\0')
 				{
 					fprintf(stderr, "dch: %s: unexpected %s%s\n", a,
@@ -19523,6 +19541,13 @@ main_run(int argc, char **argv)
 		fprintf(stderr, "dch: --cwd only works with --spawn\n");
 		return 1;
 	}
+	if ((cx_drop || cx_ncfg) && action != A_REVIVE &&
+	    !(action == A_RESTART && opt_agents))
+	{
+		fprintf(stderr, "dch: --codex-drop-provider and --codex-config only "
+		        "work with --revive and --restart --include-agents\n");
+		return 2;
+	}
 	/* Remote control verbs (#114): --host names the host; else a name that
 	** is host:name for a known host and no local session's or History
 	** record's (#122: a local a:b name stays local, remote hosts off
@@ -19614,13 +19639,6 @@ main_run(int argc, char **argv)
 	{
 		fprintf(stderr, "dch: --no-message only works with --revive\n");
 		return 1;
-	}
-	if ((cx_drop || cx_ncfg) && action != A_REVIVE &&
-	    !(action == A_RESTART && opt_agents))
-	{
-		fprintf(stderr, "dch: --codex-drop-provider and --codex-config only "
-		        "work with --revive and --restart --include-agents\n");
-		return 2;
 	}
 	if (opt_agents && action != A_RESTART)
 	{

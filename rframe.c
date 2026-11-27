@@ -513,12 +513,15 @@ ctl_codex_cfg_ok(const char *s)
 {
 	size_t k = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	                     "0123456789_.-");
-	const unsigned char *p;
+	const unsigned char *p = (const unsigned char *)s;
+	unsigned cp;
+	int n;
 
-	if (!k || s[k] != '=' || strlen(s) > 1024)
+	/* a leading '-' would reach Codex as an option of its own */
+	if (!k || s[k] != '=' || s[0] == '-' || strlen(s) > 1024)
 		return 0;
-	for (p = (const unsigned char *)s; *p; p++)
-		if (*p < 0x20 || *p == 0x7f)
+	for (; *p; p += n)
+		if (!(n = utf8_at(p, &cp)) || cp_ctl(cp))
 			return 0;
 	return 1;
 }
@@ -642,7 +645,7 @@ xray_notify_ok(const char *s)
 }
 
 /* --answer's text (#692): 1 to XRAY_ANSWER_MAX bytes of UTF-8, no C0, DEL
-** or C1 but LF and tab: the operator's ruling, several lines allowed. */
+** or C1 but LF and tab, not all blank: several lines allowed. */
 int
 xray_answer_ok(const char *s)
 {
@@ -651,13 +654,19 @@ xray_answer_ok(const char *s)
 	unsigned cp;
 	int k;
 
+	int blank = 1;
+
 	if (n < 1 || n > XRAY_ANSWER_MAX)
 		return 0;
 	for (; *p; p += k)
+	{
 		if (!(k = utf8_at(p, &cp)) || (cp < 0x20 && cp != '\n' &&
 		    cp != '\t') || (cp >= 0x7f && cp < 0xa0))
 			return 0;
-	return 1;
+		if (cp != ' ' && cp != '\n' && cp != '\t')
+			blank = 0;
+	}
+	return !blank;
 }
 
 int
@@ -939,7 +948,7 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
 				return ctl_no(why, cap, "--codex-config wants at most "
 				              "16 K=V, K of [A-Za-z0-9_.-], 1024 bytes, "
 				              "no control characters");
-			kind[i] = CK_VALUE;
+			kind[i] = CK_TEXT;	/* a URL has ':'; see serve.c's relay guard */
 		}
 		else if (!strcmp(a, "--as"))
 		{

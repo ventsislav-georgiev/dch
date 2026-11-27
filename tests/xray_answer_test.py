@@ -234,6 +234,8 @@ def local():
                       ("4097 bytes", b"x" * 4097),
                       ("1 MB", b"x" * (1 << 20)),
                       ("empty", b""), ("a lone LF", b"\n"),
+                      ("blank (XB8)", b" "), ("a tab (XB8)", b"\t"),
+                      ("LF LF (XB8)", b"\n\n"),
                       ("a NUL", b"a\x00b"), ("an ESC", b"a\x1b[31mb"),
                       ("a CR", b"a\rb"), ("a DEL", b"a\x7fb"),
                       ("a C1 (U+0085)", "a\u0085b".encode()),
@@ -644,6 +646,20 @@ def remote():
               got["env"].get("DCH_SESSION") == "xq", got)
         check("...the client's own answer_command never ran",
               took(crec) is None)
+        # XB2: one LF trimmed in all, as a local --answer does
+        for inp in (b"x\n\n", b"x\n"):
+            if os.path.exists(rec):
+                os.unlink(rec)
+            r = run(cenv, "srv:xq", "--answer", "OQ-ok", "-", "--json",
+                    inp=inp)
+            got = took(rec)
+            check("XB2 host:name %r: stdin as a local one's" % inp,
+                  r.returncode == 0 and got and
+                  bytes.fromhex(got["stdin"]) == inp, (r, got))
+        r = run(cenv, "srv:xq", "--answer", "OQ-ok", "-", "--json",
+                inp=b"\n\n")
+        check("XB2/XB8 host:name '\\n\\n': blank, exit 2, bad answer",
+              r.returncode == 2 and b"bad answer" in r.stderr, r)
         ctl = []
         for n in sorted(os.listdir(logs)):
             with open(os.path.join(logs, n), encoding="utf-8") as f:
@@ -651,7 +667,8 @@ def remote():
             if "--answer" in a:
                 ctl.append(a)
         check("...the ctl child's argv holds \"-\", never the text",
-              ctl == [["--xray", "xq", "--answer", "OQ-ok", "-", "--json"]],
+              ctl and all(c == ["--xray", "xq", "--answer", "OQ-ok", "-",
+                                "--json"] for c in ctl),
               ctl)
         check("...and serve's log line names no text",
               "Remote" not in open(log, encoding="utf-8",

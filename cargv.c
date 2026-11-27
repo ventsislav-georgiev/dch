@@ -310,17 +310,16 @@ static const char *const cxval[] = {
 	"--ask-for-approval", "-C", "--cd", "--add-dir", NULL
 };
 
-/* #696: a -c/--config value whose key (before the first '=', trimmed,
-** a quote around it dropped) is model_provider or model_providers.*. */
-static int
-cx_provider(const char *kv)
+/* #696: the key of a -c/--config value (before the first '=', trimmed, a
+** quote around it dropped): its start, length in *l; NULL without a '='. */
+static const char *
+cx_key(const char *kv, size_t *l)
 {
 	const char *e = strchr(kv, '=');
-	size_t l;
 
 	if (!e)
-		return 0;
-	while (kv < e && isspace((unsigned char)*kv))
+		return NULL;
+	while (kv < e && *kv && isspace((unsigned char)*kv))
 		kv++;
 	while (e > kv && isspace((unsigned char)e[-1]))
 		e--;
@@ -328,9 +327,32 @@ cx_provider(const char *kv)
 		kv++;
 	if (e > kv && (e[-1] == '"' || e[-1] == '\''))
 		e--;
-	l = (size_t)(e - kv);
+	*l = (size_t)(e - kv);
+	return kv;
+}
+
+static int
+cx_provider(const char *kv)
+{
+	size_t l;
+
+	if (!(kv = cx_key(kv, &l)))
+		return 0;
 	return (l == 14 && strncmp(kv, "model_provider", 14) == 0) ||
 	       (l > 16 && strncmp(kv, "model_providers.", 16) == 0);
+}
+
+/* #701: 1 when cfg[from..ncfg) has a K=V of the same key as kv. */
+static int
+cx_replaced(const char *kv, char *const *cfg, int from, int ncfg)
+{
+	size_t l, m;
+	const char *k = cx_key(kv, &l), *c;
+
+	for (; k && from < ncfg; from++)
+		if ((c = cx_key(cfg[from], &m)) && m == l && !strncmp(c, k, l))
+			return 1;
+	return 0;
 }
 
 int
@@ -338,6 +360,8 @@ dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
                  char *msg, char **out, int drop, char *const *cfg, int ncfg)
 {
 	int k, n = 0, val, i;
+/* a recorded word goes: a provider under drop, or a key --codex-config sets */
+#define CX_GONE(x) ((drop && cx_provider(x)) || cx_replaced(x, cfg, 0, ncfg))
 
 	for (k = 0; k <= at; k++)
 		out[n++] = in[k];
@@ -365,10 +389,10 @@ dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
 			k++;
 			continue;
 		}
-		if (drop && (((!strcmp(a, "-c") || !strcmp(a, "--config")) &&
-		              k + 1 < argc && cx_provider(in[k + 1]) && ++k) ||
-		             (a[1] == 'c' && a[2] && cx_provider(a + 2)) ||
-		             (!strncmp(a, "--config=", 9) && cx_provider(a + 9))))
+		if (((!strcmp(a, "-c") || !strcmp(a, "--config")) &&
+		     k + 1 < argc && CX_GONE(in[k + 1]) && ++k) ||
+		    (a[1] == 'c' && a[2] && CX_GONE(a + 2)) ||
+		    (!strncmp(a, "--config=", 9) && CX_GONE(a + 9)))
 			continue;
 		out[n++] = in[k];
 		if (val && k + 1 < argc)
@@ -376,6 +400,8 @@ dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
 	}
 	for (i = 0; i < ncfg; i++)
 	{
+		if (cx_replaced(cfg[i], cfg, i + 1, ncfg))
+			continue;	/* the same key later in this call wins */
 		out[n++] = "-c";
 		out[n++] = cfg[i];
 	}
@@ -386,5 +412,6 @@ dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
 		out[n++] = msg;
 	}
 	out[n] = NULL;
+#undef CX_GONE
 	return n;
 }

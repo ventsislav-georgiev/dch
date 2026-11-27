@@ -17204,15 +17204,19 @@ xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
 	struct sch_row *r;
 	size_t k, n = 0;
 	ssize_t got = 0;
-	int fd, ts = -1, i, seen = 0;
-	long long t;
+	int fd, dfd, ts = -1, i, seen = 0;
+	long long t, now = (long long)time(NULL);
 
 	for (k = 0; s && k < s->n; k++)
 		seen |= s->v[k].durable && s->v[k].kind == SCK_CRON;
 	if (!seen || !cwd || cwd[0] != '/' ||
-	    snprintf(path, sizeof path, "%s/.claude/scheduled_tasks.json", cwd)
-	    >= (int)sizeof path ||
-	    (fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
+	    snprintf(path, sizeof path, "%s/.claude", cwd) >= (int)sizeof path ||
+	    (dfd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) < 0)
+		return;	/* a symlinked .claude is refused too, race-free */
+	fd = openat(dfd, "scheduled_tasks.json",
+	            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+	close(dfd);
+	if (fd < 0)
 		return;
 	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
 	    st.st_size <= SCH_FILE_MAX && (buf = calloc(1, (size_t)st.st_size + 1)))
@@ -17250,11 +17254,12 @@ xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
 		    !(id = tk_id(&p, j_get(&p, i, A_ID))))
 			continue;
 		if ((r = sch_find(s, id)) && r->durable && r->kind == SCK_CRON &&
-		    r->status == SCS_ENDED)
-		{
+		    (r->status == SCS_ENDED || r->status == SCS_PENDING))
+		{	/* a repeated id: the last entry's permanent wins */
 			r->status = SCS_PENDING;
 			r->perm = k_bool(&p, i, A_PERM);
-			if ((t = sch_time(&p, i, A_LASTF)) > r->last)
+			t = sch_time(&p, i, A_LASTF);
+			if (t > r->last && t <= now + 60)	/* 60 s of skew */
 			{
 				r->last = t;
 				if (r->next >= 0 && r->next <= t)
@@ -17279,7 +17284,8 @@ sch_status(const struct sch_row *r, int live, long long now, long long *exp)
 	if (r->kind == SCK_CRON && r->recurring && r->created >= 0 && !r->perm)
 	{
 		*exp = r->created + SCH_MAXAGE;
-		if (st == SCS_PENDING && now >= *exp)
+		if ((st == SCS_PENDING || (st == SCS_ENDED && r->durable)) &&
+		    now >= *exp)	/* an unlisted durable one ages out too */
 			st = SCS_EXPIRED;
 	}
 	if (st == SCS_PENDING && !r->durable && !live)
