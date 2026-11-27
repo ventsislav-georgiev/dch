@@ -954,6 +954,7 @@ running sessions.
 | `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
 | `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
 | `questions_command` | the same for X-ray's open questions (`--questions`); no built-in list (see [Your own open questions](#your-own-open-questions-questions_command)) | empty |
+| `answer_command` | the command that records an answer to an open question; see `--answer` (#692) | empty |
 | `define_command` | a program and its arguments, run with no shell, the ref last: X-ray's definition of a ref no transcript defines (see [Your own definitions](#your-own-definitions-define_command)). Your own config only; through `dch serve` the host's | empty |
 | `xray_github` | `true`/`false`: X-ray looks up a `#N`, `owner/repo#N` or GitHub issue/pull URL with your `gh` (title and state; see [Refs](#refs)) | `true` |
 
@@ -2627,7 +2628,10 @@ questions_command = ~/bin/my-questions
   `title` (required), `id`, `status` (read as a task's: `pending`,
   `active`, `done`, `dropped`, any other word pending with the word as its
   `label`), `label`, `note`, `created`, `updated` and `url`, bare or
-  wrapped as `{"question":{…}}`, cut and checked as task rows are.
+  wrapped as `{"question":{…}}`, cut and checked as task rows are. Optional, left
+  out when absent or malformed: `options` (at most 8 strings, 300 bytes each),
+  `recommended` (a string, 300 bytes) and `asker` (a session-like name, 64
+  bytes). The header gains `"answer":true` when `answer_command` is set.
 - **Output.** `--tasks`' header (`schema`, `session`, `session_id`,
   `source`, `title`, `partial`), one row per question, the `done` line:
   ```json

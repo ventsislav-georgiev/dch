@@ -61,10 +61,12 @@ def qs(*extra):
     return r.returncode, r.stdout, ls, r.stderr
 
 
-def config(cmd):
+def config(cmd, answer=None):
     with open(CONFIG, "w") as f:
         if cmd is not None:
             f.write("questions_command = %s\n" % cmd)
+        if answer is not None:
+            f.write("answer_command = %s\n" % answer)
 
 
 def script(name, body, py=False):
@@ -213,6 +215,57 @@ for k in range(50001):
     check("an oversize row line is skipped, the next row kept",
           rc == 0 and len(ls) == 3 and ls[1]["question"]["title"] == "kept"
           and ls[2] == {"done": True, "count": 1, "dropped": 1}, out)
+
+    # --- #691: options, recommended, asker; the header's answer ----------
+    config(script("new.py", r'''
+import json
+def q(**k):
+    print(json.dumps(dict(title="t", **k)))
+q(id="N1", options=["A", "B"], recommended="B", asker="sess-1.a_b")
+q(id="N2", options=["o%d" % i for i in range(10)])
+q(id="N3", options=["x" * 400, 5, "ok\nline\tx", None, ["z"]],
+  recommended="r" * 400)
+q(id="N4", options="notlist", recommended=7, asker=3)
+q(id="N5", asker="-x")
+q(id="N6", asker="a" * 70)
+q(id="N7", asker="a/b")
+q(id="N8", options=[5, ""], recommended="")
+q(id="N9", asker="a" * 64)
+''', py=True), answer="/bin/true --flag")
+    rc, out, ls, err = qs()
+    R = {l["question"]["id"]: l["question"] for l in ls if "question" in l}
+    check("answer_command set: the header says \"answer\":true",
+          rc == 0 and ls[0].get("answer") is True, (rc, out, err))
+    check("...all three fields pass through",
+          R.get("N1", {}).get("options") == ["A", "B"] and
+          R["N1"].get("recommended") == "B" and
+          R["N1"].get("asker") == "sess-1.a_b", R.get("N1"))
+    check("options: at most 8, the rest dropped",
+          R.get("N2", {}).get("options") == ["o%d" % i for i in range(8)],
+          R.get("N2"))
+    check("options: 400 bytes cut at 300, a non-string skipped, controls "
+          "as blanks; recommended cut at 300",
+          R.get("N3", {}).get("options") == ["x" * 300, "ok line x"] and
+          R["N3"].get("recommended") == "r" * 300, R.get("N3"))
+    check("wrong types and empty strings: the keys are left out",
+          all(k not in R.get(i, {"options": 1}) for i in ("N4", "N8")
+              for k in ("options", "recommended", "asker")), (R.get("N4"),
+                                                              R.get("N8")))
+    check("a bad asker (-x, 70 bytes, a/b): left out; 64 bytes kept",
+          all("asker" not in R.get(i, {"asker": 1}) for i in
+              ("N5", "N6", "N7")) and R.get("N9", {}).get("asker") == "a" * 64,
+          [R.get(i) for i in ("N5", "N6", "N7", "N9")])
+    config(script("new.py", "exit 0\n"), answer="")
+    rc, out, ls, err = qs()
+    check("answer_command empty: no \"answer\" key", rc == 0 and
+          all("answer" not in l for l in ls), (rc, out))
+    config(script("one.sh", "echo '{\"id\":1,\"title\":\"a\"}'\n"))
+    rc, out, ls, err = qs()
+    check("answer_command unset: no \"answer\" key, no extra fields",
+          rc == 0 and "answer" not in ls[0] and
+          ls[1]["question"].keys() == {"id", "title", "status", "label",
+                                       "note", "created", "updated", "url"},
+          (rc, out))
 
     # --- the plain form and the flags it excludes -------------------------
     r = dch("--xray", "xq", "--questions")

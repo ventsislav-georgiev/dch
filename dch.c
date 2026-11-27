@@ -328,6 +328,9 @@ const struct dch_conf config_keys[] = {
 	/* #652: open questions (--questions), from a command only */
 	{ "questions_command", 0, "", NULL,
 	  "X-ray's open questions from a command; empty: none" },
+	/* #691: records an answer to an open question (--answer, #692) */
+	{ "answer_command", 0, "", NULL,
+	  "X-ray's answer to an open question, by a command; empty: none" },
 	/* #507: #N, o/r#N and issue/pull URLs resolved by gh (read-only) */
 	{ "xray_github", 1, "true", NULL,
 	  "X-ray looks up GitHub issues and pull requests with gh" },
@@ -15605,7 +15608,16 @@ xr_tkc_row(const char *line, void *arg)
 			xr_put_str(k->o, k->res->title);
 		else
 			fputs("null", k->o);
-		fputs(",\"partial\":false}\n", k->o);
+		fputs(",\"partial\":false", k->o);
+		if (k->kind == XCMD_QUESTION)
+		{
+			char ac[1024];
+
+			if (dch_config_get("answer_command", ac, sizeof ac) > 0 &&
+			    ac[0])
+				fputs(",\"answer\":true", k->o);
+		}
+		fputs("}\n", k->o);
 	}
 	fputs(line, k->o);
 	fputc('\n', k->o);
