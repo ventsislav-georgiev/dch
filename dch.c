@@ -6520,6 +6520,9 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 ** first call takes it, 2 then reuses it); 0 closes the batch. */
 static int proc_tree_keep;
 
+/* Pids a walk collects: a Codex under a shell with 70 jobs is still found (#679). */
+#define PROC_TREE_MAX 1024
+
 /* `root` and its descendants, breadth first, at most max: the pids. */
 static int
 proc_tree(long root, long *out, int max)
@@ -6581,8 +6584,8 @@ static int
 claude_dirs(long root, char (*dirs)[1100], int nd, int max, long *cx)
 {
 	struct stat st[16];
-	long tree[64];
-	int n = proc_tree(root, tree, 64), i, j;
+	long tree[PROC_TREE_MAX];
+	int n = proc_tree(root, tree, PROC_TREE_MAX), i, j;
 
 	if (cx)
 		for (*cx = 0, i = 0; !*cx && i < n; i++)
@@ -6734,8 +6737,8 @@ claude_batch(char **v)
 static long
 claude_proc(long root)
 {
-	long tree[64];
-	int n = proc_tree(root, tree, 64), i, hit;
+	long tree[PROC_TREE_MAX];
+	int n = proc_tree(root, tree, PROC_TREE_MAX), i, hit;
 
 	for (i = 0; i < n; i++)
 	{
@@ -6914,12 +6917,12 @@ dch_agent_probe(long child, struct dch_agent *a)
 long
 dch_codex_below(long child)
 {
-	long pids[64];
+	long pids[PROC_TREE_MAX];
 	int n, k;
 
 	if (child <= 0)
 		return 0;
-	n = proc_tree(child, pids, 64);
+	n = proc_tree(child, pids, PROC_TREE_MAX);
 	for (k = 0; k < n; k++)
 		if (proc_is_codex(pids[k]))
 			return pids[k];
@@ -7320,10 +7323,10 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 	struct sub sv[256];
 	int own, nsv = -1;
 	time_t tmin;
-	long tree[1024];
+	long tree[PROC_TREE_MAX];
 	char tail[128], path[PATH_MAX], **v;
 	const char *b;
-	int n = proc_tree(pid, tree, 1024), ns = 0, i, j;
+	int n = proc_tree(pid, tree, PROC_TREE_MAX), ns = 0, i, j;
 	size_t tl = (size_t)snprintf(tail, sizeof tail, "/%s/tasks/", sid), pl;
 
 	for (i = 1; i < n && ns < 64; i++)
@@ -12774,8 +12777,8 @@ sid_visit(const char *path, const char *body, size_t len, void *arg)
 static void
 claude_argv_sid(long root, struct sidset *s, const char *sn)
 {
-	long tree[64];
-	int n = proc_tree(root, tree, 64), i, k, argc;
+	long tree[PROC_TREE_MAX];
+	int n = proc_tree(root, tree, PROC_TREE_MAX), i, k, argc;
 	char **v, rp[1100];
 	struct stat st;
 	time_t t;
