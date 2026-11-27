@@ -16462,13 +16462,20 @@ tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
 
 int
 xr_tasks_print(FILE *f, const struct xr_tasks *t, const char *session,
-               const char *session_id, int partial, const char *warn)
+               const char *session_id, int partial, const char *warn,
+               const char *block)
 {
 	int last = t ? t->last : 0;
 	size_t k, count = 0, dropped = 0, n = 0;
 	const struct tk_row *r;
 
-	fputs("{\"schema\":1,\"session\":", f);
+	fputs("{\"schema\":1", f);
+	if (block)
+	{
+		fputs(",\"block\":", f);
+		xr_put_str(f, block);
+	}
+	fputs(",\"session\":", f);
 	xr_put_str(f, session);
 	fputs(",\"session_id\":", f);
 	xr_put_str(f, session_id);
@@ -17290,7 +17297,7 @@ xr_scheds_print(FILE *f, const struct xr_scheds *s, const char *session,
 	if (s && s->codex && !n && (!warn || !warn[0]))
 		warn = "Codex CLI has no session scheduler; Codex app automations "
 		       "show when they fire";
-	fputs("{\"schema\":1,\"session\":", f);
+	fputs("{\"schema\":1,\"block\":\"schedules\",\"session\":", f);
 	xr_put_str(f, session);
 	fputs(",\"session_id\":", f);
 	xr_put_str(f, session_id);

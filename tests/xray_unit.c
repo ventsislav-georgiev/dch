@@ -7543,7 +7543,7 @@ tk_end(struct tk_feed *f, int partial)
 
 	if (m)
 	{
-		if (xr_tasks_print(m, f->t, "s", "id", partial, NULL) != 0)
+		if (xr_tasks_print(m, f->t, "s", "id", partial, NULL, "tasks") != 0)
 			fails++;
 		fclose(m);
 	}
@@ -7573,7 +7573,8 @@ t_tasks(void)
 
 	o = tk_end((tk_begin(&f, 0), &f), 0);
 	CHECK("tasks: none read: source none, no task line, done 0",
-	      !strcmp(o, "{\"schema\":1,\"session\":\"s\",\"session_id\":\"id\","
+	      !strcmp(o, "{\"schema\":1,\"block\":\"tasks\",\"session\":\"s\","
+	              "\"session_id\":\"id\","
 	              "\"source\":\"none\",\"title\":null,\"partial\":false}\n"
 	              "{\"done\":true,\"count\":0,\"dropped\":0}\n"));
 	free(o);
@@ -7584,8 +7585,9 @@ t_tasks(void)
 
 		if (m)
 		{
-			xr_tasks_print(m, NULL, "s", "id", 0, "");
-			xr_tasks_print(m, NULL, "s", "id", 0, "tasks_command: \"x\"");
+			xr_tasks_print(m, NULL, "s", "id", 0, "", NULL);
+			xr_tasks_print(m, NULL, "s", "id", 0, "tasks_command: \"x\"",
+			               "tasks");
 			fclose(m);
 		}
 		CHECK("tasks: warn (#321): left out when empty, else a string "
@@ -8020,9 +8022,10 @@ t_scheds(void)
 	SC_CC(0, "tu1", "3f9a12bc", "true");
 	o = sc_end(&f, 1, SC_T0 + 300);
 	CHECK("schedules: create then result: one pending cron, the header",
-	      !strncmp(o, "{\"schema\":1,\"session\":\"s\",\"session_id\":\"id\","
+	      !strncmp(o, "{\"schema\":1,\"block\":\"schedules\",\"session\":"
+	               "\"s\",\"session_id\":\"id\","
 	               "\"source\":\"claude\",\"live\":true,\"title\":null,"
-	               "\"partial\":false}\n", 103) && sc_lines(o) == 1 &&
+	               "\"partial\":false}\n", 123) && sc_lines(o) == 1 &&
 	      sc_row(o, "3f9a12bc", "{\"schedule\":{\"id\":\"3f9a12bc\","
 	             "\"kind\":\"cron\",\"status\":\"pending\",\"recurring\":true,"
 	             "\"cron\":\"*/10 * * * *\",\"human\":\"every 10 minutes\","
@@ -8349,7 +8352,8 @@ t_scheds(void)
 			fclose(m);
 		}
 		CHECK("schedules: none (a shell): source none, done 0",
-		      w && !strcmp(w, "{\"schema\":1,\"session\":\"s\","
+		      w && !strcmp(w, "{\"schema\":1,\"block\":\"schedules\","
+		                   "\"session\":\"s\","
 		                   "\"session_id\":\"id\",\"source\":\"none\","
 		                   "\"live\":false,\"title\":null,\"partial\":false}\n"
 		                   "{\"done\":true,\"count\":0,\"dropped\":0}\n"));

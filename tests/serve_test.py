@@ -289,8 +289,8 @@ def main():
             (hd(1) or {}).get("session") == "svx" and
             (hd(1) or {}).get("source") == "none" and
             hd(2) == {"done": True, "count": 0, "dropped": 0} and
-            hd(3) == {"schema": 1, "source": "none", "title": None,
-                      "partial": False} and
+            hd(3) == {"schema": 1, "block": "memory", "source": "none",
+                      "title": None, "partial": False} and
             hd(4) == {"done": True, "count": 0, "dropped": 0} and
             ls[5:] == [b""], (t, out[-400:]))
         if mirror:

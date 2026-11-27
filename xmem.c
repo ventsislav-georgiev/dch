@@ -1188,7 +1188,7 @@ xm_emit(FILE *f, struct xm_set *s, const struct xm_req *q, int partial)
 
 	if (s->nmem)
 		qsort(s->v, s->nmem, sizeof *s->v, xm_order);
-	fprintf(f, "{\"schema\":1,\"source\":\"%s\",\"title\":null,"
+	fprintf(f, "{\"schema\":1,\"block\":\"memory\",\"source\":\"%s\",\"title\":null,"
 	        "\"partial\":%s", s->n ? q->agent : "none",
 	        partial ? "true" : "false");
 	if (q->warn && q->warn[0])

@@ -154,7 +154,8 @@ print(json.dumps({"id": "env", "title": "<%s|%s|%s>" % (
     rc, out, ls, err = tasks("xt-ended", "--memory")
     m = [l["memory"] for l in ls if "memory" in l]
     check("memory rows: source command, the title, no session keys",
-          rc == 0 and ls and ls[0] == {"schema": 1, "source": "command",
+          rc == 0 and ls and ls[0] == {"schema": 1, "block": "memory",
+                                       "source": "command",
                                        "title": "My notes", "partial": False},
           (out[:400], err))
     check("memory rows: only the command's, the body cut at 16 KB, done",
@@ -224,7 +225,7 @@ def main():
     rc, out, ls, err = tasks("xt-ended")
     got = seen(ls)
     check("rows: source command, the command's title, the header's keys",
-          rc == 0 and ls and list(ls[0]) == ["schema", "session",
+          rc == 0 and ls and list(ls[0]) == ["schema", "block", "session",
                                              "session_id", "source", "title",
                                              "partial"] and
           ls[0]["source"] == "command" and ls[0]["title"] == "Env list" and

@@ -711,15 +711,18 @@ struct xr_tasks;
 struct xr_tasks *xr_tasks_new(void);
 void xr_tasks_free(struct xr_tasks *t);
 void xr_claude_tasks(struct xr_claude *d, struct xr_tasks *t, uint64_t ino);
-/* JSON lines: {"schema":1,"session","session_id","source","title",
+/* JSON lines: {"schema":1[,"block"],"session","session_id","source","title",
 ** "partial"[,"warn"]}, one {"task":{"id","title","status","label","active",
 ** "note","created","updated","chapter","created_chapter","blocked_by","url",
 ** "group"}} per task in the source's order, {"done":true,"count","dropped"}.
 ** t NULL or empty: source "none", no task line. warn (#321: a command
 ** source that failed) is one line, the field left out when NULL or "".
+** block ("tasks"; NULL for --questions, which has none) tells a --follow
+** stream's blocks apart (#685).
 ** 0, -1 a write failed (the lines after it, done too, are not written). */
 int xr_tasks_print(FILE *f, const struct xr_tasks *t, const char *session,
-                   const char *session_id, int partial, const char *warn);
+                   const char *session_id, int partial, const char *warn,
+                   const char *block);
 
 /* ---- --schedules (#684): the session's crons, /loop wake-up, heartbeats -- */
 #define XR_SCHEDS      5000		/* rows kept: the newest */
@@ -732,7 +735,8 @@ struct xr_scheds;
 struct xr_scheds *xr_scheds_new(void);
 void xr_scheds_free(struct xr_scheds *s);
 void xr_claude_scheds(struct xr_claude *d, struct xr_scheds *s, uint64_t ino);
-/* JSON lines: {"schema":1,"session","session_id","source","live","title",
+/* JSON lines: {"schema":1,"block":"schedules","session","session_id",
+** "source","live","title",
 ** "partial"[,"warn"]}, one {"schedule":{"id","kind","status","recurring",
 ** "cron","human","durable","prompt","reason","created","next","last_fired",
 ** "expires","fires","noop_streak","chapter","created_chapter"}} per row
