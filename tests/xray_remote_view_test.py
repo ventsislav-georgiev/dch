@@ -109,20 +109,20 @@ def test_view():
               v.wait(b"Canary ?[31mred?[0m passage", start=mark),
               v.out[mark:])
         # the follow carries the task and memory lists (#448)
-        host_ran(v, n0["--xray"] + 2, "follow, ref", late)
+        host_ran(v, n0["--xray"] + 3, "follow, schedules, ref", late)
         mark = len(v.out)
         v.key(b"f", 0.05)
         check("card: f runs the full scan on the host",
               v.wait(b"full scan", start=mark), v.out[mark:])
         # "full scan" is drawn at the key, before its query leaves (#374)
-        host_ran(v, n0["--xray"] + 3, "f's ref --full", late)
+        host_ran(v, n0["--xray"] + 4, "f's ref --full", late)
         # #227: p is the scope toggle (o until 1.60.x); o opens, as in the list
         mark = len(v.out)
         v.key(b"p", 0.05)
         check("card: p scans other projects on the host",
               v.wait("full scan \u00b7 other projects".encode(), start=mark)
               and v.wait(b"p this project", start=mark), v.out[mark:])
-        host_ran(v, n0["--xray"] + 4, "p's ref --full --scope all", late)
+        host_ran(v, n0["--xray"] + 5, "p's ref --full --scope all", late)
         mark = len(v.out)
         v.key(b"o", 0.5)
         check("card: o on the ended srv:xv-cl: said, the view stays",
@@ -137,13 +137,13 @@ def test_view():
               v.out[mark:])
         check("reader: the header says 2 of 2", v.wait(b"2 of 2", start=mark),
               v.out[mark:])
-        host_ran(v, n0["--xray"] + 5, "chapter", late)
+        host_ran(v, n0["--xray"] + 6, "chapter", late)
         mark = len(v.out)
         v.key(b"[", 0.05)
         check("reader: [ reads the previous chapter from the host, 1 of 2 "
               "(#288)", v.wait(b"1 of 2", start=mark) and
               v.wait(b"gh issue view 831", start=mark), v.out[mark:])
-        host_ran(v, n0["--xray"] + 6, "['s chapter", late)
+        host_ran(v, n0["--xray"] + 7, "['s chapter", late)
         mark = len(v.out)
         v.key(b"q", 0.05)
         check("reader: q goes back to the list",
@@ -167,9 +167,10 @@ def test_view():
     # follow (the task and memory lists in it, #448), ref (light), ref
     # --full, p's ref --full --scope all, chapter, ['s chapter: six, each
     # its own ctl
-    until(lambda: ctls("--xray") - n0["--xray"] >= 6, 5)
-    check("every query ran on the host as its own ctl --xray (6), no --read "
-          "for an ended session", ctls("--xray") - n0["--xray"] == 6 and
+    until(lambda: ctls("--xray") - n0["--xray"] >= 7, 5)
+    check("every query ran on the host as its own ctl --xray (7: --schedules "
+          "too, #687), no --read "
+          "for an ended session", ctls("--xray") - n0["--xray"] == 7 and
           ctls("--read") == n0["--read"],
           (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"],
            "not on the host in time: %s" % late, refused()))
@@ -195,7 +196,7 @@ def test_lookup():
               v.wait(b"OQ-32  light", start=mark) and
               v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
         # that line is drawn at the key, before the query leaves (#374)
-        host_ran(v, n0 + 2, "OQ-32's ref", late)
+        host_ran(v, n0 + 3, "OQ-32's ref", late)
         v.key(b"\033", 0.5)
         v.key(b"/\x15", 0.3)
         mark = len(v.out)
@@ -203,14 +204,14 @@ def test_lookup():
         check("lookup #263: #831, a chapter title's: ^R opens its card, "
               "not the chapter", v.wait(b"#831  light", start=mark) and
               v.wait(b"Definition", start=mark), v.out[mark:])
-        host_ran(v, n0 + 3, "#831's ref", late)
+        host_ran(v, n0 + 4, "#831's ref", late)
         # its mentions come after the definition: Enter needs one
         until(lambda: v.pump(0.05) or re.search(
             rb"Mentions: this session \D*[1-9]", v.out[mark:]), 30)
         mark = len(v.out)
         v.key(b"\r", 0.05)
         rd = v.wait(b"You", start=mark)
-        host_ran(v, n0 + 4, "chapter", late)
+        host_ran(v, n0 + 5, "chapter", late)
         mark = len(v.out)
         v.key(b"\033", 0.05)
         check("lookup #263: Enter on its mention reads the chapter from the "
@@ -221,10 +222,10 @@ def test_lookup():
         v.exit()
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 4, 5)
+    until(lambda: ctls("--xray") - n0 >= 5, 5)
     check("lookup #263: the cards and the chapter ran on the host, each its "
-          "own ctl --xray (follow with the task and memory lists, 2 refs, "
-          "chapter)", ctls("--xray") - n0 == 4,
+          "own ctl --xray (follow with the task and memory lists, schedules, "
+          "2 refs, chapter)", ctls("--xray") - n0 == 5,
           (ctls("--xray") - n0, "not on the host in time: %s" % late,
            refused()))
 
@@ -611,14 +612,15 @@ def test_responses():
               ok and len(it) == 2 and
               it[0] == ("second prompt about PROJ-5", ["noted"]) and
               it[1][1] == ["Bash 1"], (it, v.out[mark:][-600:]))
-        host_ran(v, n0 + 1, "follow with the task and memory lists", late)
+        host_ran(v, n0 + 2, "follow with the task and memory lists, "
+                 "schedules", late)
         mark = len(v.out)
         v.key(b"\r", 0.05)
         check("Responses, remote: Enter reads the item's prompt from the "
               "host, 2 of 2, its Reply", v.wait(b"2 of 2", start=mark) and
               v.wait(b"Reply", start=mark) and v.wait(b"noted", start=mark),
               v.out[mark:][-600:])
-        host_ran(v, n0 + 2, "chapter", late)
+        host_ran(v, n0 + 3, "chapter", late)
         mark = len(v.out)
         v.key(b"q", 0.05)
         check("Responses, remote: q back to the item",
@@ -628,10 +630,11 @@ def test_responses():
         check("Responses, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 2, 5)
+    until(lambda: ctls("--xray") - n0 >= 3, 5)
     check("Responses, remote: the follow (the task and memory lists in it, "
-          "#448) and the chapter, each its own ctl --xray on the host",
-          ctls("--xray") - n0 == 2,
+          "#448), the schedules and the chapter, each its own ctl --xray on "
+          "the host",
+          ctls("--xray") - n0 == 3,
           "%s; not on the host in time: %s" % (ctls("--xray") - n0, late))
 
 
@@ -656,13 +659,14 @@ def test_search():
               (h, v.out[mark:][-600:]))
         check("Search, remote: a hostile title over a hit shows with ?",
               h and len(h) > 1 and "?]0;pwned?" in h[1][1], h)
-        host_ran(v, n0 + 2, "follow with the lists, search", late)
+        host_ran(v, n0 + 3, "follow with the lists, schedules, search",
+                 late)
         mark = len(v.out)
         v.key(b"j\r", 0.05)
         check("Search, remote: Enter reads the hit's prompt from the host, "
               "1 of 2, at the text", v.wait(b"1 of 2", start=mark) and
               v.wait(b"PROJ-5", start=mark), v.out[mark:][-600:])
-        host_ran(v, n0 + 3, "chapter", late)
+        host_ran(v, n0 + 4, "chapter", late)
         mark = len(v.out)
         v.key(b"q", 1.0)
         check("Search, remote: q back to the hit",
@@ -675,10 +679,10 @@ def test_search():
               "terminal", not bad, bad)
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 3, 5)
+    until(lambda: ctls("--xray") - n0 >= 4, 5)
     check("Search, remote: the follow (the task and memory lists in it, "
-          "#448), the search and the chapter, each its own ctl --xray on the "
-          "host", ctls("--xray") - n0 == 3,
+          "#448), the schedules, the search and the chapter, each its own "
+          "ctl --xray on the host", ctls("--xray") - n0 == 4,
           (ctls("--xray") - n0, "not on the host in time: %s" % late))
 
 
