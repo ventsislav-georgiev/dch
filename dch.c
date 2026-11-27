@@ -13182,9 +13182,9 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 				continue;
 			}
 			rv_say(&r[k], json, "failed", tl == -2 ? say_code[SAY_INTERRUPTED]
-			       : "relaunch_failed", "revived as %s in %s, but claude %s "
+			       : "relaunch_failed", "revived as %s in %s, but claude%s%s "
 			       "%s; resume by hand: claude --resume %s", r[k].as,
-			       r[k].cwd, r[k].aname, tl == -2 ? "was not started: a "
+			       r[k].cwd, r[k].aname[0] ? " " : "", r[k].aname, tl == -2 ? "was not started: a "
 			       "signal came first" : "could not be started", r[k].sid);
 			r[k].mode = RV_PLAIN;
 			bad++;
