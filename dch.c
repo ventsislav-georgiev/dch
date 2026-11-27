@@ -7092,16 +7092,24 @@ mem_find(char *s, char *e, const char *nd, size_t nl)
 /* Bytes line_ts and tx_shell read; shell_owner budgets subagent files'. */
 static size_t tx_read;
 
+static int iso_ms;	/* the last iso_epoch's ".mmm", 0 without */
+
 /* The epoch of "YYYY-MM-DDTHH:MM:SS…" (UTC) at s, -1 none. */
 static long
 iso_epoch(const char *s)
 {
 	struct tm tm;
+	int k = 0;
 
 	memset(&tm, 0, sizeof tm);
-	if (sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d", &tm.tm_year, &tm.tm_mon,
-	           &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
+	iso_ms = 0;
+	if (sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%n", &tm.tm_year, &tm.tm_mon,
+	           &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &k) != 6)
 		return -1;
+	if (s[k] == '.' && isdigit((unsigned char)s[k + 1]) &&
+	    isdigit((unsigned char)s[k + 2]) && isdigit((unsigned char)s[k + 3]))
+		iso_ms = (s[k + 1] - '0') * 100 + (s[k + 2] - '0') * 10 +
+		         (s[k + 3] - '0');
 	tm.tm_year -= 1900;
 	tm.tm_mon--;
 	return (long)timegm(&tm);
@@ -7297,21 +7305,23 @@ out:
 struct sub { char id[64]; time_t mt; };
 
 /* <dir>/agent-<id>.meta.json: desc[dcap] its "description" (cut_text), and
-** with type, type[64] its "agentType" and tu[128] its "toolUseId" ("" for
-** any missing). -1 no readable meta. */
+** with type, type[64] its "agentType", tu[128] its "toolUseId" ("" for
+** any missing) and *fin the meta's mtime when it says "finished":true
+** (Claude Code rewrites it so when the agent ends), else 0. -1 no
+** readable meta. */
 static int
 sub_meta(const char *dir, const char *id, char *desc, size_t dcap,
-         char *type, char *tu)
+         char *type, char *tu, time_t *fin)
 {
 	char f[PATH_MAX + 100], meta[65536];
 	struct json_parser p;
 	struct stat st;
 	ssize_t n = -1;
-	int fd;
+	int fd, i;
 
 	*desc = '\0';
 	if (type)
-		*type = *tu = '\0';
+		*type = *tu = '\0', *fin = 0;
 	snprintf(f, sizeof f, "%s/agent-%s.meta.json", dir, id);
 	if ((fd = open(f, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
 		return -1;
@@ -7328,6 +7338,11 @@ sub_meta(const char *dir, const char *id, char *desc, size_t dcap,
 			if (type && dch_json_decode(&p, jfield(&p, 0, "toolUseId"),
 			                            tu, 128) < 0)
 				*tu = '\0';
+			if (type && (i = jfield(&p, 0, "finished")) >= 0 &&
+			    p.tok[i].kind == JSON_PRIMITIVE &&
+			    p.tok[i].end - p.tok[i].start == 4 &&
+			    !strncmp(p.text + p.tok[i].start, "true", 4))
+				*fin = st.st_mtime;
 		}
 		else
 			n = -1;
@@ -7399,7 +7414,7 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 	if (!hit)
 		return 0;
 	memcpy(agent, sv[i].id, sizeof sv->id);
-	(void)sub_meta(dir, agent, adesc, adcap, NULL, NULL);
+	(void)sub_meta(dir, agent, adesc, adcap, NULL, NULL, NULL);
 	return 2;
 }
 
@@ -7600,40 +7615,70 @@ sub_state(char *b, ssize_t n, off_t at, const char *id, const char *tu,
 	return best ? r : 0;
 }
 
-/* The 0-based row of the agent panel (det_panel, the last detect_agents
-** read) naming desc: it holds desc, or ends a run that starts desc in "…"
-** (4+ bytes). -1 on no row or on two. */
+/* Whether listed agent type t (ASCII case ignored: the screen is folded)
+** is panel row word w[wl]. */
 static int
-sub_row(const char *desc)
+sub_type_is(const char *t, const char *w, size_t wl)
 {
-	char d[201], *r, *nx, *q;
-	size_t k, dl = strlen(desc);
-	int i, row = -1;
+	return wl && strlen(t) == wl && !strncasecmp(t, w, wl);
+}
 
-	if (!dl)
-		return -1;
-	for (k = 0; k <= dl; k++)	/* the screen is ASCII-folded */
-		d[k] = desc[k] >= 'A' && desc[k] <= 'Z' ? desc[k] + 32 : desc[k];
-	for (i = 0, r = det_panel; *r; i++, r = nx + 1)
+/* Each listed agent's row (a[].row, -1 none) on the agent panel (det_panel,
+** the last detect_agents read): the panel lists agents in launch order as
+** "<agentType>  <activity>", the description never, and can keep one that
+** just ended. ord[0, no) indexes a[] by start (key, ms) ascending. The running
+** ones, if exactly the panel's types in order; else the one offset where
+** the panel is a contiguous run of all listed ones, type by type, holding
+** every running one; else (none, two, no panel) every row -1. */
+struct sag { char id[64], type[64], tu[128], desc[201];
+             long started, end; long long key; time_t mt, fin;
+             int state, row; };
+
+static void
+sub_rows(struct sag *a, const int *ord, int no)
+{
+	enum { PMAX = 256 };
+	const char *w[PMAX], *r, *nx;
+	size_t wl[PMAX];
+	int m = 0, i, k, o, nr = 0, hit = -1, good;
+
+	for (i = 0; i < no; i++)
+		a[ord[i]].row = -1, nr += !a[ord[i]].state;
+	for (r = det_panel; *r && (nx = strchr(r, '\n')); r = nx + 1)
 	{
-		int hit;
-
-		if (!(nx = strchr(r, '\n')))
-			break;
-		*nx = '\0';
-		hit = strstr(r, d) != NULL;
-		if (!hit && (q = strstr(r, "\xe2\x80\xa6")))
-			for (k = 0; !hit && (size_t)(q - r) >= k + 4; k++)
-				hit = (k == 0 || r[k - 1] == ' ') &&
-				      (size_t)(q - r) - k <= dl &&
-				      !strncmp(r + k, d, (size_t)(q - r) - k);
-		*nx = '\n';
-		if (hit && row >= 0)
-			return -1;
-		if (hit)
-			row = i;
+		if (m == PMAX)
+			return;	/* a panel this long: no alignment is sure */
+		w[m] = r;
+		wl[m++] = strcspn(r, " \n");
 	}
-	return row;
+	if (!m)
+		return;
+	if (nr == m)	/* the running ones alone */
+	{
+		for (good = 1, i = k = 0; good && i < no; i++)
+			if (!a[ord[i]].state)
+				good = sub_type_is(a[ord[i]].type, w[k], wl[k]), k++;
+		if (good)
+		{
+			for (i = k = 0; i < no; i++)
+				if (!a[ord[i]].state)
+					a[ord[i]].row = k++;
+			return;
+		}
+	}
+	for (o = 0; o + m <= no; o++)
+	{
+		for (good = 1, i = 0; good && i < no; i++)
+			good = i >= o && i < o + m
+			       ? sub_type_is(a[ord[i]].type, w[i - o], wl[i - o])
+			       : a[ord[i]].state != 0;
+		if (good && hit >= 0)
+			return;	/* two offsets fit: don't guess */
+		if (good)
+			hit = o;
+	}
+	for (k = 0; hit >= 0 && k < m; k++)
+		a[ord[hit + k]].row = k;
 }
 
 /* ,"subagents" (#712): the Claude's subagents whose transcript is `tp`
@@ -7642,15 +7687,18 @@ sub_row(const char *desc)
 ** agent-<id>.meta.json (agentType, description, toolUseId; an agent with
 ** no readable meta or toolUseId is left out) and agent-<id>.jsonl (its
 ** first line's timestamp starts it), its end from one window of the main
-** transcript (sub_state). shortcut: only agent files written in the last
-** SUB_WIN s are looked at (700+ per session), so a running agent silent
-** that long is missed; read its meta "finished" if that ever matters. */
+** transcript (sub_state) or its meta's "finished":true. Every agent file
+** is stat'ed (700+ per session), the meta read only of those written in
+** the last SUB_MAX_RUN s. shortcut: a running agent silent that long is
+** missed, and a Claude Code too old to write "finished" shows an agent
+** that ended unseen by the window as running for up to that long; widen
+** SUB_MAX_RUN if day-long silent agents ever matter. */
 static void
 put_subagents(const char *tp)
 {
-	enum { SUB_WIN = 600, CAND = 128, FWD = 4 << 20, BUDGET = 16 << 20 };
-	static struct sag { char id[64], type[64], tu[128], desc[201];
-	                    long started, end; time_t mt; int state, row; } a[CAND];
+	enum { SUB_WIN = 600, SUB_MAX_RUN = 86400, CAND = 128, FWD = 4 << 20,
+	       BUDGET = 16 << 20 };
+	static struct sag a[CAND];
 	char dir[PATH_MAX], f[PATH_MAX + 100], *b = NULL;
 	struct dirent *e;
 	struct stat st;
@@ -7675,15 +7723,19 @@ put_subagents(const char *tp)
 			    strncmp(e->d_name, "agent-", 6) ||
 			    strcmp(e->d_name + el - 6, ".jsonl") ||
 			    fstatat(dfd, e->d_name, &st, 0) || !S_ISREG(st.st_mode) ||
-			    st.st_mtime < now - SUB_WIN)
+			    st.st_mtime < now - SUB_MAX_RUN)
 				continue;
 			snprintf(s->id, sizeof s->id, "%.*s", (int)(el - 12),
 			         e->d_name + 6);
+			/* finished well before the window: its end line can't be in it
+			** (one-minute slack for the end line written after the meta) */
 			if (sub_meta(dir, s->id, s->desc, sizeof s->desc, s->type,
-			             s->tu) < 0 || !*s->tu)
+			             s->tu, &s->fin) < 0 || !*s->tu ||
+			    (s->fin && s->fin < now - SUB_WIN - 60))
 				continue;
 			s->mt = st.st_mtime;
 			s->started = -1;
+			iso_ms = 0;
 			snprintf(f, sizeof f, "%s/%s", dir, e->d_name);
 			if (tx_read - r0 < BUDGET &&
 			    (fd = open(f, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) >= 0)
@@ -7697,20 +7749,26 @@ put_subagents(const char *tp)
 #endif
 			if (s->started < 0)
 				s->started = (long)st.st_mtime;
+			s->key = (long long)s->started * 1000 + iso_ms;
 			if (s->mt < tmin)
 				tmin = s->mt;
 			na++;
 		}
 		closedir(d);
 	}
-	/* one window for all: from the oldest's last write on, FWD bytes
-	** (a busy session writes ~1 MB in 10 min) */
+	/* one window for all: from the oldest's last write, or SUB_WIN (and a
+	** minute) ago if later, as an earlier end is dropped anyway; at most
+	** the last FWD bytes (a busy session writes ~1 MB in 10 min) */
+	if (tmin < now - SUB_WIN - 60)
+		tmin = now - SUB_WIN - 60;
 	if (na && (fd = open(tp, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) >= 0)
 	{
 		if (!fstat(fd, &st) && S_ISREG(st.st_mode) &&
 		    (b = malloc(FWD + 1)))
 		{
 			at = ts_seek(fd, st.st_size, tmin);
+			if (st.st_size - at > FWD)
+				at = st.st_size - FWD;
 			if ((n = pread(fd, b, FWD, at)) < 0)
 				n = 0;
 			tx_read += (size_t)n;
@@ -7722,26 +7780,25 @@ put_subagents(const char *tp)
 	{
 		a[i].state = b ? sub_state(b, n, at, a[i].id, a[i].tu, a[i].mt,
 		                           &a[i].end) : 0;
+		if (!a[i].state && a[i].fin)	/* finished, no end line seen */
+			a[i].state = 1, a[i].end = (long)a[i].fin;
 		if (a[i].state && a[i].end < (long)(now - SUB_WIN))
 			continue;
-		a[i].row = sub_row(a[i].desc);
-		for (j = no++; j > 0 && a[ord[j - 1]].started < a[i].started; j--)
+		for (j = no++; j > 0 && a[ord[j - 1]].key > a[i].key; j--)
 			ord[j] = ord[j - 1];
 		ord[j] = i;
 	}
 	free(b);
-	if (no > 64)
-		no = 64;
-	/* two listed agents on one row: neither is sure of it */
-	for (i = 0; i < no; i++)
-		for (j = i + 1; j < no; j++)
-			if (a[ord[i]].row >= 0 && a[ord[i]].row == a[ord[j]].row)
-				a[ord[i]].row = a[ord[j]].row = -2;
-	for (i = 0; i < no; i++)
+	sub_rows(a, ord, no);
+	for (i = 1; i < no; i++)	/* one type, one start ms: no order */
+		if (a[ord[i]].key == a[ord[i - 1]].key &&
+		    !strcasecmp(a[ord[i]].type, a[ord[i - 1]].type))
+			a[ord[i]].row = a[ord[i - 1]].row = -1;
+	for (i = no - 1; i >= 0 && i >= no - 64; i--)	/* newest first */
 	{
 		struct sag *s = &a[ord[i]];
 
-		printf("%s{\"id\":", i ? "," : "");
+		printf("%s{\"id\":", i < no - 1 ? "," : "");
 		put_json_str(s->id);
 		fputs(",\"type\":", stdout);
 		put_json_str(s->type);

@@ -34,10 +34,13 @@ or meta skipped at once; 32 unnamed shells x 250 x 1.2 MB subagent files
 under 2 s (the per-call read budget). #711: each shell's "output" and
 "pgid"; --stop-shell ends a shell and its child, not the Claude or a
 sibling shell; no_shell, not_claude, no_session, --json, usage exit 2.
-#712 "subagents": running, done (tool_result), failed (is_error), a
-background agent done or killed by its <task-notification>; one ended
-before the 10-minute window and one with no meta left out; "row" off a
-fake agent panel (a cut description; two matching rows null); key order.
+#712 "subagents": running (also one silent 30 min), done (tool_result,
+or meta finished:true alone), failed (is_error, with finished:true too),
+a background agent done or killed by its <task-notification>; ended
+before the 10-minute window, a day silent, no meta: left out. "row" off a
+fake "<glyph> <agentType>  <activity>" panel: the running ones by launch
+order, a lingering ended run aligned by type; a type mismatch, two
+offsets or a same-ms same-type tie give null; key order.
 
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
@@ -622,13 +625,13 @@ def main():
                         pass
 
         # --- "subagents" (#712): from <sid>/subagents/ and the main ------
-        # transcript; "row" off a fake agent panel on the session's screen
+        # transcript; "row" off a fake agent panel in Claude Code's format,
+        # "<glyph> <agentType>  <activity>", reprinted per case from a file
         sa = "tt-sa"
+        sapf = os.path.join(tmp, "sa-panel")
         sap = spawn(sa, "/bin/sh", "-c",
-                    "printf '\\342\\217\\272 main\\n\\342\\227\\257 Explore  "
-                    "Read the docs\\n\\342\\227\\257 general-purpose  Fix the "
-                    "flaky te\\342\\200\\246\\n\\342\\227\\257 Explore  Twin\\n"
-                    "\\342\\227\\257 Explore  Twin\\n'; exec /bin/sleep 120")
+                    "while :; do if [ -f %s ]; then printf '\\033[2J\\033[H'; "
+                    "cat %s; rm -f %s; fi; sleep 0.2; done" % (sapf, sapf, sapf))
         sa_sid = "71271271-2712-7127-1271-271271271271"
         now = int(time.time())
 
@@ -661,29 +664,59 @@ def main():
         sad = os.path.join(os.path.dirname(satp), sa_sid, "subagents")
         os.makedirs(sad)
 
-        def agent(aid, typ, desc, start, mt, meta=True):
+        def agent(aid, typ, desc, start, mt, meta=True, fin=None):
+            # fin: the meta says "finished":true, rewritten at that time
             if meta:
-                with open(os.path.join(sad, "agent-%s.meta.json" % aid),
-                          "w") as f:
-                    json.dump({"agentType": typ, "description": desc,
-                               "isBuiltIn": True, "spawnDepth": 1,
-                               "toolUseId": "toolu_" + aid}, f)
+                mp = os.path.join(sad, "agent-%s.meta.json" % aid)
+                m = {"agentType": typ, "description": desc,
+                     "isBuiltIn": True, "spawnDepth": 1,
+                     "toolUseId": "toolu_" + aid}
+                if fin:
+                    m["finished"] = True
+                with open(mp, "w") as f:
+                    json.dump(m, f)
+                if fin:
+                    os.utime(mp, (fin, fin))
             p = os.path.join(sad, "agent-%s.jsonl" % aid)
             with open(p, "w") as f:
                 f.write(jl2({"type": "user", "isSidechain": True,
-                             "agentId": aid, "timestamp": iso2(start)})
-                        if start else "{}\n")
+                             "agentId": aid,
+                             "timestamp": start if isinstance(start, str)
+                             else iso2(start)}) if start else "{}\n")
             os.utime(p, (mt, mt))
 
-        agent("aRUN", "Explore", "Read the docs", now - 60, now)
+        lite = run("--read", sa).returncode == 3
+
+        def panel(*types):
+            with open(sapf + ".tmp", "w") as f:
+                f.write("⏺ main\n" + "".join(
+                    "◯ %s  Waiting …\n" % t for t in types))
+            os.rename(sapf + ".tmp", sapf)
+            until(lambda: lite or field(sa, "agents") == len(types))
+            got = field(sa, "subagents")
+            return {s["id"]: s for s in got} if isinstance(got, list) \
+                else {}, got
+
+        def rowsof(g, *ids):
+            return [g.get(i, {}).get("row", "-") for i in ids]
+
+        def nul(*r):
+            return [None] * len(r) if lite else list(r)
+
+        agent("aSLOW", "slow-worker", "Long build", now - 2000, now - 1800)
+        agent("aKILL", "Explore", "Killed job", now - 210, now - 25)
+        agent("aBG", "Explore", "Background job", now - 200, now - 25)
         agent("aDONE", "general-purpose", "Fix the flaky tests", now - 120,
               now - 40)
+        agent("aFIN", "Plan", "Plan it", now - 100, now - 50, fin=now - 50)
+        agent("aFERR", "Plan", "Plan badly", now - 90, now - 45,
+              fin=now - 45)
+        agent("aRUN", "Explore", "Read the docs", now - 60, now)
         agent("aERR", "Explore", "Break it", None, now - 40)
-        agent("aBG", "Explore", "Background job", now - 200, now - 25)
-        agent("aKILL", "Explore", "Killed job", now - 210, now - 25)
-        agent("aTW1", "Explore", "Twin", now - 300, now)
-        agent("aTW2", "Explore", "Twin", now - 310, now)
         agent("aOLD", "Explore", "Read the docs", now - 4000, now - 3600)
+        agent("aOLDFIN", "Explore", "Old", now - 4000, now - 3600,
+              fin=now - 3600)
+        agent("aSTALE", "Explore", "Day old", now - 90000, now - 90000)
         agent("aNOMETA", "Explore", "x", now - 50, now, meta=False)
         with open(satp, "w") as f:
             f.write(tres("toolu_aOLD", now - 3590))
@@ -691,59 +724,96 @@ def main():
             f.write(tres("toolu_aKILL", now - 210, bg=True))
             f.write(tres("toolu_aDONE", now - 30))
             f.write(tres("toolu_aERR", now - 30, err=True))
+            f.write(tres("toolu_aFERR", now - 44, err=True))
             f.write(note("aBG", "toolu_aBG", now - 20, "completed"))
             f.write(note("aKILL", "toolu_aKILL", now - 20, "killed"))
         record(sap, sa_sid)
-        lite = run("--read", sa).returncode == 3
-        until(lambda: lite or field(sa, "agents") == 4)
-        got = field(sa, "subagents")
+        # a lingering ended run: every listed one, in launch order, by type
+        g, got = panel("slow-worker", "Explore", "Explore", "general-purpose",
+                       "Plan", "Plan", "Explore")
         ids = [s.get("id") for s in got] if isinstance(got, list) else got
-        check("subagents: running ones and those ended in 10 min, newest "
-              "first; one older, one with no meta left out (%s)" % ids,
-              ids == ["aERR", "aRUN", "aDONE", "aBG", "aKILL", "aTW1",
-                      "aTW2"])
-        g = {s["id"]: s for s in got} if isinstance(got, list) else {}
+        check("subagents: running ones (one silent 30 min) and those ended "
+              "in 10 min, newest first; ended earlier, a day silent, no "
+              "meta left out (%s)" % ids,
+              ids == ["aERR", "aRUN", "aFERR", "aFIN", "aDONE", "aBG",
+                      "aKILL", "aSLOW"])
 
         def want(aid, typ, desc, start, state, row):
             return {"id": aid, "type": typ, "description": desc,
                     "started": start, "state": state,
                     "row": None if lite else row}
-        check("running: no result yet, its panel row (%s)" % g.get("aRUN"),
+        check("running: no end line, no finished (%s)" % g.get("aRUN"),
               g.get("aRUN") == want("aRUN", "Explore", "Read the docs",
-                                    now - 60, "running", 0))
-        check("done: its tool_result; row by a cut description (%s)"
-              % g.get("aDONE"),
+                                    now - 60, "running", 6))
+        check("running: its file 30 min old, still listed (%s)"
+              % g.get("aSLOW"),
+              g.get("aSLOW") == want("aSLOW", "slow-worker", "Long build",
+                                     now - 2000, "running", 0))
+        check("done: its tool_result (%s)" % g.get("aDONE"),
               g.get("aDONE") == want("aDONE", "general-purpose",
                                      "Fix the flaky tests", now - 120,
-                                     "done", 1))
+                                     "done", 3))
+        check("done: meta finished:true with no end line (%s)"
+              % g.get("aFIN"),
+              g.get("aFIN") == want("aFIN", "Plan", "Plan it", now - 100,
+                                    "done", 4))
+        check("failed: meta finished:true and an is_error end (%s)"
+              % g.get("aFERR"),
+              g.get("aFERR") == want("aFERR", "Plan", "Plan badly", now - 90,
+                                     "failed", 5))
         fs = g.get("aERR", {}).get("started")
         check("failed: is_error; no first-line timestamp: started from the "
-              "file (%s)" % g.get("aERR"),
+              "file; past the panel: row null (%s)" % g.get("aERR"),
               isinstance(fs, int) and abs(fs - now) < 60 and
               dict(g.get("aERR", {}), started=0) ==
               want("aERR", "Explore", "Break it", 0, "failed", None))
         check("background: done by its <task-notification>, the launch "
               "result no end (%s)" % g.get("aBG"),
               g.get("aBG") == want("aBG", "Explore", "Background job",
-                                   now - 200, "done", None))
+                                   now - 200, "done", 2))
         check("background killed: failed (%s)" % g.get("aKILL"),
               g.get("aKILL") == want("aKILL", "Explore", "Killed job",
-                                     now - 210, "failed", None))
-        check("two panel rows match: row null (%s)" % g.get("aTW1"),
-              g.get("aTW1", {}).get("row", 0) is None and
-              g.get("aTW2", {}).get("row", 0) is None)
+                                     now - 210, "failed", 1))
+        g, _ = panel("slow-worker", "Explore")
+        r = rowsof(g, "aSLOW", "aRUN", "aDONE", "aERR")
+        check("panel of the running ones: their rows by launch order, the "
+              "rest null (%s)" % r, r == nul(0, 1, None, None))
+        g, _ = panel("Explore", "slow-worker", "Plan")
+        r = rowsof(g, "aSLOW", "aRUN", "aFIN", "aFERR")
+        check("panel types match no run: rows null (%s)" % r,
+              r == [None] * 4)
         keys = []
-        for r in json.loads(run("--ls-json").stdout,
-                            object_pairs_hook=lambda kv: kv):
-            if dict(r).get("name") == sa:
-                rk = [k for k, _ in r]
-                sub = dict(r).get("subagents") or [[]]
+        for rr in json.loads(run("--ls-json").stdout,
+                             object_pairs_hook=lambda kv: kv):
+            if dict(rr).get("name") == sa:
+                rk = [k for k, _ in rr]
+                sub = dict(rr).get("subagents") or [[]]
                 keys = rk[rk.index("shells"):rk.index("shells") + 2] + \
                     [k for k, _ in sub[0]]
         check("keys: subagents right after shells; id, type, description, "
               "started, state, row (%s)" % keys,
               keys == ["shells", "subagents", "id", "type", "description",
                        "started", "state", "row"])
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        open(satp, "w").close()
+        # two of one type started in the same ms: no order between them
+        agent("aT1", "Explore", "t1", "2026-01-01T00:00:00.123Z", now)
+        agent("aT2", "Explore", "t2", "2026-01-01T00:00:00.123Z", now)
+        g, _ = panel("Explore", "Explore")
+        r = rowsof(g, "aT1", "aT2")
+        check("same type, same start ms: rows null (%s)" % r,
+              r == [None, None])
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        for i in range(4):
+            agent("aA%d" % i, "Explore", "a", now - 100 + i, now - 30,
+                  fin=now - 30)
+        g, _ = panel("Explore", "Explore", "Explore")
+        r = rowsof(g, "aA0", "aA1", "aA2", "aA3")
+        check("ended ones: the panel fits at two offsets: rows null (%s)"
+              % r, r == [None] * 4 and g.get("aA0", {}).get("state") ==
+              "done")
         check("a non-Claude row: no subagents key",
               field(b, "subagents") == MISSING)
         os.unlink(os.path.join(sessdir, "%d.json" % sap))
