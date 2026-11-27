@@ -329,7 +329,8 @@ meta_wire(struct sb *b, size_t base, const struct json_parser *jp, int meta,
 
 /* `dch --ls-json` as listResp's payload into *b: per row name; alias, else
 ** the harness name; state when one of the four; agents when > 0; agent
-** when claude or codex (#677); meta; cwd
+** when claude or codex (#677); meta; group and group_manual, each a
+** string or null (#714); cwd
 ** when known (#115, a dch client's --ls-json --remote shows it). Keys
 ** sorted, so equal rows are equal bytes (the watch stream compares). Rows
 ** that would take the payload past the send limit are left out. 0, or -1
@@ -349,6 +350,9 @@ rows_wire(const char *ls, struct sb *b)
 	for (i = 1; i < jp.tok[0].next; i = jp.tok[i].next)
 	{
 		char name[1024], alias[2048], state[16], cwd[512], agent[8];
+		char grp[2][64];
+		static const char *const gk[2] = { "group", "group_manual" };
+		int g;
 		long long agents = 0, ep = 0;
 		struct sb r = {0};
 		size_t base;
@@ -373,6 +377,9 @@ rows_wire(const char *ls, struct sb *b)
 			agent[0] = '\0';
 		if (jint(&jp, i, "meta_epoch", &ep) != 1)
 			ep = 0;
+		for (g = 0; g < 2; g++)
+			if (jstr(&jp, i, gk[g], grp[g], sizeof grp[g]) != 1)
+				grp[g][0] = '\0';
 		sb_s(&r, b->n > 1 ? ",{" : "{");
 		base = r.n;
 		if (agent[0])
@@ -394,6 +401,14 @@ rows_wire(const char *ls, struct sb *b)
 		{
 			sb_key(&r, base, "cwd");
 			sb_q(&r, cwd);
+		}
+		for (g = 0; g < 2; g++)	/* null when "" too: never a name */
+		{
+			sb_key(&r, base, gk[g]);
+			if (grp[g][0])
+				sb_q(&r, grp[g]);
+			else
+				sb_s(&r, "null");
 		}
 		meta_wire(&r, base, &jp, jcont(&jp, i, "meta", JSON_OBJECT), ep);
 		sb_key(&r, base, "name");

@@ -2896,7 +2896,8 @@ usage(void)
 	    "  dch -V           print version\n"
 	    "  dch --build      print the build: full, or lite (no terminal mirror)\n"
 	    "Agent/control verbs (no attach; safe to script):\n"
-	    "  dch --spawn <name> [--size CxR] [--env K=V]... [cmd...]\n"
+	    "  dch --spawn <name> [--size CxR] [--env K=V]... [--group <g>]\n"
+	    "              [cmd...]\n"
 	    "                                             start headless session\n"
 	    "  dch --send <name> <text...>                type text into session\n"
 	    "  dch --run <name> <text...>                 type text, press enter\n"
@@ -2961,6 +2962,10 @@ usage(void)
 	    "                                             past the 30-day prune\n"
 	    "                                             (the pin follows the\n"
 	    "                                             name), or stop keeping it\n"
+	    "  dch --group-set <name> <group>|--auto [--json]\n"
+	    "                                             set a session's picker\n"
+	    "                                             group by hand, or let\n"
+	    "                                             the patterns decide\n"
 	    "  dch --forget <name>... [-f] [--json]       delete ended sessions'\n"
 	    "                                             records; never a live\n"
 	    "                                             one, a pinned one only\n"
@@ -11370,6 +11375,95 @@ pk_ingroup(const struct pkgrp *g, const char *s)
 	return 0;
 }
 
+/* A session's manual group (#714): <canon name>.group beside its record,
+** the config group's name --group-set stored, keyed by the name as a pin
+** is; the master never touches it, so it outlives stop, revive and
+** restart. Into out (sz > 1): 0, or -1 when there is none. */
+static int
+group_manual_get(const char *name, char *out, size_t sz)
+{
+	char dir[1024], cb[256], p[1400];
+	ssize_t n;
+	int fd;
+
+	out[0] = '\0';
+	if (dch_history_dir(dir, sizeof dir, sock_dir, 0) < 0)
+		return -1;
+	snprintf(p, sizeof p, "%s/%s.group", dir,
+	         canon_name(name, cb, sizeof cb));
+	if ((fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
+		return -1;
+	n = read(fd, out, sz - 1);
+	close(fd);
+	out[n > 0 ? n : 0] = '\0';
+	chomp(out);
+	return out[0] ? 0 : -1;
+}
+
+/* Store g as the session's manual group, or drop it (g NULL). 0, or -1
+** with errno. */
+static int
+group_manual_put(const char *name, const char *g)
+{
+	char dir[1024], cb[256], p[1400], t[1500];
+	int fd, ok;
+
+	if (dch_history_dir(dir, sizeof dir, sock_dir, 1) < 0)
+		return -1;
+	snprintf(p, sizeof p, "%s/%s.group", dir,
+	         canon_name(name, cb, sizeof cb));
+	if (!g)
+		return unlink(p) < 0 && errno != ENOENT ? -1 : 0;
+	/* .tmp: what a cold start's prune drops when this dies mid-write */
+	snprintf(t, sizeof t, "%s.tmp", p);
+	if ((fd = open(t, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW |
+	               O_CLOEXEC, 0600)) < 0)
+		return -1;
+	ok = dprintf(fd, "%s\n", g) > 0;
+	ok = close(fd) == 0 && ok;
+	if (!ok || rename(t, p) < 0)
+	{
+		int e = errno;
+
+		unlink(t);
+		errno = e;
+		return -1;
+	}
+	return 0;
+}
+
+/* The config group named g, ignoring case: its index, or -1. */
+static int
+pk_group_named(const struct pkgrps *gs, const char *g)
+{
+	int k;
+
+	for (k = 0; k < gs->n; k++)
+		if (strcasecmp(gs->g[k].name, g) == 0)
+			return k;
+	return -1;
+}
+
+/* A session's effective group (#714): its manual one while that is still
+** a config group, else the first whose pattern matches its name, alias or
+** harness title (a "-qa" is often only Claude's name for the session, the
+** one the row shows, #086); gs->n for none. man: the stored value, or "". */
+static int
+pk_group_of(const struct pkgrps *gs, const char *name, const char *alias,
+            const char *harness, char *man, size_t mansz)
+{
+	int g;
+
+	if (group_manual_get(name, man, mansz) == 0 &&
+	    (g = pk_group_named(gs, man)) >= 0)
+		return g;
+	for (g = 0; g < gs->n && !pk_ingroup(&gs->g[g], name) &&
+	     !pk_ingroup(&gs->g[g], alias) && !pk_ingroup(&gs->g[g], harness);
+	     g++)
+		;
+	return g;
+}
+
 /* The session named `name` on Sessions or a group's tab, this host's; NULL
 ** when none runs. Their rows are named as the sockets are: canon_name's. */
 static const struct pkrow *
@@ -11546,14 +11640,10 @@ pk_load(struct pk *p)
 		struct pkrow *w;
 		const char *meta;
 		long mep;
+		char man[64];
 
-		/* the first group that matches; the harness title too: a "-qa"
-		** is often only Claude's name for the session, the one the row
-		** shows (#086) */
-		for (g = 0; g < gs.n && !pk_ingroup(&gs.g[g], sl.v[k]) &&
-		     !pk_ingroup(&gs.g[g], sl.alias[k]) &&
-		     !pk_ingroup(&gs.g[g], sl.harness[k]); g++)
-			;
+		g = pk_group_of(&gs, sl.v[k], sl.alias[k], sl.harness[k], man,
+		                sizeof man);
 		t = g < gs.n ? g + 1 : 0;
 		w = &p->r[t][p->n[t]++];
 		snprintf(w->name, sizeof w->name, "%s", sl.v[k]);
@@ -13650,6 +13740,11 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 				         canon_name(h->as, cb, sizeof cb));
 				if (h->pinned)
 					(void)rename(rp, np);
+				/* and its manual group (#714) */
+				snprintf(rp, sizeof rp, "%s/%s.group", dir, h->file);
+				snprintf(np, sizeof np, "%s/%s.group", dir,
+				         canon_name(h->as, cb, sizeof cb));
+				(void)rename(rp, np);
 			}
 		}
 		if (h->mode == RV_CODEX)
@@ -13775,13 +13870,16 @@ hv_say(const char *name, const char *res, const char *code,
 		printf("%s: failed — %s\n", name, detail);
 }
 
-/* Remove one record and its pin. 0, or -1 with errno. */
+/* Remove one record, its pin and its manual group. 0, or -1 with errno. */
 static int
 hv_forget(const char *dir, const struct hrec *r)
 {
 	char p[1400];
 
 	snprintf(p, sizeof p, "%s/%s.pin", dir, r->file);
+	if (unlink(p) < 0 && errno != ENOENT)
+		return -1;
+	snprintf(p, sizeof p, "%s/%s.group", dir, r->file);	/* #714 */
 	if (unlink(p) < 0 && errno != ENOENT)
 		return -1;
 	snprintf(p, sizeof p, "%s/%s.json", dir, r->file);
@@ -13896,6 +13994,56 @@ do_pin_verb(char **names, int nn, int mode, int force, int json)
 		printf("forgot %d (%d pinned, %d live kept)\n", c[0], kp, kl);
 	hrec_free(r, n);
 	return c[2] ? 1 : 0;
+}
+
+/* `--group-set <name> <group>|--auto [--json]` (#714): store the config
+** group's own spelling (matched ignoring case) as the session's manual
+** group, or drop it (g NULL). A session is one running or with a record.
+** --json: {"name","group","result","reason"}, group the stored one or null.
+** 0, or 1 failed. */
+static int
+do_group_set_verb(const char *name, const char *g, int json)
+{
+	struct pkgrps gs;
+	struct hrec *r;
+	char cb[256];
+	const char *why = "", *what = "";
+	int n, k, gi = -1;
+
+	pk_groups(&gs);
+	for (k = 0; k < gs.n; k++)
+		if (gs.g[k].mode == 1)
+			regfree(&gs.g[k].re);
+	n = history_load(&r);
+	canon_name(name, cb, sizeof cb);
+	for (k = 0; k < n && strcmp(r[k].name, name) && strcmp(r[k].file, cb);
+	     k++)
+		;
+	hrec_free(r, n);
+	if (k == n && !name_live(name))
+		why = "no_session", what = "no such session";
+	else if (g && (gi = pk_group_named(&gs, g)) < 0)
+		why = "no_group", what = "no such group in the config";
+	else if (group_manual_put(name, gi >= 0 ? gs.g[gi].name : NULL) < 0)
+		why = "io_error", what = strerror(errno);
+	if (json)
+	{
+		fputs("{\"name\":", stdout);
+		put_json_str(name);
+		fputs(",\"group\":", stdout);
+		if (gi >= 0 && !*why)
+			put_json_str(gs.g[gi].name);
+		else
+			fputs("null", stdout);
+		printf(",\"result\":\"%s\",\"reason\":\"%s\"}\n", *why ? "failed"
+		       : "ok", why);
+	}
+	else if (*why)
+		printf("%s: failed — %s\n", name, what);
+	else
+		printf("%s: group %s\n", name, gi >= 0 ? gs.g[gi].name
+		       : "auto (by pattern)");
+	return *why ? 1 : 0;
 }
 
 /* The master pass's word on one session: rc is do_restart_verb's, or -1
@@ -19217,7 +19365,7 @@ main_run(int argc, char **argv)
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
 	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP,
-	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW, A_PASSIVE }
+	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW, A_PASSIVE, A_GROUPSET }
 	    action = argc == 1 ? A_LIST : A_ATTACH;	/* bare dch is dch -l (#590) */
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
@@ -19316,6 +19464,8 @@ main_run(int argc, char **argv)
 	oargv = calloc((size_t)argc + 1, sizeof *oargv);
 	cskip = calloc((size_t)argc + 1, 1);
 	const char *opt_cwd = NULL;
+	const char *opt_group = NULL;	/* --spawn --group, --group-set's (#714) */
+	int opt_gauto = 0;
 
 	if (!oargv || !cskip)
 		return 1;
@@ -19399,6 +19549,43 @@ main_run(int argc, char **argv)
 				remote_host = argv[i];
 			cskip[i - 1] = cskip[i] = 1;
 			i++;
+		}
+		else if (strcmp(a, "--group") == 0)
+		{
+			/* #714: --spawn's manual group */
+			if (++i >= argc || !argv[i][0])
+			{
+				fprintf(stderr, "dch: --group needs a group name\n");
+				return 2;
+			}
+			opt_group = argv[i++];
+		}
+		else if (strcmp(a, "--group-set") == 0)
+		{
+			/* <name> <group>|--auto [--json] (#714): the rest of
+			** the line */
+			const char *w[2] = { NULL, NULL };
+			int nw = 0;
+
+			action = A_GROUPSET;
+			for (i++; i < argc; i++)
+				if (strcmp(argv[i], "--json") == 0)
+					opt_json = 1;
+				else if (strcmp(argv[i], "--auto") == 0)
+					opt_gauto = 1;
+				else if (argv[i][0] == '-' || !argv[i][0] || nw == 2)
+					nw = 3;
+				else
+					w[nw++] = argv[i];
+			if (nw != 2 - opt_gauto)
+			{
+				fprintf(stderr, "dch: usage: dch --group-set <name> "
+				        "<group>|--auto [--json]\n");
+				return 2;
+			}
+			snprintf(session_name, sizeof session_name, "%s", w[0]);
+			opt_group = w[1];
+			break;
 		}
 		else if (strcmp(a, "--cwd") == 0)
 		{
@@ -20008,6 +20195,11 @@ main_run(int argc, char **argv)
 	int inner_argc = argc - i;
 	char **inner_argv = argv + i;
 
+	if (opt_group && action != A_SPAWN && action != A_GROUPSET)
+	{
+		fprintf(stderr, "dch: --group only works with --spawn\n");
+		return 2;
+	}
 	if (opt_cwd && action != A_SPAWN)
 	{
 		fprintf(stderr, "dch: --cwd only works with --spawn\n");
@@ -20043,6 +20235,11 @@ main_run(int argc, char **argv)
 		{
 			fprintf(stderr, "dch: --env and --unset with --revive are "
 			        "local only\n");
+			return 2;
+		}
+		if (remote && opt_group)
+		{
+			fprintf(stderr, "dch: --group is local only\n");
 			return 2;
 		}
 		if (remote)
@@ -20120,10 +20317,10 @@ main_run(int argc, char **argv)
 	}
 	if (opt_json && action != A_RESTART && action != A_REVIVE &&
 	    action != A_SAY && action != A_STOP && action != A_PIN &&
-	    action != A_UNPIN && action != A_FORGET)
+	    action != A_UNPIN && action != A_FORGET && action != A_GROUPSET)
 	{
 		fprintf(stderr, "dch: --json only works with --restart, --revive, "
-		        "--say, --stop, --pin, --unpin, --forget\n");
+		        "--say, --stop, --pin, --unpin, --forget, --group-set\n");
 		return 1;
 	}
 	/* clean (--forget --all) never removes a pin; a pin has no force */
@@ -20335,6 +20532,9 @@ main_run(int argc, char **argv)
 		int hfd = dch_history_dir(hdir, sizeof hdir, sock_dir, 0) < 0 ? -1
 		          : open(hdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
 		                 O_CLOEXEC);
+		struct pkgrps gs;	/* "group", "group_manual" (#714) */
+
+		pk_groups(&gs);
 		putchar('[');
 		for (k = 0; k < sl.n; k++)
 		{
@@ -20415,8 +20615,8 @@ main_run(int argc, char **argv)
 				ag = "codex";
 			printf(",\"agent\":%s%s%s", ag ? "\"" : "", ag ? ag : "null",
 			       ag ? "\"" : "");
-			/* last, so every key before keeps its place; null with
-			** no record (DCH_NO_HISTORY) or an ended one */
+			/* after the others, so every key before keeps its place;
+			** null with no record (DCH_NO_HISTORY) or an ended one */
 			struct hrec h = {0};
 			char hf[300];
 
@@ -20430,8 +20630,27 @@ main_run(int argc, char **argv)
 			free(h.body);
 			free(h.argv);
 			free(h.launch);
+			/* the effective group (the picker's tab), and the one
+			** --group-set stored, even when no config group has it */
+			char man[64];
+			int g = pk_group_of(&gs, sl.v[k], sl.alias[k], sl.harness[k],
+			                    man, sizeof man);
+
+			fputs(",\"group\":", stdout);
+			if (g < gs.n)
+				put_json_str(gs.g[g].name);
+			else
+				fputs("null", stdout);
+			fputs(",\"group_manual\":", stdout);
+			if (man[0])
+				put_json_str(man);
+			else
+				fputs("null", stdout);
 			putchar('}');
 		}
+		for (int gk = 0; gk < gs.n; gk++)	/* k: the remote rows' comma */
+			if (gs.g[gk].mode == 1)
+				regfree(&gs.g[gk].re);
 		proc_tree_keep = 0;
 		if (hfd >= 0)
 			close(hfd);
@@ -20839,6 +21058,9 @@ main_run(int argc, char **argv)
 		return do_pin_verb(opt_all ? NULL : argv + say_at, say_n,
 		                   action == A_PIN ? HV_PIN : action == A_UNPIN
 		                   ? HV_UNPIN : HV_FORGET, force, opt_json);
+	case A_GROUPSET:
+		return do_group_set_verb(session_name, opt_gauto ? NULL : opt_group,
+		                         opt_json);
 	case A_REVIVE:
 	case A_SPAWN:
 	{
@@ -20860,6 +21082,32 @@ main_run(int argc, char **argv)
 			return do_revive_verb(exe, session_name,
 			                      opt_as[0] ? opt_as : NULL, opt_all,
 			                      opt_cols, opt_rows, opt_json, opt_nomsg);
+		if (opt_group)
+		{
+			/* #714: an unknown group spawns nothing */
+			struct pkgrps gs;
+			int g, k;
+
+			pk_groups(&gs);
+			for (k = 0; k < gs.n; k++)
+				if (gs.g[k].mode == 1)
+					regfree(&gs.g[k].re);
+			if ((g = pk_group_named(&gs, opt_group)) < 0)
+			{
+				fprintf(stderr, "dch: --group: no group %s in the config "
+				        "(no_group)\n", opt_group);
+				return 1;
+			}
+			if ((k = do_spawn_verb(exe, session_name, opt_cols, opt_rows,
+			                       inner_argv, inner_argc, 0)) != 0)
+				return k;
+			if (group_manual_put(session_name, gs.g[g].name) < 0)
+			{
+				fprintf(stderr, "dch: --group: %s\n", strerror(errno));
+				return 1;
+			}
+			return 0;
+		}
 		return do_spawn_verb(exe, session_name, opt_cols, opt_rows,
 		                     inner_argv, inner_argc, 0);
 	}

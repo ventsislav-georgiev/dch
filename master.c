@@ -900,9 +900,69 @@ rec_exit(void)
 	rec_write(rec_end);
 }
 
+/* Does the record `fn` in dfd belong to a session that still answers?
+** Its sock_dir and name's socket, connected to (#714). */
+static int
+rec_live(int dfd, const char *fn, size_t stem)
+{
+	char b[8192], sd[1024], sp[1400];
+	ssize_t r;
+	int fd = openat(dfd, fn, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+
+	if (fd < 0)
+		return 0;
+	r = read(fd, b, sizeof b - 1);
+	close(fd);
+	b[r > 0 ? r : 0] = '\0';
+	if (dch_json_string(b, "sock_dir", sd, sizeof sd) < 0 ||
+	    snprintf(sp, sizeof sp, "%s/%.*s.sock", sd, (int)stem, fn)
+	    >= (int)sizeof sp || (fd = control_connect_path(sp)) < 0)
+		return errno == EAGAIN;	/* stuck is live, as name_live says */
+	close(fd);
+	return 1;
+}
+
+/* Is there a record of the name whose files are <stem>.*: <stem>.json, or
+** one a cold start moved aside, <stem>.<digits>.json? */
+static int
+rec_any(int dfd, const char *stem)
+{
+	DIR *d;
+	struct dirent *de;
+	size_t sl = strlen(stem), n, k;
+	int fd = openat(dfd, ".", O_RDONLY | O_DIRECTORY), hit = 0;
+
+	if (fd < 0 || !(d = fdopendir(fd)))
+	{
+		if (fd >= 0)
+			close(fd);
+		return 1;	/* unsure: keep */
+	}
+	while (!hit && (de = readdir(d)))
+	{
+		n = strlen(de->d_name);
+		if (n < sl + 5 || strncmp(de->d_name, stem, sl) ||
+		    strcmp(de->d_name + n - 5, ".json"))
+			continue;
+		if (n == sl + 5)
+			hit = 1;
+		else if (de->d_name[sl] == '.' && n > sl + 6)
+		{
+			for (k = sl + 1; k < n - 5 && de->d_name[k] >= '0' &&
+			     de->d_name[k] <= '9'; k++)
+				;
+			hit = k == n - 5;
+		}
+	}
+	closedir(d);
+	return hit;
+}
+
 /* Drop *.json idle for 30 days, and *.tmp a master killed mid-write left
 ** for a day, from one record dir. A record with a <base>.pin beside it
-** (dch --pin) is kept whatever its age. */
+** (dch --pin) is kept whatever its age; so is a live session's that has a
+** <base>.group (#714). Then every <base>.group whose name has no record
+** left goes too: a manual group never outlives its name. */
 static void
 rec_prune(int dfd)
 {
@@ -931,7 +991,22 @@ rec_prune(int dfd)
 			continue;
 		if (age &&
 		    fstatat(dfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
-		    S_ISREG(st.st_mode) && st.st_mtime < time(NULL) - age)
+		    S_ISREG(st.st_mode) && st.st_mtime < time(NULL) - age &&
+		    !(js && snprintf(pin, sizeof pin, "%.*s.group", (int)(n - 5),
+		                     de->d_name) < (int)sizeof pin &&
+		      fstatat(dfd, pin, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+		      rec_live(dfd, de->d_name, n - 5)))
+			unlinkat(dfd, de->d_name, 0);
+	}
+	rewinddir(d);
+	while ((de = readdir(d)))
+	{
+		size_t n = strlen(de->d_name);
+		char stem[300];
+
+		if (n > 6 && strcmp(de->d_name + n - 6, ".group") == 0 &&
+		    snprintf(stem, sizeof stem, "%.*s", (int)(n - 6), de->d_name)
+		    < (int)sizeof stem && !rec_any(dfd, stem))
 			unlinkat(dfd, de->d_name, 0);
 	}
 	closedir(d);

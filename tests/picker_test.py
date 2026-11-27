@@ -703,6 +703,27 @@ def groups():
     check("#544: left from Sessions goes History, then the last group",
           "[QA" in s, s.split("\n")[0])
 
+    # #714: a manual group (dch --group-set) moves a session to its tab,
+    # ahead of every pattern; --auto puts it back by pattern
+    r = dch("--group-set", "gr-web", "qa")
+    s = wait_screen("pk13", lambda s: "gr-web" in rows(s))
+    check("#714: --group-set gr-web qa: gr-web on the QA tab",
+          r.returncode == 0 and "[QA" in s and "gr-web" in rows(s), s)
+    r = dch("--group-set", "gr-api-qa", "QA")
+    s = wait_screen("pk13", lambda s: "gr-api-qa" in rows(s))
+    check("#714: a manual QA beats API's matching pattern: gr-api-qa on QA",
+          "gr-api-qa" in rows(s) and "API" not in tabs(s), s)
+    dch("--group-set", "gr-web", "--auto")
+    dch("--group-set", "gr-api-qa", "--auto")
+    s = wait_screen("pk13", lambda s: "API" in tabs(s) and
+                    "gr-web" not in rows(s))
+    check("#714: --auto: back by pattern, gr-web off QA, API's tab back",
+          "gr-web" not in rows(s) and "gr-api-qa" not in rows(s) and
+          "API" in tabs(s), s)
+    s = to_tab("pk13", "Sessions")
+    check("#714: ... and gr-web on Sessions again", "gr-web" in rows(s), s)
+    s = to_tab("pk13", "QA")
+
     # a bad line is skipped, the later ones still count
     setcfg("group = %s = gr-api\ngroup = Long = (gr-api|%s)\n"
            "group = = gr-api\ngroup = NoRe =\ngroup = gr-api\n"
