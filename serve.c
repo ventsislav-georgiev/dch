@@ -1466,7 +1466,10 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 			argv[sx + 1] = "-";
 		if ((sx < 0 || (pipe_ce(pi) == 0 &&
 		     write(pi[1], av[sx], strlen(av[sx])) ==
-		     (ssize_t)strlen(av[sx]))) &&
+		     (ssize_t)strlen(av[sx]) &&
+		     /* the child trims one LF, as the client did (XB2) */
+		     (strcmp(av[sx - 2], "--answer") ||
+		      write(pi[1], "\n", 1) == 1))) &&
 		    pipe_ce(po) == 0 && pipe_ce(pe) == 0 && (pid = fork()) == 0)
 		{
 			const char *home = getenv("HOME");

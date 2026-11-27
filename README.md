@@ -2646,7 +2646,8 @@ questions_command = ~/bin/my-questions
   wrapped as `{"question":{…}}`, cut and checked as task rows are. Optional, left
   out when absent or malformed: `options` (at most 8 strings, 300 bytes each),
   `recommended` (a string, 300 bytes) and `asker` (a session-like name, 64
-  bytes). The header gains `"answer":true` when `answer_command` is set.
+  bytes). Control characters, C1 and bidi controls are removed from them as
+  from titles. The header gains `"answer":true` when `answer_command` is set.
 - **Output.** `--tasks`' header (`schema`, `session`, `session_id`,
   `source`, `title`, `partial`), one row per question, the `done` line:
   ```json
@@ -2676,8 +2677,9 @@ printf 'Yes, ship it.' | dch --xray api --answer OQ-7 - --json
   the command's last argv word; the answer is never in argv (`ps` would
   show it): `-` is always standard input, read to its end (5 s at most).
   One trailing newline is dropped. The text must be 1 to 4000 bytes of
-  UTF-8 with no control character but LF and tab (`dch: bad answer: …`,
-  exit 2, nothing runs).
+  UTF-8 with no control character but LF and tab, and not only blanks (spaces,
+  tabs, newlines: `dch: bad answer: …`, exit 2, nothing runs); `host:name`
+  trims the same one newline.
 - **The run.** `questions_command`'s: the same session, environment
   (`DCH_SESSION`, `DCH_SESSION_CWD`, `DCH_AGENT`, …), cwd, no shell and
   5 s clock. Its stdin holds the text and one newline, then ends. Its

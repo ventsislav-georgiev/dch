@@ -280,6 +280,7 @@ row_task(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 /* A text field cut at 300 bytes (never inside a UTF-8 sequence), control
 ** bytes as blanks, blank runs as one, ends trimmed; NULL when empty. */
 #define XQ_CUT 300
+static size_t plain(char *s);
 static const char *
 cut300(const struct json_parser *p, int t, char *tmp, char out[XQ_CUT + 1])
 {
@@ -288,6 +289,7 @@ cut300(const struct json_parser *p, int t, char *tmp, char out[XQ_CUT + 1])
 
 	if (!s)
 		return NULL;
+	plain(tmp);		/* C1, bidi, escapes out as titles' (XB7) */
 	for (i = 0; s[i] && o < XQ_CUT; i++)
 	{
 		if (s[i] < 32 || s[i] == 0x7f || s[i] == ' ')

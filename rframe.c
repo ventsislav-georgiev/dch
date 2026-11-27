@@ -645,7 +645,7 @@ xray_notify_ok(const char *s)
 }
 
 /* --answer's text (#692): 1 to XRAY_ANSWER_MAX bytes of UTF-8, no C0, DEL
-** or C1 but LF and tab: the operator's ruling, several lines allowed. */
+** or C1 but LF and tab, not all blank: several lines allowed. */
 int
 xray_answer_ok(const char *s)
 {
@@ -654,13 +654,19 @@ xray_answer_ok(const char *s)
 	unsigned cp;
 	int k;
 
+	int blank = 1;
+
 	if (n < 1 || n > XRAY_ANSWER_MAX)
 		return 0;
 	for (; *p; p += k)
+	{
 		if (!(k = utf8_at(p, &cp)) || (cp < 0x20 && cp != '\n' &&
 		    cp != '\t') || (cp >= 0x7f && cp < 0xa0))
 			return 0;
-	return 1;
+		if (cp != ' ' && cp != '\n' && cp != '\t')
+			blank = 0;
+	}
+	return !blank;
 }
 
 int

@@ -231,6 +231,7 @@ q(id="N6", asker="a" * 70)
 q(id="N7", asker="a/b")
 q(id="N8", options=[5, ""], recommended="")
 q(id="N9", asker="a" * 64)
+q(id="N10", options=["a\u0085b\u202ec", "\u009bz"], recommended="r\u2066s")
 ''', py=True), answer="/bin/true --flag")
     rc, out, ls, err = qs()
     R = {l["question"]["id"]: l["question"] for l in ls if "question" in l}
@@ -247,6 +248,9 @@ q(id="N9", asker="a" * 64)
           "as blanks; recommended cut at 300",
           R.get("N3", {}).get("options") == ["x" * 300, "ok line x"] and
           R["N3"].get("recommended") == "r" * 300, R.get("N3"))
+    check("XB7: C1 and bidi controls out of options and recommended",
+          R.get("N10", {}).get("options") == ["abc", "z"] and
+          R["N10"].get("recommended") == "rs", R.get("N10"))
     check("wrong types and empty strings: the keys are left out",
           all(k not in R.get(i, {"options": 1}) for i in ("N4", "N8")
               for k in ("options", "recommended", "asker")), (R.get("N4"),
