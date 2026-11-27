@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <limits.h>
+#include <strings.h>
 #include <stdint.h>
 #include <sys/poll.h>
 #include <sys/random.h>
@@ -1580,6 +1581,34 @@ static void wrapper_name(const char *name, char *out, size_t cap) {
     out[0] = '\0';
 }
 
+/* A literal wrapper tag in peer text would close or reopen the wrapper, so
+   "<cross-session-message" and "</cross-session-message" (any case) get a
+   backslash after the "<". Worst growth is 1 byte per 22; -1 if out
+   is too small. */
+#define ESCAPED_MAX(n) ((n) + (n) / 22 + 1)
+static int escape_wrapper(char *out, size_t cap, const char *in) {
+  static const char tag[] = "cross-session-message";
+  size_t used = 0;
+  for (; *in; in++) {
+    int slash = in[0] == '<' && in[1] == '/';
+    if (in[0] == '<' && !strncasecmp(in + 1 + slash, tag, sizeof tag - 1)) {
+      if (used + 2 + slash >= cap)
+        return -1;
+      out[used++] = '<';
+      out[used++] = '\\';
+      if (slash)
+        out[used++] = '/';
+      in += slash;
+      continue;
+    }
+    if (used + 1 >= cap)
+      return -1;
+    out[used++] = *in;
+  }
+  out[used] = '\0';
+  return 0;
+}
+
 /* The body is wrapped the way Claude wraps its own peer messages, so the
    receiving session renders it as a one-line "@ sender" preview instead of
    the verbose unwrapped-peer framing. */
@@ -1587,7 +1616,8 @@ static int outgoing(int local, const char *payload, const char *own_socket,
                     const char *own_name) {
   char target[512], message[MESSAGE_MAX + 1], msgid[37], address[108],
       qmsg[MESSAGE_MAX * 6 + 3], qid[80], qfrom[700], qsess[800],
-      frame[FRAME_MAX + 1], wrapped[MESSAGE_MAX + 900], safe[700];
+      frame[FRAME_MAX + 1], wrapped[MESSAGE_MAX + 900 + MESSAGE_MAX / 22],
+      esc[ESCAPED_MAX(MESSAGE_MAX) + 1], safe[700];
   struct peer peer;
   int fd, n;
   if (json_string(payload, "target", target, sizeof target, 1) < 0 ||
@@ -1604,13 +1634,17 @@ static int outgoing(int local, const char *payload, const char *own_socket,
     return -1;
   }
   wrapper_name(own_name, safe, sizeof safe);
+  if (escape_wrapper(esc, sizeof esc, message) < 0) {
+    local_result(local, "refused", "message encoding failed");
+    return -1;
+  }
   if (snprintf(address, sizeof address, "uds:%s", own_socket) >=
           (int)sizeof address ||
       snprintf(wrapped, sizeof wrapped,
                "<cross-session-message from=\"%s\"%s%s%s>\n%s\n"
                "</cross-session-message>",
                address, safe[0] ? " from-name=\"" : "", safe,
-               safe[0] ? "\"" : "", message) >= (int)sizeof wrapped ||
+               safe[0] ? "\"" : "", esc) >= (int)sizeof wrapped ||
       make_uuid(msgid) < 0 ||
       dch_json_quote(qmsg, sizeof qmsg, wrapped) == SIZE_MAX ||
       dch_json_quote(qid, sizeof qid, msgid) == SIZE_MAX ||
@@ -2034,8 +2068,9 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
    that Claude, -2 the write failed. */
 int dch_bridge_notify(long pid, const char *sid, const char *text) {
   struct peer p[128], *hit = NULL;
-  char wrapped[MESSAGE_MAX + 200], q[(MESSAGE_MAX + 200) * 6 + 3], msgid[37],
-      qsess[800], frame[FRAME_MAX + 1];
+  char wrapped[MESSAGE_MAX + 200 + MESSAGE_MAX / 22], msgid[37], qsess[800],
+      q[(MESSAGE_MAX + 200 + MESSAGE_MAX / 22) * 6 + 3], frame[FRAME_MAX + 1],
+      esc[ESCAPED_MAX(MESSAGE_MAX) + 1];
   int n = scan_peers(p, 128, 0), fd;
   for (int i = 0; i < n; i++)
     if (p[i].pid == pid && !strcmp(p[i].session_id, sid) &&
@@ -2043,10 +2078,12 @@ int dch_bridge_notify(long pid, const char *sid, const char *text) {
       hit = &p[i];
   if (!hit)
     return -1;
+  if (escape_wrapper(esc, sizeof esc, text) < 0)
+    return -2;
   if (snprintf(wrapped, sizeof wrapped,
                "<cross-session-message from-name=\"operator (dch xray)\">\n%s"
                "\n</cross-session-message>",
-               text) >= (int)sizeof wrapped ||
+               esc) >= (int)sizeof wrapped ||
       make_uuid(msgid) < 0 ||
       dch_json_quote(q, sizeof q, wrapped) == SIZE_MAX ||
       dch_json_quote(qsess, sizeof qsess, hit->session_id) == SIZE_MAX)

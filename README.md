@@ -4449,7 +4449,9 @@ sandbox does not need permission to run `ps`.
 An inbound message identifies its authenticated sender and includes the reply
 command before the untrusted content. `--agent-send` exits 0 once the frame is
 written to the peer; Claude sends no receipt for a message it accepts. Refused,
-ambiguous, and timed-out sends exit 1.
+ambiguous, and timed-out sends exit 1. A `<cross-session-message` or
+`</cross-session-message` tag inside the content (any case) is altered with a
+backslash after the `<`, so it cannot close or reopen the wrapper.
 
 The peer stays absent until Codex writes its shell snapshot and dch can bind
 the current session to exactly one snapshot UUID.
