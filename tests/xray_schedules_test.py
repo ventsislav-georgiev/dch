@@ -8,7 +8,7 @@ wake-up and Codex heartbeats as JSON lines, over fake transcripts only.
   - live from the running (fake) Claude; its History record after it exits,
     and a planted one: live false, pending rows "ended"
   - an ended Codex rollout: a heartbeat envelope's row; none: the warn
-  - a shell: source "none"; the usage errors; --follow --schedules exit 2
+  - a shell: source "none"; the usage errors
   - the tasks and memory headers carry "block" too
 
 Run:  python3 tests/xray_schedules_test.py    (uses ./dch; run.sh isolates)
@@ -374,9 +374,7 @@ def test_usage():
             (["--memory"], "--schedules and --memory"),
             (["--questions"], "--questions and --schedules"),
             (["--schedules"], "--schedules twice"),
-            (["--since", "1h"], "--since takes --json only"),
-            (["--follow"], "--schedules and --follow (it carries --tasks "
-                           "and --memory only)")):
+            (["--since", "1h"], "--since takes --json only")):
         r = dch("--xray", "xs-hist", "--schedules", *a, "--json")
         check("usage: --schedules with %s: exit 2" % a[0],
               r.returncode == 2 and r.stdout == "" and

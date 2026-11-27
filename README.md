@@ -425,7 +425,7 @@ dch --xray <n>                                  # the X-ray view: prompts, refs 
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
-dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
+dch --xray <n> --follow --tasks --memory --schedules --json # that stream with the task, memory and schedule blocks and their deltas
 dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] [--no-github] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
 dch --xray <n> --search <text> --scope all --json  # the same over every session with a corpus, hits grouped by session (project: <n>'s project only; no --json: text)
@@ -2461,9 +2461,9 @@ the host's dch does not know --tasks` (exit 1).
 
 `--schedules` takes no other flag but `--json` (`dch: bad usage:
 --schedules and --ref`, also `--search`, `--chapter`, `--clear`, `--tasks`,
-`--memory`), and is not in `--requests`. `--follow` does not carry it yet:
-`--follow --schedules` exits 2 (`dch: bad usage: --schedules and --follow
-…`), which a client can use as its version probe. A transcript that is gone
+`--memory`), and is not in `--requests`. `--follow` carries it (see
+**Schedules in the stream** below; a dch before #686 exits 2 there). A
+transcript that is gone
 says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that host's
 `dch serve`.
 
@@ -2800,6 +2800,29 @@ which a client can use as its version probe.
   first answer, as at the start; the answer replaces it when it lands,
   whole when its header differs, else as row deltas. One still running
   when the follow ends, or is signalled, is stopped with it.
+
+**Schedules in the stream.** `--schedules` joins the same stream (#686),
+alone or with `--tasks` and `--memory`. A dch before this exits 2 with
+`dch: bad usage: --schedules and --follow …`, which a client can use as
+its version probe.
+- After every snapshot, after the tasks and memory blocks: the
+  `--schedules` lines, the block whole, in the one-shot shape
+  (`"block":"schedules"`). Then, in the same batches, the rows that move,
+  by the tasks rules above: `{"schedule":{…}}` a new or changed row,
+  `{"schedule":{"id":…,"gone":true}}` one that left (only past the 5000
+  cap), its `done` line when it changes, and the whole block again when
+  its header changes or its rows' order does. Its rows come from the
+  follow's own read of the transcript; it has no command and no timer.
+- The session's Claude (or Codex) leaving: the master wakes the follow,
+  which sends `reset` `rotated` and the shell's snapshot, then this block
+  again, whole: the agent's rows with `"live":false`, its pending crons and
+  wake-up `ended` (as the one-shot after the agent exits). The session
+  ending sends the block once more the same way, as the stream's last
+  lines, before exit 0. A Claude started again gets its own live block
+  after its snapshot.
+- Time sends nothing: a recurring cron passing its 7 days (`expired`), a
+  `next` that passes. A client counts down from `next` and turns a row
+  expired at `expires` itself; a later batch's block agrees.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
@@ -3865,7 +3888,7 @@ for a local session named that way.
 | `--stop` | `--stop <n>... --json` | 660 s |
 | `--say` | `--say <n> --json -- <text>` | 660 s |
 | `--xray` | `--xray <n> --json [--clear \| --chapter <anchor>]` | 60 s |
-| `--xray` | `--xray <n> --json --follow [--tasks] [--memory]` (no cap either) | none |
+| `--xray` | `--xray <n> --json --follow [--tasks] [--memory] [--schedules]` (no cap either) | none |
 | `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] [--no-github] --json` | 60 s |
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |

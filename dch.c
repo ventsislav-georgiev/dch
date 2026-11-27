@@ -3041,11 +3041,12 @@ usage(void)
 	    "  dch --xray <n> [--clear] --json            a session's chapters as\n"
 	    "                                             one JSON object; --clear\n"
 	    "                                             empties a shell's ring\n"
-	    "  dch --xray <n> --follow [--tasks] [--memory] --json\n"
+	    "  dch --xray <n> --follow [--tasks] [--memory] [--schedules] --json\n"
 	    "                                             that object, then its\n"
 	    "                                             deltas as NDJSON; with\n"
-	    "                                             the task and memory\n"
-	    "                                             blocks and their deltas\n"
+	    "                                             the task, memory and\n"
+	    "                                             schedule blocks and\n"
+	    "                                             their deltas\n"
 	    "  dch --xray <n> --ref <ref>|- [--scope session|project|all] [--full]\n"
 	    "       [--budget-ms <ms>] [--no-github] --json\n"
 	    "                                             one ref's mentions and\n"
@@ -16029,12 +16030,18 @@ struct xf
 	const char *why;	/* XF_RESET's reason, for the next snapshot */
 	unsigned long woke, timed;	/* 9.5's no-timer seam */
 	/* --tasks, --memory (#446): blocks [0] and [1], whole after each
-	** snapshot, then a row's line when it moves */
-	int tasks, memory;
+	** snapshot, then a row's line when it moves; --schedules (#686): block
+	** [2] the same way, built in only (no command) */
+	int tasks, memory, schedules;
 	int cmd[2];		/* tasks_command, memory_command set */
-	char *blk[2];		/* the block last written */
-	char *cmdout[2];	/* the command's last answer, NULL: built in */
-	char warn[2][XCMD_WARN_MAX];
+	char *blk[3];		/* the block last written */
+	char *cmdout[3];	/* the command's last answer, NULL: built in */
+	char warn[3][XCMD_WARN_MAX];
+	/* the Claude (or Codex) that left: its schedules, printed not live
+	** in the shell the stream resets to (#686); NULL none */
+	struct xr_scheds *sc_gone;
+	char sid_gone[64];
+	int capped_gone, dead;	/* dead: the session ended, its last block */
 	long long at[2];	/* the command's next run; [1] the listing's */
 	long tms;		/* the tasks command's cadence: doubled per same
 				** answer up to 6x xf_tasks_ms (#532), 0 unset */
@@ -16492,7 +16499,7 @@ xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 	f->last = xr_now_ms();
 	dch_trace("xray follow: snapshot%s%s keys=%zu", reset ? " after " : "",
 	          reset ? reset : "", a->refs ? xr_index_keys(a->refs) : 0);
-	return (f->tasks || f->memory) && xf_blocks(f, 1);
+	return (f->tasks || f->memory || f->schedules) && xf_blocks(f, 1);
 }
 
 static int
@@ -16552,6 +16559,7 @@ struct xf_cl
 	int claudes;			/* the live Claudes it runs among (#314) */
 	struct xr_tasks *tk, *tk2;	/* --tasks: d's, d2's (#446) */
 	struct xm_live *xm, *xm2;	/* --memory: d's, d2's */
+	struct xr_scheds *sc, *sc2;	/* --schedules: d's, d2's (#686) */
 };
 
 /* ---- --tasks, --memory (#446): blocks [0] and [1] ---- */
@@ -16744,7 +16752,15 @@ xf_blk_text(struct xf *f, int b)
 		return strdup(f->cmdout[b]);
 	if (!(m = open_memstream(&t, &n)))
 		return NULL;
-	if (b)
+	/* live: the Claude followed now; one that left, or the session's end,
+	** prints its pending rows ended (#686) */
+	if (b == 2)
+		(void)xr_scheds_print(m, f->cl ? f->cl->sc : f->sc_gone,
+		                      f->t->name, f->cl || !f->sc_gone ? f->sid
+		                      : f->sid_gone, f->cl ? capped
+		                      : f->capped_gone, NULL, f->cl && !f->dead,
+		                      (long long)time(NULL));
+	else if (b)
 	{
 		(void)xm_live_print(m, f->cl ? f->cl->xm : NULL, capped,
 		                    f->warn[1]);
@@ -16849,7 +16865,8 @@ xf_rows(const char *text, size_t pre, struct xf_row **sorted, size_t *n)
 static int
 xf_row_deltas(const char *old, const char *now, int b)
 {
-	const char *kind = b ? "memory" : "task", *at = NULL, *od, *dn;
+	const char *kind = b == 2 ? "schedule" : b ? "memory" : "task", *at = NULL,
+	           *od, *dn;
 	size_t pre = strlen(kind) + 10, no, nn, k;	/* {"kind":{"id": */
 	struct xf_row *ov, *os, *nv, *ns, *h;
 	int rc = -1, added = 0;
@@ -16931,7 +16948,7 @@ xf_blk(struct xf *f, int b, int all)
 /* After a snapshot (all): both blocks whole now, a command's last answer
 ** or the built-in one (none yet), then its run as a job whose answer
 ** comes whole when it lands (#468). After a batch: a built-in block's
-** moved rows (the tasks every batch;
+** moved rows (the tasks and schedules every batch;
 ** shortcut: the whole list printed to diff it, upgrade with a change
 ** count in xr_tasks if lists of thousands show in the CPU). */
 static int
@@ -16939,8 +16956,14 @@ xf_blocks(struct xf *f, int all)
 {
 	int b;
 
-	for (b = 0; b < 2; b++)
+	for (b = 0; b < 3; b++)
 	{
+		if (b == 2)	/* --schedules: no command, no timer (#686) */
+		{
+			if (f->schedules && xf_blk(f, b, all))
+				return 1;
+			continue;
+		}
 		if (!(b ? f->memory : f->tasks) || (!all && f->cmdout[b]))
 			continue;
 		if (all && !f->cmd[b])
@@ -17019,7 +17042,8 @@ xf_side(struct xf *f)
 ** NULL: no transcript yet, the memory block's instruction files only) */
 static int
 xf_cl_sinks(const struct xf *f, const struct xf_cl *s, struct xr_claude *d,
-            struct xr_tasks **tk, struct xm_live **xm)
+            struct xr_tasks **tk, struct xm_live **xm,
+            struct xr_scheds **sc)
 {
 	struct xm_req q;
 
@@ -17028,6 +17052,12 @@ xf_cl_sinks(const struct xf *f, const struct xf_cl *s, struct xr_claude *d,
 		if (!(*tk = xr_tasks_new()))
 			return -1;
 		xr_claude_tasks(d, *tk, s->ino);
+	}
+	if (f->schedules && d)
+	{
+		if (!(*sc = xr_scheds_new()))
+			return -1;
+		xr_claude_scheds(d, *sc, s->ino);
 	}
 	if (!f->memory)
 		return 0;
@@ -17054,16 +17084,18 @@ xf_cl_load(const struct xf *f, struct xf_cl *s, uint64_t size, uint64_t win)
 	xr_index_free(s->ix);
 	xr_tasks_free(s->tk);
 	xm_live_free(s->xm);
+	xr_scheds_free(s->sc);
 	s->ix = NULL;
 	s->tk = NULL;
 	s->xm = NULL;
+	s->sc = NULL;
 	if (!(s->d = xr_claude_new()) || !(s->ix = xr_index_new()))
 		return -1;
 	if (s->cx)
 		xr_claude_codex(s->d);
 	xr_index_sink(s->ix, &k);
 	xr_claude_refs(s->d, &k, s->ino, NULL, NULL);
-	if (xf_cl_sinks(f, s, s->d, &s->tk, &s->xm) < 0)
+	if (xf_cl_sinks(f, s, s->d, &s->tk, &s->xm, &s->sc) < 0)
 		return -1;
 	if (!win)
 		return xr_claude_read(s->d, s->fd, size, &s->capped);
@@ -17089,12 +17121,15 @@ xf_cl_free(struct xf_cl *s)
 	xr_tasks_free(s->tk2);
 	xm_live_free(s->xm);
 	xm_live_free(s->xm2);
+	xr_scheds_free(s->sc);
+	xr_scheds_free(s->sc2);
 	if (s->fd >= 0)
 		close(s->fd);
 	s->d = s->d2 = NULL;
 	s->ix = s->ix2 = NULL;
 	s->tk = s->tk2 = NULL;
 	s->xm = s->xm2 = NULL;
+	s->sc = s->sc2 = NULL;
 	s->fd = -1;
 }
 
@@ -17242,12 +17277,14 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 	struct stat st;
 	char dir[2048] = "", kd[2048];
 	const char *h;
-	int rc = 0, ev, r, rot;
+	int rc = 0, ev, r, rot, ended = 0;
 	long ms;
 	uint64_t size = 0;	/* the transcript's at its open */
 
 	memset(&s, 0, sizeof s);
 	s.fd = -1;
+	xr_scheds_free(f->sc_gone);	/* a Claude again: its block is live */
+	f->sc_gone = NULL;
 	f->cl = &s;
 	f->sid = s.sid;
 	f->agent = x ? "codex" : "claude";
@@ -17322,7 +17359,7 @@ read:
 		f->why = "full";
 	}
 	if (s.fd >= 0 ? xf_cl_load(f, &s, size, 0) < 0
-	              : xf_cl_sinks(f, &s, NULL, &s.tk, &s.xm) < 0)
+	              : xf_cl_sinks(f, &s, NULL, &s.tk, &s.xm, &s.sc) < 0)
 	{
 		xf_cl_free(&s);
 		return xr_failed();
@@ -17345,7 +17382,7 @@ read:
 	{
 		xr_index_sink(s.ix2, &k);
 		xr_claude_refs(s.d2, &k, s.ino, xf_slice, NULL);
-		if (xf_cl_sinks(f, &s, s.d2, &s.tk2, &s.xm2) < 0)
+		if (xf_cl_sinks(f, &s, s.d2, &s.tk2, &s.xm2, &s.sc2) < 0)
 		{
 			xf_cl_free(&s);
 			return xr_failed();
@@ -17400,6 +17437,7 @@ read:
 			           xf_drain(f) < 0)))
 			{
 				rc = xf_lost(f);
+				ended = !rc;
 				break;
 			}
 			if (r)
@@ -17430,7 +17468,10 @@ read:
 			int was = s.claudes;
 
 			if ((r = xf_cl_same(t, &s)) < 0)
+			{
+				ended = 1;
 				break;
+			}
 			if (r)
 			{
 				f->why = "rotated";
@@ -17515,14 +17556,17 @@ read:
 				xr_index_free(s.ix);
 				xr_tasks_free(s.tk);
 				xm_live_free(s.xm);
+				xr_scheds_free(s.sc);
 				s.d = s.d2;
 				s.ix = s.ix2;
 				s.tk = s.tk2;
 				s.xm = s.xm2;
+				s.sc = s.sc2;
 				s.d2 = NULL;
 				s.ix2 = NULL;
 				s.tk2 = NULL;
 				s.xm2 = NULL;
+				s.sc2 = NULL;
 				s.capped = 0;
 				xr_index_sink(s.ix, &k);
 				xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
@@ -17541,6 +17585,22 @@ read:
 			rc = f->rc;
 			break;
 		}
+	}
+	/* --schedules (#686): the Claude left (the master's wake, then
+	** xf_cl_same: a reset) or the session ended; its block not live, so
+	** pending rows read ended, in the shell's snapshot or as the last line */
+	if (rc == XF_RESET && s.sc)
+	{
+		f->sc_gone = s.sc;
+		s.sc = NULL;
+		snprintf(f->sid_gone, sizeof f->sid_gone, "%s", s.sid);
+		f->capped_gone = s.capped;
+	}
+	else if (ended && f->schedules)
+	{
+		f->dead = 1;
+		if (xf_blk(f, 2, 1))
+			rc = f->rc;
 	}
 	xf_cl_free(&s);
 	f->cl = NULL;
@@ -17820,21 +17880,24 @@ out:
 /* --follow (3.3): a History session's snapshot and exit 0; a live one's,
 ** then its deltas until it ends or the reader leaves. */
 static int
-xr_follow(const struct xr_target *t, int tasks, int memory)
+xr_follow(const struct xr_target *t, int tasks, int memory, int schedules)
 {
 	struct xf f;
 	char cmd[1024];
 	int rc, first = 1;
 
-	/* an ended session: --tasks' and --memory's one-shot blocks after it */
+	/* an ended session: --tasks', --memory's and --schedules' one-shot
+	** blocks after it */
 	if (t->kind == XR_ENDED)
 		return (rc = xr_json(t, NULL, 1)) != 0 ? rc
 		       : tasks && (rc = xr_tasks_q(t)) != 0 ? rc
-		       : memory ? xr_memory(t) : 0;
+		       : memory && (rc = xr_memory(t)) != 0 ? rc
+		       : schedules ? xr_list_q(t, XCMD_TASK, 1) : 0;
 	memset(&f, 0, sizeof f);
 	f.t = t;
 	f.tasks = tasks;
 	f.memory = memory;
+	f.schedules = schedules;
 	f.cmd[0] = tasks && dch_config_get("tasks_command", cmd, sizeof cmd) > 0
 	           && cmd[0];
 	f.cmd[1] = memory &&
@@ -17896,11 +17959,12 @@ xr_follow(const struct xr_target *t, int tasks, int memory)
 	dch_trace("xray follow: end rc=%d woke=%lu deadlines=%lu", rc, f.woke,
 	          f.timed);
 	xr_sent_free(f.sent);
-	for (first = 0; first < 2; first++)
+	for (first = 0; first < 3; first++)
 	{
 		free(f.blk[first]);
 		free(f.cmdout[first]);
 	}
+	xr_scheds_free(f.sc_gone);
 	return rc;
 }
 
@@ -18182,15 +18246,14 @@ xray_main(int argc, char **argv)
 	/* --questions (#652): one-shot only; --follow carries no questions
 	** block (shortcut: a client polls; upgrade with a block [2] in xr_follow
 	** when one needs the stream) */
-	/* --schedules (#685): one-shot here; its refusal of --follow is the
-	** version probe until the stream carries it (#686) */
-	if (schedules && (ref || search || chapter || clear || tasks || memory ||
-	                  follow))
+	/* --schedules (#685): one-shot, or --follow's block [2] beside --tasks
+	** and --memory (#686: a dch before it refuses --follow, the probe) */
+	if (schedules && (ref || search || chapter || clear ||
+	                  (!follow && (tasks || memory))))
 	{
 		fprintf(stderr, "dch: bad usage: --schedules and %s\n",
 		        ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
-		        : clear ? "--clear" : tasks ? "--tasks" : memory ? "--memory"
-		        : "--follow (it carries --tasks and --memory only)");
+		        : clear ? "--clear" : tasks ? "--tasks" : "--memory");
 		return 2;
 	}
 	if (questions && (ref || search || chapter || clear || tasks || memory ||
@@ -18200,7 +18263,8 @@ xray_main(int argc, char **argv)
 		        ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
 		        : clear ? "--clear" : tasks ? "--tasks" : memory ? "--memory"
 		        : schedules ? "--schedules"
-		        : "--follow (it carries --tasks and --memory only)");
+		        : "--follow (it carries --tasks, --memory and --schedules "
+		          "only)");
 		return 2;
 	}
 	if (follow && (ref || clear))
@@ -18372,7 +18436,7 @@ xray_main(int argc, char **argv)
 	nr = history_load(&r);
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)
-		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t, tasks, memory)
+		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t, tasks, memory, schedules)
 		     : chapter ? xr_chapter(&t, chapter)
 		     : tasks ? xr_tasks_q(&t)
 		     : questions ? xr_list_q(&t, XCMD_QUESTION, 0)

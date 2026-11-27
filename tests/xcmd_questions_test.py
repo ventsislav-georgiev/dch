@@ -226,8 +226,8 @@ for k in range(50001):
     for extra, name in ((["--tasks"], "--tasks"), (["--memory"], "--memory"),
                         (["--ref", "#1"], "--ref"),
                         (["--chapter", "a:0"], "--chapter"),
-                        (["--follow"], "--follow (it carries --tasks and "
-                                       "--memory only)")):
+                        (["--follow"], "--follow (it carries --tasks, "
+                                       "--memory and --schedules only)")):
         rc, out, ls, err = qs(*extra)
         check("--questions with %s: exit 2" % extra[0],
               rc == 2 and out == "" and

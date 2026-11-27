@@ -665,8 +665,8 @@ xray_since(const char *s, long long now)
 ** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
 ** (#322), --questions (#652), --schedules (#685), --since <time> (#516)
 ** and --clear, but
-** --follow takes --tasks and
-** --memory (#446);
+** --follow takes --tasks,
+** --memory (#446) and --schedules (#686);
 ** --scope with --ref or --search (#501), --full
 ** and --budget-ms only with --ref, as --no-github (#518). A value is the next element even when it
 ** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
@@ -724,8 +724,8 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	}
 	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
 	              X_TASKS | X_MEMORY | X_SINCE | X_QUESTIONS | X_SCHEDULES);
-	if (seen & X_FOLLOW)	/* the stream carries them (#446) */
-		one &= ~(unsigned)(X_TASKS | X_MEMORY);
+	if (seen & X_FOLLOW)	/* the stream carries them (#446, #686) */
+		one &= ~(unsigned)(X_TASKS | X_MEMORY | X_SCHEDULES);
 	if (!(seen & X_JSON))
 		return ctl_no(why, cap, "--xray needs --json (the view is "
 		              "client-side only)");

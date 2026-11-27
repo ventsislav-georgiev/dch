@@ -1384,6 +1384,7 @@ pyrun "xray: an ended Codex's rollout via History, .jsonl.zst too" xray_codex_en
 pyrun "xray --memory: memories, instruction files, Claude, Codex, serve" xray_memory_test.py
 # --schedules (#685): crons, the /loop wake-up, Codex heartbeats; live, ended
 pyrun "xray --schedules: crons, wake-up, heartbeats, live and ended (#685)" xray_schedules_test.py
+pyrun "xray --follow --schedules: block [2], ended when the Claude leaves (#686)" xray_follow_schedules_test.py
 # the file window's guard (#178): QA's repro with FAKE files, local and over
 # a loopback dch serve, through ended sessions so lite runs it too
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
