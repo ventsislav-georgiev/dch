@@ -152,6 +152,15 @@ group = Review = -review$
 group = Sidekicks = -qa
 ```
 
+An optional `group_color = <name> = #rrggbb` line colours that group's tab
+(its name and count): the name is matched to a group ignoring case, the
+colour is `#` and exactly six hex digits, and an unknown name or any other
+colour is ignored; for a repeated name the last line wins. It is drawn as
+24-bit colour on truecolor terminals (`COLORTERM`), as the nearest of the
+256 colours on those, as the nearest of the eight ANSI colours on a basic
+one, and not at all with `NO_COLOR` or `TERM=dumb`; the selected tab stays
+bold on its tint.
+
 **History** holds the ended sessions of `--history`, one row
 per session name (its newest record, pinned when any record of the name is):
 every pinned name, then the newest other names while there are fewer than 50
@@ -952,6 +961,7 @@ running sessions.
 | `auto_allow` | `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`): the master answers Claude Code's plain permission prompts, see [Auto-allow](#auto-allow) | `false` |
 | `sidekick_pattern` | a string, read by the session picker as its one group, Sidekicks, when the file has no `group` line; empty: no group | `-qa` |
 | `group` | `<name> = <regex>`, repeated, one per session group in tab order, at most 8 (see [The session picker](#the-session-picker)); not set by `dch --config`, which keeps these lines as they are | none |
+| `group_color` | `<name> = #rrggbb`, repeated: the colour of that group's tab, read by the picker (see [The session picker](#the-session-picker)); not set by `dch --config`, which keeps these lines as they are | none |
 | `picker_sort` | `activity` or `name`: the session picker's sort, also set by its `s` key | `activity` |
 | `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |

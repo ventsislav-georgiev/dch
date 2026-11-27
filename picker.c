@@ -1316,26 +1316,101 @@ pk_cfrow(int k, int sel)
 }
 #endif
 
+/* The SGR foreground for "#rrggbb" at this frame's colour level (#715):
+** truecolor as is, 256 the nearest cube or grey-ramp entry, basic the
+** nearest of the eight ANSI colours; "" without colour or a valid hex. */
+static const char *
+pk_hexsgr(const char *hex, char *b, size_t cap)
+{
+	static const int lv[6] = { 0, 95, 135, 175, 215, 255 };
+	unsigned c[3];
+	int i, j, best = 0, bd = 1 << 30, d, q[3];
+
+	if (!pk_color || !hex || !*hex || sscanf(hex, "#%2x%2x%2x", c, c + 1,
+	    c + 2) != 3)
+		return "";
+	if (pk_color == 3)
+		snprintf(b, cap, "38;2;%u;%u;%u", c[0], c[1], c[2]);
+	else if (pk_color == 2)
+	{
+		for (i = 0; i < 3; i++)	/* nearest cube level per channel */
+		{
+			for (q[i] = 0, j = 1; j < 6; j++)
+				if (abs((int)c[i] - lv[j]) <
+				    abs((int)c[i] - lv[q[i]]))
+					q[i] = j;
+		}
+		for (bd = 0, i = 0; i < 3; i++)
+			bd += ((int)c[i] - lv[q[i]]) * ((int)c[i] - lv[q[i]]);
+		best = 16 + 36 * q[0] + 6 * q[1] + q[2];
+		for (j = 0; j < 24; j++)	/* the grey ramp 232-255 */
+		{
+			int g = 8 + 10 * j;
+
+			d = 0;
+			for (i = 0; i < 3; i++)
+				d += ((int)c[i] - g) * ((int)c[i] - g);
+			if (d < bd)
+			{
+				bd = d;
+				best = 232 + j;
+			}
+		}
+		snprintf(b, cap, "38;5;%d", best);
+	}
+	else
+	{
+		for (j = 0; j < 8; j++)	/* ANSI: bit 0 red, 1 green, 2 blue */
+		{
+			d = 0;
+			for (i = 0; i < 3; i++)
+			{
+				int v = (j >> i & 1) ? 205 : 0;
+
+				d += ((int)c[i] - v) * ((int)c[i] - v);
+			}
+			if (d < bd)
+			{
+				bd = d;
+				best = j;
+			}
+		}
+		snprintf(b, cap, "3%d", best);
+	}
+	return b;
+}
+
 /* A segment of the tab bar: the active one in the accent on a tint (in
 ** brackets without colour), its count faint. */
 void
 pk_tab(const char *name, int n, int on)
 {
-	char b[24];
+	pk_tabc(name, n, on, NULL);
+}
 
+/* pk_tab with a group's "#rrggbb" for the name and count (the active tab
+** keeps its bold and tint, the colour replacing the accent). */
+void
+pk_tabc(const char *name, int n, int on, const char *hex)
+{
+	char b[24], c[24], a[40], f[40];
+	const char *g = pk_hexsgr(hex, c, sizeof c);
+
+	snprintf(a, sizeof a, "%s%s", on && *g ? "1;" : "", g);
+	snprintf(f, sizeof f, "2%s%s", *g ? ";" : "", g);
 	if (pk_col)
 		pk_txt(" ");
 	pk_bg = on ? PK_P(PK_CHIP) : "";
-	pk_set(on ? PK_P(PK_ACCB) : "");
+	pk_set(*g ? a : on ? PK_P(PK_ACCB) : "");
 	pk_txt(on && !pk_color ? "[" : " ");
 	pk_txt(name);
 	if (n >= 0)
 	{
 		snprintf(b, sizeof b, " %d", n);
-		pk_set("2");
+		pk_set(f);
 		pk_txt(b);
 	}
-	pk_set(on ? PK_P(PK_ACCB) : "");
+	pk_set(*g ? a : on ? PK_P(PK_ACCB) : "");
 	pk_txt(on && !pk_color ? "]" : " ");
 	pk_bg = "";
 	pk_set("");
@@ -1490,8 +1565,9 @@ pk_tabs(const struct pk *p)
 			** right marker's cell (QA 1.131.0 NIT-VG1) */
 			if (t == p->tab && t < last)
 				pk_w--;
-			pk_tab(pk_tname(p, t), pk_pos(p, t, p->n[t]),
-			       t == p->tab);
+			pk_tabc(pk_tname(p, t), pk_pos(p, t, p->n[t]),
+			        t == p->tab, t >= 1 && t <= PK_GMAX
+			        ? p->gcol[t - 1] : NULL);
 			if (t == p->tab && t < last)
 				pk_w++;
 			e = t;

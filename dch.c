@@ -11155,7 +11155,7 @@ pk_on_winch(int sig)
 ** regex (mode 1) or as text, ignoring case (mode 2). */
 struct pkgrp
 {
-	char name[33], pat[256];
+	char name[33], pat[256], col[8];	/* col: "#rrggbb" or "" */
 	regex_t re;
 	int mode;
 };
@@ -11199,6 +11199,37 @@ pk_group(void *arg, const char *v)
 	memcpy(gs->g[gs->n].name, v, nl);
 	gs->g[gs->n].name[nl] = '\0';
 	snprintf(gs->g[gs->n++].pat, sizeof gs->g->pat, "%s", r);
+}
+
+/* A `group_color = <name> = #rrggbb` line (#715): the colour of the named
+** group's tab, the name matched ignoring case; anything else is ignored,
+** the last line for a name wins. */
+static void
+pk_group_color(void *arg, const char *v)
+{
+	struct pkgrps *gs = arg;
+	const char *eq = v ? strchr(v, '=') : NULL, *r;
+	size_t nl, k;
+
+	if (!eq)
+		return;
+	for (nl = (size_t)(eq - v); nl && (v[nl - 1] == ' ' ||
+	     v[nl - 1] == '\t'); nl--)
+		;
+	for (r = eq + 1; *r == ' ' || *r == '\t'; r++)
+		;
+	if (strlen(r) != 7 && !(strlen(r) > 7 && strspn(r + 7, " \t") ==
+	    strlen(r + 7)))
+		return;
+	if (r[0] != '#' || strspn(r + 1, "0123456789abcdefABCDEF") < 6)
+		return;
+	for (k = 0; k < (size_t)gs->n; k++)
+		if (strlen(gs->g[k].name) == nl &&
+		    !strncasecmp(gs->g[k].name, v, nl))
+		{
+			memcpy(gs->g[k].col, r, 7);
+			gs->g[k].col[7] = '\0';
+		}
 }
 
 /* Is regex p too big to compile? glibc's regcomp copies an atom per `+`
@@ -11301,6 +11332,7 @@ pk_groups(struct pkgrps *gs)
 		                     sizeof gs->g->pat);
 		gs->n = gs->g->pat[0] != '\0';
 	}
+	config_each("group_color", pk_group_color, gs);
 	for (k = 0; k < gs->n; k++)
 	{
 		g = &gs->g[k];
@@ -11496,6 +11528,9 @@ pk_load(struct pk *p)
 	for (g = 0; g < PK_GMAX; g++)
 		snprintf(p->gname[g], sizeof p->gname[g], "%s",
 		         g < gs.n ? gs.g[g].name : "");
+	for (g = 0; g < PK_GMAX; g++)
+		snprintf(p->gcol[g], sizeof p->gcol[g], "%s",
+		         g < gs.n ? gs.g[g].col : "");
 	list_sessions(&sl);
 	load_aliases(&sl);
 	load_harness_names(&sl);
