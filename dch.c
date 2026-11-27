@@ -15522,16 +15522,18 @@ xr_tasks_none(const char *session, const char *sid, const char *warn)
 
 /* A looked-up transcript (codex: a rollout), read as --json reads it, its
 ** task records gathered on the way; live >= 0: its schedules instead
-** (#685), live the session's Claude running. */
+** (#685), live the session's Claude running; cwd: the session's, for a
+** durable cron's .claude/scheduled_tasks.json (#689), NULL none. */
 static int
 xr_tasks_file(const char *path, const struct stat *st, int codex,
               const char *sid, const char *session, const char *warn,
-              int live)
+              int live, const char *cwd)
 {
 	struct xr_tasks *tk = NULL;
 	struct xr_scheds *sc = NULL;
 	struct xr_claude *d = NULL;
 	int fd, capped = 0, rc = -1;
+	char dw[128] = "";
 
 	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
 		return errno == EACCES || errno == EPERM || errno == EIO
@@ -15549,11 +15551,13 @@ xr_tasks_file(const char *path, const struct stat *st, int codex,
 	}
 	close(fd);
 	xr_claude_free(d);
+	if (sc && rc >= 0 && !codex)
+		xr_scheds_durable(sc, cwd, dw, sizeof dw);
 	rc = rc < 0 ? xr_failed()
 	     : xr_out_exit((tk ? xr_tasks_print(stdout, tk, session, sid, capped,
 	                                        warn, "tasks")
 	                    : xr_scheds_print(stdout, sc, session, sid, capped,
-	                                      warn, live,
+	                                      warn && warn[0] ? warn : dw, live,
 	                                      (long long)time(NULL))) == 0);
 	xr_tasks_free(tk);
 	xr_scheds_free(sc);
@@ -15562,7 +15566,7 @@ xr_tasks_file(const char *path, const struct stat *st, int codex,
 
 static int
 xr_tasks_claude(const char *cfg, const char *sid, const char *session,
-                const char *warn, int live)
+                const char *warn, int live, const char *cwd)
 {
 	char path[2048], home[1400], project[1200];
 	struct stat st;
@@ -15579,7 +15583,7 @@ xr_tasks_claude(const char *cfg, const char *sid, const char *session,
 	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
 	                     sizeof project) < 0)
 		return xr_tasks_none(session, sid, warn);
-	return xr_tasks_file(path, &st, 0, sid, session, warn, live);
+	return xr_tasks_file(path, &st, 0, sid, session, warn, live, cwd);
 }
 
 /* #321: a tasks_command's or memory_command's answer, printed as it
@@ -15858,7 +15862,7 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 			return xr_qs_none(t->name, xc.tid, warn);
 		return xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn,
-		                       sch ? 0 : -1)
+		                       sch ? 0 : -1, NULL)
 		       : xr_tasks_none(t->name, xc.tid, warn);
 	}
 	if (t->kind == XR_ENDED)
@@ -15872,7 +15876,8 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 		if (kind == XCMD_QUESTION)
 			return xr_qs_none(t->name, t->rec->sid, warn);
 		return t->rec->sid[0] ? xr_tasks_claude(t->rec->acfg, t->rec->sid,
-		                                        t->name, warn, sch ? 0 : -1)
+		                                        t->name, warn, sch ? 0 : -1,
+		                                        cwd)
 		       : xr_list_none(t->name, "", warn, sch);
 	}
 	if ((qc = cmd_query(t->sock, &ci)) == -4)
@@ -15895,7 +15900,7 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 			return xr_qs_none(t->name, c.sid, warn);
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn,
-		                                sch ? 1 : -1)
+		                                sch ? 1 : -1, cwd)
 		              : xr_tasks_none(t->name, c.sid, warn);
 	}
 	if (cx)
@@ -15910,7 +15915,7 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 		return cx > 0 && xr_cx_lookup(xc.home, xc.tid, path, sizeof path,
 		                              &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn,
-		                       sch ? 1 : -1)
+		                       sch ? 1 : -1, NULL)
 		       : xr_tasks_none(t->name, xc.tid, warn);
 	}
 	/* the ring's header for the session_id, as the other forms give it */

@@ -8361,6 +8361,127 @@ t_scheds(void)
 	}
 }
 
+/* #689: durable crons against <cwd>/.claude/scheduled_tasks.json */
+static char *
+sc_durable(const char *cwd, const char *body, char *warn, size_t cap)
+{
+	struct sc_feed f;
+	char p[PATH_MAX], *b = NULL;
+	size_t bl = 0;
+	FILE *m;
+
+	snprintf(p, sizeof p, "%s/.claude/scheduled_tasks.json", cwd);
+	if (body)
+	{
+		unlink(p);
+		if ((m = fopen(p, "w")))
+		{
+			fputs(body, m);
+			fclose(m);
+		}
+	}
+	sc_begin(&f, 0);
+	sc_feed(&f, SC_USE, 0, "d1", "CronCreate", "{\"cron\":\"* * * * *\","
+	        "\"prompt\":\"x\",\"recurring\":true,\"durable\":true}");
+	sc_feed(&f, SC_RES, 0, "{\"id\":\"dddd0001\",\"recurring\":true,"
+	        "\"durable\":true,\"nextFireAt\":1795767000000}", "d1", "");
+	sc_feed(&f, SC_USE, 0, "d2", "CronCreate", "{\"cron\":\"* * * * *\","
+	        "\"prompt\":\"y\",\"durable\":true}");
+	sc_feed(&f, SC_RES, 0, "{\"id\":\"dddd0002\",\"durable\":true}", "d2", "");
+	warn[0] = '\0';
+	xr_scheds_durable(f.s, cwd, warn, cap);
+	if ((m = open_memstream(&b, &bl)))
+	{
+		if (xr_scheds_print(m, f.s, "s", "id", 0, warn, 0, SC_T0) != 0)
+			fails++;
+		fclose(m);
+	}
+	xr_claude_free(f.d);
+	xr_scheds_free(f.s);
+	return b ? b : calloc(1, 1);
+}
+
+static void
+t_scheds_durable(void)
+{
+	char d[] = "/tmp/xray_dur.XXXXXX", p[PATH_MAX], q[PATH_MAX], w[128];
+	char *o, *big;
+	FILE *m;
+
+	if (!mkdtemp(d))
+	{
+		CHECK("durable: a temp dir", 0);
+		return;
+	}
+	snprintf(p, sizeof p, "%s/.claude", d);
+	mkdir(p, 0700);
+	o = sc_durable(d, NULL, w, sizeof w);
+	CHECK("durable: no file: the transcript's (pending, not live), no warn",
+	      sc_row(o, "dddd0001", "\"status\":\"pending\"",
+	             "\"durable\":true", NULL) &&
+	      sc_row(o, "dddd0002", "\"status\":\"pending\"", NULL) &&
+	      !strstr(o, "\"warn\""));
+	free(o);
+	o = sc_durable(d, "{\"tasks\":[{\"id\":\"dddd0001\",\"lastFiredAt\":"
+	               "1795767600000},{\"id\":\"ffff0009\"},7,{\"id\":3}]}",
+	               w, sizeof w);
+	CHECK("durable: listed: pending, its lastFiredAt, the past next "
+	      "cleared; not listed: ended; a file-only id: no row",
+	      sc_lines(o) == 2 &&
+	      sc_row(o, "dddd0001", "\"status\":\"pending\"", "\"next\":null",
+	             "\"last_fired\":\"2026-11-27T08:20:00Z\"", NULL) &&
+	      sc_row(o, "dddd0002", "\"status\":\"ended\"", NULL) &&
+	      !strstr(o, "ffff0009") && !strstr(o, "\"warn\""));
+	free(o);
+	o = sc_durable(d, "{\"tasks\":{}}", w, sizeof w);
+	CHECK("durable: malformed (tasks no list): unchanged, the warn",
+	      sc_row(o, "dddd0002", "\"status\":\"pending\"", NULL) &&
+	      strstr(o, "\"warn\":\".claude/scheduled_tasks.json: not readable "
+	             "JSON"));
+	free(o);
+	o = sc_durable(d, "{\"tasks\":[", w, sizeof w);
+	CHECK("durable: malformed (cut short): unchanged, the warn",
+	      sc_row(o, "dddd0001", "\"status\":\"pending\"", NULL) && w[0]);
+	free(o);
+	snprintf(q, sizeof q, "%s/other.json", d);
+	if ((m = fopen(q, "w")))
+	{
+		fputs("{\"tasks\":[]}", m);
+		fclose(m);
+	}
+	snprintf(p, sizeof p, "%s/.claude/scheduled_tasks.json", d);
+	unlink(p);
+	CHECK("durable: a symlink: refused, unchanged, no warn",
+	      symlink(q, p) == 0 &&
+	      (o = sc_durable(d, NULL, w, sizeof w)) &&
+	      sc_row(o, "dddd0001", "\"status\":\"pending\"", NULL) && !w[0]);
+	free(o);
+	unlink(p);
+	big = malloc((1 << 20) + 64);
+	if (big)
+	{
+		memset(big, ' ', (1 << 20) + 63);
+		memcpy(big, "{\"tasks\":[]}", 12);
+		big[(1 << 20) + 63] = '\0';
+	}
+	o = sc_durable(d, big, w, sizeof w);
+	CHECK("durable: over 1 MiB: refused, unchanged, no warn",
+	      big && sc_row(o, "dddd0002", "\"status\":\"pending\"", NULL) &&
+	      !w[0]);
+	free(o);
+	free(big);
+	o = sc_durable(d, "{\"tasks\":[]}", w, sizeof w);
+	CHECK("durable: an empty list: both ended",
+	      sc_row(o, "dddd0001", "\"status\":\"ended\"", NULL) &&
+	      sc_row(o, "dddd0002", "\"status\":\"ended\"", NULL));
+	free(o);
+	unlink(p);
+	unlink(q);
+	snprintf(p, sizeof p, "%s/.claude", d);
+	rmdir(p);
+	rmdir(d);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8427,6 +8548,7 @@ main(int argc, char **argv)
 	t_search();
 	t_tasks();
 	t_scheds();
+	t_scheds_durable();
 	t_anchors();
 	t_newest();
 	t_prefilter();

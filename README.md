@@ -2471,6 +2471,13 @@ the host's dch does not know --tasks` (exit 1).
   and every pending non-durable cron and the pending wake-up then read
   `ended`, with `next: null`. A cron Claude Code's newer carried-over list
   leaves out is `ended` too.
+- **Durable crons** (`durable:true`, #689) are checked against the
+  project's `.claude/scheduled_tasks.json` (the session's cwd): one the
+  file lists stays `pending` (live or not), with its `lastFiredAt` as
+  `last_fired`; one it no longer lists is `ended`; a job only the file
+  names is not added. An absent file, a symlink, a non-regular file or one
+  over 1 MiB leaves the transcript's answer; one that does not parse does
+  too, with a `warn` in the header.
 - **Order.** Pending crons by `next`, soonest first; the wake-up; the rest,
   newest change first.
 - **Codex.** The rollout's `<heartbeat>` envelopes (Codex app automations)

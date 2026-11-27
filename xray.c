@@ -17190,6 +17190,80 @@ sch_line(struct xr_claude *d, const struct json_parser *p)
 	free(t);
 }
 
+#define SCH_FILE_MAX (1L << 20)	/* Claude Code's own cap on the file */
+static const char *const A_LASTF[] = { "lastFiredAt", 0 };
+
+void
+xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
+{
+	char path[PATH_MAX], *buf = NULL, *id;
+	struct json_parser p;
+	struct stat st;
+	struct sch_row *r;
+	size_t k, n = 0;
+	ssize_t got = 0;
+	int fd, ts = -1, i, seen = 0;
+	long long t;
+
+	for (k = 0; s && k < s->n; k++)
+		seen |= s->v[k].durable && s->v[k].kind == SCK_CRON;
+	if (!seen || !cwd || cwd[0] != '/' ||
+	    snprintf(path, sizeof path, "%s/.claude/scheduled_tasks.json", cwd)
+	    >= (int)sizeof path ||
+	    (fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
+		return;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+	    st.st_size <= SCH_FILE_MAX && (buf = malloc((size_t)st.st_size + 1)))
+		while (n < (size_t)st.st_size &&
+		       (got = read(fd, buf + n, (size_t)st.st_size - n)) > 0)
+			n += (size_t)got;
+	close(fd);
+	if (!buf || got < 0)	/* refused or unreadable: the transcript's */
+	{
+		free(buf);
+		return;
+	}
+	buf[n] = '\0';
+	memset(&p, 0, sizeof p);
+	if (memchr(buf, '\0', n) || tokens_max(buf, n) > XR_LINE_TOKENS ||
+	    dch_json_parse(&p, buf) < 0 || p.tok[0].kind != JSON_OBJECT ||
+	    (ts = j_get(&p, 0, A_TASKS)) < 0 || p.tok[ts].kind != JSON_ARRAY)
+	{
+		snprintf(warn, cap, ".claude/scheduled_tasks.json: not readable "
+		         "JSON; durable rows are the transcript's");
+		dch_json_free(&p);
+		free(buf);
+		return;
+	}
+	/* a pending durable cron the file no longer lists is gone (a CronDelete
+	** the transcript shows made it deleted already); the file's jobs the
+	** transcript never names are not added: this block is one session's */
+	for (k = 0; k < s->n; k++)
+		if ((r = &s->v[k])->durable && r->kind == SCK_CRON &&
+		    r->status == SCS_PENDING)
+			r->status = SCS_ENDED;	/* no durable row was ended before */
+	for (i = ts + 1; i < p.tok[ts].next; i = p.tok[i].next)
+	{
+		if (p.tok[i].kind != JSON_OBJECT ||
+		    !(id = tk_id(&p, j_get(&p, i, A_ID))))
+			continue;
+		if ((r = sch_find(s, id)) && r->durable && r->kind == SCK_CRON &&
+		    r->status == SCS_ENDED)
+		{
+			r->status = SCS_PENDING;
+			if ((t = sch_time(&p, i, A_LASTF)) > r->last)
+			{
+				r->last = t;
+				if (r->next >= 0 && r->next <= t)
+					r->next = -1;	/* fired since: "next ~cron" */
+			}
+		}
+		free(id);
+	}
+	dch_json_free(&p);
+	free(buf);
+}
+
 /* the status as of now: a recurring cron past its age is expired; a pending
 ** session one is ended when its Claude is not live */
 static int

@@ -735,6 +735,14 @@ struct xr_scheds;
 struct xr_scheds *xr_scheds_new(void);
 void xr_scheds_free(struct xr_scheds *s);
 void xr_claude_scheds(struct xr_claude *d, struct xr_scheds *s, uint64_t ino);
+/* #689, after the read: when a durable:true cron was seen, its state from
+** <cwd>/.claude/scheduled_tasks.json (Claude Code's {"tasks":[{"id",
+** "lastFiredAt",...}]}): listed, a pending one stays pending with its
+** lastFiredAt; not listed, ended. Opened O_NOFOLLOW, a regular file of at
+** most 1 MiB, else (or absent, unreadable) nothing changes; not parsable: a
+** warn in warn[cap], nothing changes. */
+void xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn,
+                       size_t cap);
 /* JSON lines: {"schema":1,"block":"schedules","session","session_id",
 ** "source","live","title",
 ** "partial"[,"warn"]}, one {"schedule":{"id","kind","status","recurring",
