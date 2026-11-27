@@ -1756,7 +1756,8 @@ def test_search():
 TSID = "11111111-2222-4333-8444-5555555555c1"
 TSID2 = "11111111-2222-4333-8444-5555555555c2"
 TSID3 = "11111111-2222-4333-8444-5555555555c3"
-TK_HEAD = ["schema", "session", "session_id", "source", "title", "partial"]
+TK_HEAD = ["schema", "block", "session", "session_id", "source", "title",
+           "partial"]
 TK_KEYS = ["id", "title", "status", "label", "active", "note", "created",
            "updated", "chapter", "created_chapter", "blocked_by", "url",
            "group"]

@@ -6528,6 +6528,7 @@ struct xr_claude
 				** each as a step) */
 	int late;		/* #300: --chapter's late results: decode only
 				** the lines late_line picks */	struct xr_tasks *tk;	/* --tasks (#319), else NULL */
+	struct xr_scheds *sc;	/* --schedules (#684), else NULL */
 	xr_call_fn call;	/* --memory (#322): each main-thread call */
 	void *cctx;
 	uint64_t mlo, mhi, end;	/* #301: --ref past the range, the middle no
@@ -9426,6 +9427,7 @@ cx_line(struct xr_claude *d, const struct json_parser *p)
 }
 
 static void tk_line(struct xr_claude *d, const struct json_parser *p);
+static void sch_line(struct xr_claude *d, const struct json_parser *p);
 
 void
 xr_claude_line(struct xr_claude *d, const char *line, size_t len,
@@ -9461,6 +9463,8 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 		cx_line(d, &p);
 		if (d->tk)
 			tk_line(d, &p);
+		if (d->sc)
+			sch_line(d, &p);
 		dch_json_free(&p);
 		return;
 	}
@@ -9541,6 +9545,9 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	/* after the decode: the line's own chapter is the open one */
 	if (d->tk && !ag)
 		tk_line(d, &p);
+	/* after noise_sub: scheduled_task_fire is noise to the view, not here */
+	if (d->sc && !ag)
+		sch_line(d, &p);
 	free(type);
 	free(agent);
 	dch_json_free(&p);
@@ -16411,12 +16418,12 @@ tk_iso(FILE *f, long long at)
 }
 
 static void
-tk_anchor(FILE *f, const struct xr_tasks *t, uint64_t off)
+tk_anchor(FILE *f, uint64_t ino, uint64_t off)
 {
 	if (off == TK_NOCH)
 		fputs("null", f);
 	else
-		fprintf(f, "\"f%llx:%llu\"", (unsigned long long)t->ino,
+		fprintf(f, "\"f%llx:%llu\"", (unsigned long long)ino,
 		        (unsigned long long)off);
 }
 
@@ -16440,9 +16447,9 @@ tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
 	fputs(",\"updated\":", f);
 	tk_iso(f, r->updated);
 	fputs(",\"chapter\":", f);
-	tk_anchor(f, t, r->ch);
+	tk_anchor(f, t->ino, r->ch);
 	fputs(",\"created_chapter\":", f);
-	tk_anchor(f, t, r->cch);
+	tk_anchor(f, t->ino, r->cch);
 	fputs(",\"blocked_by\":[", f);
 	for (k = 0; k < r->ndep; k++)
 	{
@@ -16455,13 +16462,20 @@ tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
 
 int
 xr_tasks_print(FILE *f, const struct xr_tasks *t, const char *session,
-               const char *session_id, int partial, const char *warn)
+               const char *session_id, int partial, const char *warn,
+               const char *block)
 {
 	int last = t ? t->last : 0;
 	size_t k, count = 0, dropped = 0, n = 0;
 	const struct tk_row *r;
 
-	fputs("{\"schema\":1,\"session\":", f);
+	fputs("{\"schema\":1", f);
+	if (block)
+	{
+		fputs(",\"block\":", f);
+		xr_put_str(f, block);
+	}
+	fputs(",\"session\":", f);
 	xr_put_str(f, session);
 	fputs(",\"session_id\":", f);
 	xr_put_str(f, session_id);
@@ -16492,5 +16506,815 @@ xr_tasks_print(FILE *f, const struct xr_tasks *t, const char *session,
 	if (!ferror(f))
 		fprintf(f, "{\"done\":true,\"count\":%zu,\"dropped\":%zu}\n", count,
 		        dropped);
+	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
+}
+
+/* ---- --schedules (#684): crons, /loop wake-ups, Codex heartbeats -------- */
+
+/* Claude Code's session crons die with it and live only in the transcript:
+** CronCreate/CronDelete/ScheduleWakeup calls and results, scheduled_task_fire
+** lines and the session_cron_carry snapshot, folded by the rules Claude Code
+** itself uses on --resume. A Codex rollout shows only fired heartbeats. */
+
+#define SCH_BUCKETS     1024		/* the id hash's chains (2^n) */
+#define SCH_SNAP        256		/* tasks or ended ids a snapshot may list */
+#define SCH_MAXAGE      (7 * 86400LL)	/* recurringMaxAgeMs' default */
+#define SCH_ID_MAX      128		/* a Codex automation_id's bytes */
+
+enum { SCK_CRON, SCK_WAKEUP, SCK_HEART };
+enum { SCS_PENDING, SCS_FIRED, SCS_DELETED, SCS_EXPIRED, SCS_ENDED };
+enum { SCO_CREATE, SCO_DELETE, SCO_WAKE };
+static const char *const sch_kind[] = { "cron", "wakeup", "heartbeat" };
+static const char *const sch_stname[] = { "pending", "fired", "deleted",
+                                       "expired", "ended" };
+
+static const char *const A_CRON[] = { "cron", 0 };
+static const char *const A_RECUR[] = { "recurring", 0 };
+static const char *const A_HUMAN[] = { "humanSchedule", 0 };
+static const char *const A_DURABLE[] = { "durable", 0 };
+static const char *const A_NEXTF[] = { "nextFireAt", 0 };
+static const char *const A_SCHEDF[] = { "scheduledFor", 0 };
+static const char *const A_DELAY[] = { "clampedDelaySeconds", 0 };
+static const char *const A_STOPPED[] = { "stopped", 0 };
+static const char *const A_REASON[] = { "reason", 0 };
+static const char *const A_NOOP[] = { "noop", 0 };
+static const char *const A_TKIND[] = { "taskKind", 0 };
+static const char *const A_STREAK[] = { "noOpStreak", 0 };
+static const char *const A_TASKS[] = { "tasks", 0 };
+static const char *const A_WAKEUP[] = { "wakeup", 0 };
+static const char *const A_ENDED[] = { "ended", 0 };
+static const char *const A_CREATEDAT[] = { "createdAt", 0 };
+
+struct sch_row
+{
+	char *id;			/* never NULL */
+	char *cron, *human, *prompt, *reason;	/* NULL for none */
+	int kind, status, recurring, durable;
+	int unk;		/* known from a fire only: recurring unsure */
+	int hnext;		/* the next row of its hash chain, -1 */
+	long fires, noop;	/* noop -1: none */
+	long long created, next, last;	/* epoch seconds, -1 none */
+	uint64_t ch, cch;	/* the chapters' offsets, TK_NOCH */
+	uint64_t upd, snap;	/* the line of the last change, of the last
+				** snapshot listing it */
+};
+
+struct sch_open
+{
+	char *tuid;
+	char *a, *b, *c;	/* create: cron, prompt; delete: id; wake-up:
+				** prompt, reason */
+	int kind, flag;		/* SCO_*; create: recurring, wake-up: noop */
+};
+
+struct xr_scheds
+{
+	struct sch_row *v;	/* oldest first; past XR_SCHEDS the oldest go */
+	size_t n, cap, dropped;
+	int bucket[SCH_BUCKETS];
+	struct sch_open open[XR_PENDING];
+	int nopen, codex;
+	uint64_t seq, ino;	/* seq: lines seen */
+};
+
+struct xr_scheds *
+xr_scheds_new(void)
+{
+	struct xr_scheds *s = calloc(1, sizeof *s);
+
+	if (s)
+		memset(s->bucket, 0xff, sizeof s->bucket);	/* -1 */
+	return s;
+}
+
+static void
+sch_row_free(struct sch_row *r)
+{
+	free(r->id);
+	free(r->cron);
+	free(r->human);
+	free(r->prompt);
+	free(r->reason);
+}
+
+static void
+sch_open_free(struct sch_open *o)
+{
+	free(o->tuid);
+	free(o->a);
+	free(o->b);
+	free(o->c);
+}
+
+void
+xr_scheds_free(struct xr_scheds *s)
+{
+	size_t k;
+	int i;
+
+	if (!s)
+		return;
+	for (k = 0; k < s->n; k++)
+		sch_row_free(&s->v[k]);
+	for (i = 0; i < s->nopen; i++)
+		sch_open_free(&s->open[i]);
+	free(s->v);
+	free(s);
+}
+
+void
+xr_claude_scheds(struct xr_claude *d, struct xr_scheds *s, uint64_t ino)
+{
+	d->sc = s;
+	s->ino = ino;
+	s->codex = d->codex;
+}
+
+static size_t
+sch_hash(const char *id)
+{
+	return (size_t)(fnv(id, strlen(id)) & (SCH_BUCKETS - 1));
+}
+
+static struct sch_row *
+sch_find(struct xr_scheds *s, const char *id)
+{
+	int k;
+
+	for (k = s->bucket[sch_hash(id)]; k >= 0; k = s->v[k].hnext)
+		if (!strcmp(s->v[k].id, id))
+			return &s->v[k];
+	return NULL;
+}
+
+static void
+sch_touch(struct xr_claude *d, struct sch_row *r)
+{
+	r->upd = d->sc->seq;
+	r->ch = tk_ch(d);
+}
+
+/* id's row, made (pending, this line's) when absent; id taken. NULL out of
+** memory. A row pointer holds only until the next sch_get. */
+static struct sch_row *
+sch_get(struct xr_claude *d, char *id, int kind)
+{
+	struct xr_scheds *s = d->sc;
+	struct sch_row *r = NULL;
+	size_t k, h;
+
+	if (!id || (r = sch_find(s, id)) != NULL)
+	{
+		free(id);
+		return r;
+	}
+	if (s->n == XR_SCHEDS)
+	{
+		/* shortcut: an O(n) shift and rehash per row past the cap;
+		** upgrade to a ring if real sessions near XR_SCHEDS */
+		sch_row_free(&s->v[0]);
+		memmove(s->v, s->v + 1, --s->n * sizeof *s->v);
+		s->dropped++;
+		memset(s->bucket, 0xff, sizeof s->bucket);
+		for (k = 0; k < s->n; k++)
+		{
+			h = sch_hash(s->v[k].id);
+			s->v[k].hnext = s->bucket[h];
+			s->bucket[h] = (int)k;
+		}
+	}
+	if (s->n == s->cap)
+	{
+		size_t nc = s->cap ? s->cap * 2 : 16;
+		struct sch_row *nv;
+
+		if (nc > XR_SCHEDS)
+			nc = XR_SCHEDS;
+		if (!(nv = realloc(s->v, nc * sizeof *nv)))
+		{
+			free(id);
+			return NULL;
+		}
+		s->v = nv;
+		s->cap = nc;
+	}
+	r = &s->v[s->n];
+	memset(r, 0, sizeof *r);
+	r->id = id;
+	r->kind = kind;
+	r->noop = -1;
+	r->next = r->last = -1;
+	r->created = d->at;
+	r->cch = tk_ch(d);
+	sch_touch(d, r);
+	h = sch_hash(id);
+	r->hnext = s->bucket[h];
+	s->bucket[h] = (int)s->n++;
+	return r;
+}
+
+static char *
+sch_text(const struct json_parser *p, int obj, const char *const *key)
+{
+	return obj >= 0 ? tk_text(p, obj, key, 0, NULL) : NULL;
+}
+
+/* *f = v when v is some (taken) */
+static void
+sch_set(char **f, char *v)
+{
+	if (v)
+	{
+		free(*f);
+		*f = v;
+	}
+}
+
+/* epoch seconds of a number in ms (or s) or an ISO string; -1 */
+static long long
+sch_time(const struct json_parser *p, int obj, const char *const *key)
+{
+	int v = obj >= 0 ? j_get(p, obj, key) : -1;
+	char *s;
+	double x;
+	long long t;
+
+	if (v < 0)
+		return -1;
+	if (p->tok[v].kind == JSON_STRING)
+	{
+		t = (s = j_str(p, v, &(size_t){ 0 })) ? iso_time(s) : -1;
+		free(s);
+		return t;
+	}
+	if (p->tok[v].kind != JSON_PRIMITIVE)
+		return -1;
+	x = strtod(p->text + p->tok[v].start, NULL);
+	if (x > 1e11)
+		x /= 1000;
+	return x > 0 && x < 1e12 ? (long long)x : -1;
+}
+
+/* a whole number >= 0, else -1 */
+static long
+sch_count(const struct json_parser *p, int obj, const char *const *key)
+{
+	int v = j_get(p, obj, key);
+	double x;
+
+	if (v < 0 || p->tok[v].kind != JSON_PRIMITIVE)
+		return -1;
+	x = strtod(p->text + p->tok[v].start, NULL);
+	return x >= 0 && x < 1e9 ? (long)x : -1;
+}
+
+static void
+sch_call(struct xr_claude *d, const struct json_parser *p, int use, int in,
+        const char *name)
+{
+	struct xr_scheds *s = d->sc;
+	struct sch_open o;
+
+	memset(&o, 0, sizeof o);
+	if (!strcmp(name, "CronCreate"))
+	{
+		o.kind = SCO_CREATE;
+		o.a = sch_text(p, in, A_CRON);
+		o.b = sch_text(p, in, A_PROMPT);
+		o.flag = k_bool(p, in, A_RECUR);
+	}
+	else if (!strcmp(name, "CronDelete"))
+	{
+		o.kind = SCO_DELETE;
+		o.a = tk_id(p, j_get(p, in, A_ID));
+	}
+	else if (!strcmp(name, "ScheduleWakeup"))
+	{
+		o.kind = SCO_WAKE;
+		o.b = sch_text(p, in, A_PROMPT);
+		o.c = sch_text(p, in, A_REASON);
+		o.flag = k_bool(p, in, A_NOOP);
+	}
+	else
+		return;
+	if (!(o.tuid = k_str(p, use, A_ID, NULL)))
+	{
+		sch_open_free(&o);
+		return;
+	}
+	if (s->nopen == XR_PENDING)	/* the oldest's result is not waited for */
+	{
+		sch_open_free(&s->open[0]);
+		memmove(s->open, s->open + 1, --s->nopen * sizeof *s->open);
+	}
+	s->open[s->nopen++] = o;
+}
+
+static void
+sch_human(char *b, size_t bn, long sec)
+{
+	if (sec >= 3600 && sec % 3600 == 0)
+		snprintf(b, bn, "in %ldh", sec / 3600);
+	else if (sec >= 60)
+		snprintf(b, bn, "in %ldm", (sec + 30) / 60);
+	else
+		snprintf(b, bn, "in %lds", sec);
+}
+
+/* A tool_result part of an open call: a string toolUseResult or is_error
+** (the call failed) changes nothing. */
+static void
+sch_result(struct xr_claude *d, const struct json_parser *p, int part)
+{
+	struct xr_scheds *s = d->sc;
+	char *tuid = k_str(p, part, A_TUID, NULL), hb[32];
+	struct sch_open o;
+	struct sch_row *r;
+	int k, tur;
+	long sec;
+
+	for (k = 0; tuid && k < s->nopen && strcmp(s->open[k].tuid, tuid); k++)
+		;
+	free(tuid);
+	if (!tuid || k == s->nopen)
+		return;
+	o = s->open[k];
+	memmove(s->open + k, s->open + k + 1,
+	        (size_t)(s->nopen - k - 1) * sizeof *s->open);
+	s->nopen--;
+	tur = k_obj(p, 0, A_TUR);
+	if (tur < 0 || k_bool(p, part, A_ERR))
+		;
+	else if (o.kind == SCO_CREATE)
+	{
+		if ((r = sch_get(d, tk_id(p, j_get(p, tur, A_ID)), SCK_CRON)))
+		{
+			sch_set(&r->cron, o.a);
+			sch_set(&r->prompt, o.b);
+			o.a = o.b = NULL;
+			sch_set(&r->human, sch_text(p, tur, A_HUMAN));
+			r->recurring = j_get(p, tur, A_RECUR) >= 0
+			               ? k_bool(p, tur, A_RECUR) : o.flag;
+			r->durable = k_bool(p, tur, A_DURABLE);
+			r->next = sch_time(p, tur, A_NEXTF);
+			r->status = SCS_PENDING;
+			r->unk = 0;
+			if (r->created < 0)
+				r->created = d->at;
+			sch_touch(d, r);
+		}
+	}
+	else if (o.kind == SCO_DELETE)
+	{
+		if (o.a && (r = sch_find(s, o.a)) && r->kind == SCK_CRON &&
+		    (r->status == SCS_PENDING || r->status == SCS_ENDED))
+		{
+			r->status = SCS_DELETED;
+			r->next = -1;
+			sch_touch(d, r);
+		}
+	}
+	else if (k_bool(p, tur, A_STOPPED))
+	{
+		if ((r = sch_find(s, "wakeup")))
+		{
+			r->status = SCS_DELETED;
+			r->next = -1;
+			sch_touch(d, r);
+		}
+	}
+	else if (j_get(p, tur, A_SCHEDF) >= 0 &&
+	         (r = sch_get(d, tk_dup("wakeup", 6), SCK_WAKEUP)))
+	{
+		/* a newer wake-up takes the slot; its fires carry over */
+		r->status = SCS_PENDING;
+		r->next = sch_time(p, tur, A_SCHEDF);
+		if ((sec = sch_count(p, tur, A_DELAY)) >= 0)
+		{
+			sch_human(hb, sizeof hb, sec);
+			sch_set(&r->human, tk_dup(hb, strlen(hb)));
+		}
+		sch_set(&r->prompt, o.b);
+		sch_set(&r->reason, o.c);
+		o.b = o.c = NULL;
+		r->noop = o.flag ? (r->noop > 0 ? r->noop : 0) + 1 : 0;
+		r->created = d->at;
+		r->cch = tk_ch(d);
+		sch_touch(d, r);
+	}
+	sch_open_free(&o);
+}
+
+/* scheduled_task_fire: a cron's by taskId, a wake-up's (taskKind "loop") */
+static void
+sch_fire(struct xr_claude *d, const struct json_parser *p)
+{
+	struct xr_scheds *s = d->sc;
+	struct sch_row *r;
+	char *id;
+	long st;
+
+	if (k_streq(p, 0, A_TKIND, "loop"))
+	{
+		if (!(r = sch_get(d, tk_dup("wakeup", 6), SCK_WAKEUP)))
+			return;
+		r->status = SCS_FIRED;
+	}
+	else
+	{
+		if (!(id = tk_id(p, j_get(p, 0, A_TASKID))))
+			return;
+		if (!(r = sch_find(s, id)))
+		{
+			/* made before the read: one-shot until a snapshot says */
+			if (!(r = sch_get(d, id, SCK_CRON)))
+				return;
+			r->unk = 1;
+			r->status = SCS_FIRED;
+			sch_set(&r->cron, sch_text(p, 0, A_CRON));
+		}
+		else
+			free(id);
+		if (r->status == SCS_DELETED || r->status == SCS_EXPIRED)
+			return;
+		r->status = r->recurring && !r->unk ? SCS_PENDING : SCS_FIRED;
+	}
+	if (!r->prompt)
+		r->prompt = sch_text(p, 0, A_PROMPT);
+	r->fires++;
+	r->last = d->at;
+	r->next = -1;
+	if ((st = sch_count(p, 0, A_STREAK)) >= 0)
+		r->noop = st;
+	sch_touch(d, r);
+}
+
+/* an id list or task list of at most SCH_SNAP, each with an id; else -1 */
+static int
+sch_list(const struct json_parser *p, int arr, int objs)
+{
+	int i, n = 0, ok;
+	char *id;
+
+	if (arr < 0)
+		return 0;
+	if (p->tok[arr].kind != JSON_ARRAY)
+		return -1;
+	for (i = arr + 1; i < p->tok[arr].next; i = p->tok[i].next)
+	{
+		if (++n > SCH_SNAP || (objs && p->tok[i].kind != JSON_OBJECT))
+			return -1;
+		id = tk_id(p, objs ? j_get(p, i, A_ID) : i);
+		ok = id != NULL;
+		free(id);
+		if (!ok)
+			return -1;
+	}
+	return n;
+}
+
+/* session_cron_carry: the armed crons and the wake-up as of this turn. A
+** malformed or oversized one is skipped whole. */
+static void
+sch_snap(struct xr_claude *d, const struct json_parser *p, int a)
+{
+	struct xr_scheds *s = d->sc;
+	int tasks = j_get(p, a, A_TASKS), ended = j_get(p, a, A_ENDED),
+	    w = j_get(p, a, A_WAKEUP), i;
+	struct sch_row *r;
+	long long t;
+	size_t k;
+
+	if (sch_list(p, tasks, 1) < 0 || sch_list(p, ended, 0) < 0 ||
+	    (w >= 0 && p->tok[w].kind != JSON_OBJECT))
+		return;
+	for (i = tasks + 1; tasks >= 0 && i < p->tok[tasks].next;
+	     i = p->tok[i].next)
+	{
+		if (!(r = sch_get(d, tk_id(p, j_get(p, i, A_ID)), SCK_CRON)))
+			continue;
+		if (r->upd == s->seq || r->status == SCS_ENDED || r->unk)
+		{
+			/* new, resumed, or known from a fire only */
+			if (r->upd == s->seq || r->unk)
+				r->recurring = k_bool(p, i, A_RECUR);
+			if ((t = sch_time(p, i, A_CREATEDAT)) >= 0)
+				r->created = t;
+			sch_set(&r->cron, sch_text(p, i, A_CRON));
+			if (!r->prompt)
+				r->prompt = sch_text(p, i, A_PROMPT);
+			r->status = SCS_PENDING;
+			r->unk = 0;
+			sch_touch(d, r);
+		}
+		r->snap = s->seq;
+	}
+	for (i = ended + 1; ended >= 0 && i < p->tok[ended].next;
+	     i = p->tok[i].next)
+	{
+		char *id = tk_id(p, i);
+
+		if (id && (r = sch_find(s, id)) && r->kind == SCK_CRON &&
+		    (r->status == SCS_PENDING || r->status == SCS_ENDED))
+		{
+			r->status = SCS_DELETED;
+			r->next = -1;
+			sch_touch(d, r);
+		}
+		free(id);
+	}
+	if (w >= 0 && (r = sch_get(d, tk_dup("wakeup", 6), SCK_WAKEUP)))
+	{
+		if (r->status != SCS_PENDING || r->upd == s->seq)
+		{
+			r->status = SCS_PENDING;
+			sch_touch(d, r);
+		}
+		if ((t = sch_time(p, w, A_SCHEDF)) >= 0)
+			r->next = t;
+		sch_set(&r->prompt, sch_text(p, w, A_PROMPT));
+		sch_set(&r->reason, sch_text(p, w, A_REASON));
+		r->snap = s->seq;
+	}
+	/* a pending one this snapshot leaves out is gone (all rows here are
+	** older than it: the snapshot is a line of its own) */
+	for (k = 0; k < s->n; k++)
+		if ((r = &s->v[k])->status == SCS_PENDING && !r->durable &&
+		    r->kind != SCK_HEART && r->snap != s->seq)
+		{
+			r->status = SCS_ENDED;
+			sch_touch(d, r);
+		}
+}
+
+/* the first nd (nl bytes) in s[0..n), NULL none (memmem is no POSIX) */
+static const char *
+sch_mem(const char *s, size_t n, const char *nd, size_t nl)
+{
+	size_t k;
+
+	for (k = 0; k + nl <= n; k++)
+		if (s[k] == nd[0] && !memcmp(s + k, nd, nl))
+			return s + k;
+	return NULL;
+}
+
+/* <tag>…</tag>'s text in s[0..n), trimmed; NULL when absent */
+static const char *
+sch_tag(const char *s, size_t n, const char *tag, size_t *len)
+{
+	char o[40], c[40];
+	const char *a, *e;
+	size_t ol, cl;
+
+	ol = (size_t)snprintf(o, sizeof o, "<%s>", tag);
+	cl = (size_t)snprintf(c, sizeof c, "</%s>", tag);
+	if (!(a = sch_mem(s, n, o, ol)))
+		return NULL;
+	a += ol;
+	if (!(e = sch_mem(a, n - (size_t)(a - s), c, cl)))
+		return NULL;
+	*len = (size_t)(e - a);
+	return trim(a, len);
+}
+
+/* A Codex app automation's fire: a user message whose input_text is a
+** <heartbeat> envelope (codex-rs/history/src/heartbeat.rs). */
+static void
+sch_codex(struct xr_claude *d, const struct json_parser *p)
+{
+	int pl = k_obj(p, 0, A_PAYLOAD), c, i;
+	const char *b, *x;
+	char *s, *id, ts[64], tb[XR_TITLE_MAX * 4 + 1];
+	size_t n, l, k;
+	struct sch_row *r;
+	long long at;
+
+	if (pl < 0 || !k_streq(p, 0, A_TYPE, "response_item") ||
+	    !k_streq(p, pl, A_TYPE, "message") ||
+	    !k_streq(p, pl, A_ROLE, "user") ||
+	    (c = j_get(p, pl, A_CONTENT)) < 0 || p->tok[c].kind != JSON_ARRAY)
+		return;
+	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
+	{
+		if (p->tok[i].kind != JSON_OBJECT ||
+		    !k_streq(p, i, A_TYPE, "input_text") ||
+		    !(s = k_str(p, i, A_TEXT, &n)))
+			continue;
+		b = trim(s, &n);
+		id = NULL;
+		if (n >= 23 && !memcmp(b, "<heartbeat>", 11) &&
+		    !memcmp(b + n - 12, "</heartbeat>", 12) &&
+		    (x = sch_tag(b, n, "automation_id", &l)) && l &&
+		    l <= SCH_ID_MAX)
+		{
+			for (k = 0; k < l && (isalnum((unsigned char)x[k]) ||
+			                      x[k] == '_' || x[k] == '-'); k++)
+				;
+			id = k == l ? tk_dup(x, l) : NULL;
+		}
+		if (id && (r = sch_get(d, id, SCK_HEART)))
+		{
+			at = -1;
+			if ((x = sch_tag(b, n, "current_time_iso", &l)) &&
+			    l < sizeof ts)
+			{
+				memcpy(ts, x, l);
+				ts[l] = '\0';
+				at = iso_time(ts);
+			}
+			r->status = SCS_FIRED;
+			r->fires++;
+			r->last = at >= 0 ? at : d->at;
+			if (r->fires == 1)
+				r->created = r->last;
+			if ((x = sch_tag(b, n, "instructions", &l)))
+			{
+				xr_title(x, l, tb, sizeof tb);
+				if (tb[0])
+					sch_set(&r->prompt, tk_dup(tb, strlen(tb)));
+			}
+			sch_touch(d, r);
+		}
+		free(s);
+	}
+}
+
+/* A main-thread line, after its decode (xr_claude_line). */
+static void
+sch_line(struct xr_claude *d, const struct json_parser *p)
+{
+	struct xr_scheds *s = d->sc;
+	char *t, *name;
+	int m, c, i, in, a;
+
+	s->seq++;
+	s->codex = d->codex;
+	if (d->codex)
+	{
+		sch_codex(d, p);
+		return;
+	}
+	if (!(t = k_str(p, 0, A_TYPE, NULL)))
+		return;
+	if (!strcmp(t, "system"))
+	{
+		if (k_streq(p, 0, A_SUB, "scheduled_task_fire"))
+			sch_fire(d, p);
+	}
+	else if (!strcmp(t, "attachment"))
+	{
+		if ((a = k_obj(p, 0, A_ATTACH)) >= 0 &&
+		    k_streq(p, a, A_TYPE, "session_cron_carry"))
+			sch_snap(d, p, a);
+	}
+	else if ((!strcmp(t, "user") && s->nopen) || !strcmp(t, "assistant"))
+	{
+		c = (m = k_obj(p, 0, A_MESSAGE)) >= 0 ? j_get(p, m, A_CONTENT) : -1;
+		for (i = c + 1; c >= 0 && p->tok[c].kind == JSON_ARRAY &&
+		     i < p->tok[c].next; i = p->tok[i].next)
+		{
+			if (p->tok[i].kind != JSON_OBJECT)
+				continue;
+			if (t[0] == 'u' && k_streq(p, i, A_TYPE, "tool_result"))
+				sch_result(d, p, i);
+			else if (t[0] == 'a' && k_streq(p, i, A_TYPE, "tool_use") &&
+			         (in = k_obj(p, i, A_INPUT)) >= 0 &&
+			         (name = k_str(p, i, A_NAME, NULL)))
+			{
+				sch_call(d, p, i, in, name);
+				free(name);
+			}
+		}
+	}
+	free(t);
+}
+
+/* the status as of now: a recurring cron past its age is expired; a pending
+** session one is ended when its Claude is not live */
+static int
+sch_status(const struct sch_row *r, int live, long long now, long long *exp)
+{
+	int st = r->status;
+
+	*exp = -1;
+	if (r->kind == SCK_CRON && r->recurring && r->created >= 0)
+	{
+		*exp = r->created + SCH_MAXAGE;
+		if (st == SCS_PENDING && now >= *exp)
+			st = SCS_EXPIRED;
+	}
+	if (st == SCS_PENDING && !r->durable && !live)
+		st = SCS_ENDED;
+	return st;
+}
+
+struct sch_ord
+{
+	size_t k;
+	int grp, st;
+	long long key, exp;
+};
+
+static int
+sch_ordcmp(const void *x, const void *y)
+{
+	const struct sch_ord *a = x, *b = y;
+
+	if (a->grp != b->grp)
+		return a->grp < b->grp ? -1 : 1;
+	if (a->key != b->key)
+		return a->key < b->key ? -1 : 1;
+	return a->k < b->k ? -1 : a->k > b->k;
+}
+
+static void
+sch_put(FILE *f, const struct xr_scheds *s, const struct sch_row *r,
+       const struct sch_ord *o)
+{
+	fputs("{\"schedule\":{\"id\":", f);
+	xr_put_str(f, r->id);
+	fprintf(f, ",\"kind\":\"%s\",\"status\":\"%s\",\"recurring\":%s,"
+	        "\"cron\":", sch_kind[r->kind], sch_stname[o->st],
+	        r->recurring ? "true" : "false");
+	put_or_null(f, r->kind == SCK_CRON ? r->cron : NULL);
+	fputs(",\"human\":", f);
+	put_or_null(f, r->human);
+	fprintf(f, ",\"durable\":%s,\"prompt\":", r->durable ? "true" : "false");
+	put_or_null(f, r->prompt);
+	fputs(",\"reason\":", f);
+	put_or_null(f, r->reason);
+	fputs(",\"created\":", f);
+	tk_iso(f, r->created);
+	fputs(",\"next\":", f);
+	tk_iso(f, o->st == SCS_PENDING ? r->next : -1);
+	fputs(",\"last_fired\":", f);
+	tk_iso(f, r->last);
+	fputs(",\"expires\":", f);
+	tk_iso(f, o->exp);
+	fprintf(f, ",\"fires\":%ld,\"noop_streak\":", r->fires);
+	if (r->noop >= 0)
+		fprintf(f, "%ld", r->noop);
+	else
+		fputs("null", f);
+	fputs(",\"chapter\":", f);
+	tk_anchor(f, s->ino, r->ch);
+	fputs(",\"created_chapter\":", f);
+	tk_anchor(f, s->ino, r->cch);
+	fputs("}}\n", f);
+}
+
+int
+xr_scheds_print(FILE *f, const struct xr_scheds *s, const char *session,
+                const char *session_id, int partial, const char *warn,
+                int live, long long now)
+{
+	size_t k, n = s ? s->n : 0;
+	struct sch_ord *o = n ? calloc(n, sizeof *o) : NULL;
+	const struct sch_row *r;
+
+	if (n && !o)
+		return -1;
+	for (k = 0; k < n; k++)
+	{
+		r = &s->v[k];
+		o[k].k = k;
+		o[k].st = sch_status(r, live, now, &o[k].exp);
+		if (r->kind == SCK_WAKEUP)
+			o[k].grp = 1;
+		else if (o[k].st == SCS_PENDING)
+		{
+			o[k].key = r->next >= 0 ? r->next : LLONG_MAX;
+		}
+		else
+		{
+			o[k].grp = 2;
+			o[k].key = -(long long)r->upd;
+		}
+	}
+	if (n)
+		qsort(o, n, sizeof *o, sch_ordcmp);
+	if (s && s->codex && !n && (!warn || !warn[0]))
+		warn = "Codex CLI has no session scheduler; Codex app automations "
+		       "show when they fire";
+	fputs("{\"schema\":1,\"block\":\"schedules\",\"session\":", f);
+	xr_put_str(f, session);
+	fputs(",\"session_id\":", f);
+	xr_put_str(f, session_id);
+	fprintf(f, ",\"source\":\"%s\",\"live\":%s,\"title\":null,"
+	        "\"partial\":%s", !s ? "none" : s->codex ? "codex" : "claude",
+	        live ? "true" : "false", partial ? "true" : "false");
+	if (warn && warn[0])
+	{
+		fputs(",\"warn\":", f);
+		xr_put_str(f, warn);
+	}
+	fputs("}\n", f);
+	for (k = 0; k < n && !ferror(f); k++)
+		sch_put(f, s, &s->v[o[k].k], &o[k]);
+	if (!ferror(f))
+		fprintf(f, "{\"done\":true,\"count\":%zu,\"dropped\":%zu}\n", n,
+		        s ? s->dropped : 0);
+	free(o);
 	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
 }

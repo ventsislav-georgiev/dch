@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.186.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.187.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -433,6 +433,7 @@ dch --xray <n> --since 1h --json                # the turns and refs since a tim
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
+dch --xray <n> --schedules --json               # its crons, /loop wake-up and Codex heartbeats, JSON lines
 dch --xray <n> --questions --json               # open questions from your questions_command, JSON lines
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
@@ -519,7 +520,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--questions` lists your `questions_command`'s open questions; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--schedules` its crons, `/loop` wake-up and Codex heartbeats; `--questions` lists your `questions_command`'s open questions; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end (all of it when none had gone in yet) and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held); the text's start may still be in its input`. | 0 ok, 1 input dropped |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z, when that one is in front as `claude_foreground` defines it), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A Claude that is not in front with nothing in front of it that is — under a wrapper that does not read the keyboard (plain `unbuffer`), or a shell in front of it inside one — fails `not_foreground` and nothing is typed (dch-lite too): the text would wait there and the shell around it would run it once the wrapper exits. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `not_foreground` (see above); `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure / input dropped (plain burst, as `--send`) |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -2370,7 +2371,7 @@ turns begun and the refs mentioned at or after `<time>`, as one JSON object:
 `dch --xray <n> --tasks --json` prints the session's task list as JSON lines,
 the way `--ref` prints its lines, and exits 0:
 ```json
-{"schema":1,"session":"api","session_id":"…","source":"claude","title":null,"partial":false}
+{"schema":1,"block":"tasks","session":"api","session_id":"…","source":"claude","title":null,"partial":false}
 {"task":{"id":"12","title":"Fix the login test","status":"active","label":"in_progress","active":"Fixing the login test","note":null,"created":"2026-11-14T07:01:02Z","updated":"2026-11-14T07:09:40Z","chapter":"f1a2:4096","created_chapter":"f1a2:0","blocked_by":["9"],"url":null,"group":null}}
 {"done":true,"count":1,"dropped":0}
 ```
@@ -2382,7 +2383,12 @@ the way `--ref` prints its lines, and exits 0:
   are the 1-based positions, and a row keeps its `created` and
   `created_chapter` while its text at that position stays. A subagent's
   (sidechain) records are not the session's. `source` is `claude`, `codex`
-  or `none` (a shell, or no task record: no task lines).
+  or `none` (a shell, or no task record: no task lines). The header's
+  `"block":"tasks"`, right after `schema` (a `tasks_command`'s header
+  too), tells the block apart in a `--follow` stream (#685); the
+  `--memory` header has `"block":"memory"` and the `--schedules` one
+  `"block":"schedules"` in the same place. A header without `block` comes
+  from an older dch.
 - **Fields.** `status` is `pending`, `active`, `done` or `dropped`
   (`pending`, `in_progress`, `completed`, `deleted`); `label` is the
   source's own word. A deleted task stays, `dropped`. `title`, `active`
@@ -2410,9 +2416,60 @@ gone says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that
 host's `dch serve`; a host whose dch predates `--tasks` says `dch: <host>:
 the host's dch does not know --tasks` (exit 1).
 
+`dch --xray <n> --schedules --json` lists the session's scheduled prompts
+(#685): Claude Code's crons (`CronCreate`), its `/loop` wake-up
+(`ScheduleWakeup`) and Codex heartbeats, as JSON lines, and exits 0:
+```json
+{"schema":1,"block":"schedules","session":"api","session_id":"…","source":"claude","live":true,"title":null,"partial":false}
+{"schedule":{"id":"3f9a12bc","kind":"cron","status":"pending","recurring":true,"cron":"*/10 * * * *","human":"every 10 minutes","durable":false,"prompt":"check CI on #812","reason":null,"created":"2026-11-27T08:00:00Z","next":"2026-11-27T08:10:00Z","last_fired":null,"expires":"2026-12-04T08:00:00Z","fires":0,"noop_streak":null,"chapter":"f1a2:4096","created_chapter":"f1a2:4096"}}
+{"schedule":{"id":"wakeup","kind":"wakeup","status":"pending","recurring":false,"cron":null,"human":"in 20m","durable":false,"prompt":"check again","reason":"waiting on the PR CI","created":"2026-11-27T08:05:00Z","next":"2026-11-27T08:25:00Z","last_fired":"2026-11-27T08:04:00Z","expires":null,"fires":14,"noop_streak":6,"chapter":"f1a2:8192","created_chapter":"f1a2:8192"}}
+{"done":true,"count":2,"dropped":0}
+```
+- **Rows.** One per id: a cron's `id` is its task id; the one `/loop`
+  wake-up slot is `wakeup` (a newer `ScheduleWakeup` replaces it, its
+  `fires` carried over); a Codex heartbeat's is its `automation_id`.
+  `kind` is `cron`, `wakeup` or `heartbeat`. `human` is the create's
+  schedule in words (a wake-up's "in 20m" from its delay). `prompt` and
+  `reason` are one line, cut at 120 characters as task titles are. Times
+  are ISO 8601 UTC or `null`. `fires` counts the fire lines; `noop_streak`
+  is the newest fire's no-op streak (a wake-up's: its trailing no-op
+  calls), `null` for a cron without one. `chapter` and `created_chapter`
+  are anchors, as for tasks.
+- **Status.** `pending`: created and not done, `next` its next fire time
+  (a recurring cron that has fired shows `next: null` and `last_fired`;
+  `next` only shows on a pending row). `deleted`: `CronDelete`, a stopped
+  `/loop`, or listed as ended by Claude Code's carried-over list. `fired`:
+  a one-shot cron that ran, or a wake-up whose fire came after it.
+  `expired`: a recurring cron 7 days after its `created` (`expires` is
+  then; Claude Code's default, as the server's own setting is not in the
+  transcript). `ended`: a pending row whose session is over.
+- **`live`** is `true` while the session's Claude runs and is the one this
+  transcript belongs to; an ended session (its History record) is `false`,
+  and every pending non-durable cron and the pending wake-up then read
+  `ended`, with `next: null`. A cron Claude Code's newer carried-over list
+  leaves out is `ended` too.
+- **Order.** Pending crons by `next`, soonest first; the wake-up; the rest,
+  newest change first.
+- **Codex.** The rollout's `<heartbeat>` envelopes (Codex app automations)
+  give `heartbeat` rows, always `fired`, with `fires` and `last_fired`.
+  The Codex CLI has no session scheduler: a rollout with none gets no row
+  and the header's `warn`, "Codex CLI has no session scheduler; Codex app
+  automations show when they fire".
+- **`source`** is `claude`, `codex`, or `none` for a shell (no row).
+- **Caps.** Read as `--tasks` reads (`partial` likewise); 5000 rows, the
+  newest kept, `dropped` counting the rest.
+
+`--schedules` takes no other flag but `--json` (`dch: bad usage:
+--schedules and --ref`, also `--search`, `--chapter`, `--clear`, `--tasks`,
+`--memory`), and is not in `--requests`. `--follow` does not carry it yet:
+`--follow --schedules` exits 2 (`dch: bad usage: --schedules and --follow
+…`), which a client can use as its version probe. A transcript that is gone
+says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that host's
+`dch serve`.
+
 `dch --xray <n> --memory --json` lists what `<n>`'s agent remembers and
 the instruction files in force, as JSON lines (#322):
-`{"schema":1,"source":"claude|codex|none","title":null,"partial":bool}`,
+`{"schema":1,"block":"memory","source":"claude|codex|none","title":null,"partial":bool}`,
 then one `{"memory":{"id","title","note","kind","scope","updated","path","session","chapter","body"}}`
 per file (`"cut":true` after `body` when it was cut), then
 `{"done":true,"count":N,"dropped":M}`.
@@ -2704,7 +2761,8 @@ which a client can use as its version probe.
   `--tasks` lines, then the `--memory` lines, each block whole from its
   header to its `done` line, in the one-shot shapes. A tasks header has
   `session`; a memory header does not. A session with no corpus gives a
-  `source: "none"` block.
+  `source: "none"` block. Each header's `block` (`"tasks"`, `"memory"`)
+  says which block it opens.
 - Then, in the same 250 ms batches as the other deltas:
   - `{"task":{…}}`: a task's whole row, keyed by `id`, when it changes or
     is new. A row that leaves the list (a shorter TodoWrite list) sends

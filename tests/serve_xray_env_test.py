@@ -267,8 +267,8 @@ def memory_command(senv, cenv, check):
     check("memory_command through serve: source command, the host's "
           "command answers as the host's own dch does",
           rem.returncode == 0 and rem.stdout == loc.stdout and ls and
-          ls[0] == {"schema": 1, "source": "command", "title": "host notes",
-                    "partial": False},
+          ls[0] == {"schema": 1, "block": "memory", "source": "command",
+                    "title": "host notes", "partial": False},
           (rem.returncode, rem.stdout[:400], rem.stderr[:300],
            loc.stdout[:300]))
     check("...its rows: the note, the session's name and cwd, then done",

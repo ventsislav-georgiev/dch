@@ -7543,7 +7543,7 @@ tk_end(struct tk_feed *f, int partial)
 
 	if (m)
 	{
-		if (xr_tasks_print(m, f->t, "s", "id", partial, NULL) != 0)
+		if (xr_tasks_print(m, f->t, "s", "id", partial, NULL, "tasks") != 0)
 			fails++;
 		fclose(m);
 	}
@@ -7573,7 +7573,8 @@ t_tasks(void)
 
 	o = tk_end((tk_begin(&f, 0), &f), 0);
 	CHECK("tasks: none read: source none, no task line, done 0",
-	      !strcmp(o, "{\"schema\":1,\"session\":\"s\",\"session_id\":\"id\","
+	      !strcmp(o, "{\"schema\":1,\"block\":\"tasks\",\"session\":\"s\","
+	              "\"session_id\":\"id\","
 	              "\"source\":\"none\",\"title\":null,\"partial\":false}\n"
 	              "{\"done\":true,\"count\":0,\"dropped\":0}\n"));
 	free(o);
@@ -7584,8 +7585,9 @@ t_tasks(void)
 
 		if (m)
 		{
-			xr_tasks_print(m, NULL, "s", "id", 0, "");
-			xr_tasks_print(m, NULL, "s", "id", 0, "tasks_command: \"x\"");
+			xr_tasks_print(m, NULL, "s", "id", 0, "", NULL);
+			xr_tasks_print(m, NULL, "s", "id", 0, "tasks_command: \"x\"",
+			               "tasks");
 			fclose(m);
 		}
 		CHECK("tasks: warn (#321): left out when empty, else a string "
@@ -7897,6 +7899,468 @@ t_peer(void)
 	}
 }
 
+/* ---- --schedules (#684) -------------------------------------------------- */
+
+#define SC_T0 1795766400LL	/* 2026-11-27T08:00:00Z */
+
+struct sc_feed
+{
+	struct xr_claude *d;
+	struct xr_scheds *s;
+	uint64_t off;
+};
+
+static void
+sc_begin(struct sc_feed *f, int codex)
+{
+	f->d = xr_claude_new();
+	f->s = xr_scheds_new();
+	f->off = 0;
+	if (codex)
+		xr_claude_codex(f->d);
+	xr_claude_scheds(f->d, f->s, 0x1f);
+}
+
+static void sc_feed(struct sc_feed *f, const char *fmt, ...)
+	__attribute__((format(printf, 2, 3)));
+
+static void
+sc_feed(struct sc_feed *f, const char *fmt, ...)
+{
+	static char l[1 << 17];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(l, sizeof l, fmt, ap);
+	va_end(ap);
+	xr_claude_line(f->d, l, (size_t)n, f->off, 0);
+	f->off += (uint64_t)n + 1;
+}
+
+/* the lines, malloc'd; f is ended */
+static char *
+sc_end(struct sc_feed *f, int live, long long now)
+{
+	char *b = NULL;
+	size_t bl = 0;
+	FILE *m = open_memstream(&b, &bl);
+
+	if (m)
+	{
+		if (xr_scheds_print(m, f->s, "s", "id", 0, NULL, live, now) != 0)
+			fails++;
+		fclose(m);
+	}
+	xr_claude_free(f->d);
+	xr_scheds_free(f->s);
+	return b ? b : calloc(1, 1);
+}
+
+/* 1 when id's schedule line holds every fragment (NULL-ended) */
+static int
+sc_row(const char *o, const char *id, ...)
+{
+	char key[160], *line;
+	const char *a, *e, *frag;
+	va_list ap;
+	int ok = 1;
+
+	snprintf(key, sizeof key, "{\"schedule\":{\"id\":\"%s\",", id);
+	if (!(a = strstr(o, key)))
+		return 0;
+	e = strchr(a, '\n');
+	line = strndup(a, e ? (size_t)(e - a) : strlen(a));
+	va_start(ap, id);
+	while ((frag = va_arg(ap, const char *)))
+		ok &= line && strstr(line, frag) != NULL;
+	va_end(ap);
+	free(line);
+	return ok;
+}
+
+static int
+sc_lines(const char *o)
+{
+	int n = 0;
+
+	for (; (o = strstr(o, "{\"schedule\":")); o++)
+		n++;
+	return n;
+}
+
+/* m: minutes past SC_T0 */
+#define SC_USE "{\"type\":\"assistant\",\"timestamp\":\"2026-11-27T08:%02d:00Z\"," \
+	"\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"%s\"," \
+	"\"name\":\"%s\",\"input\":%s}]}}"
+#define SC_RES "{\"type\":\"user\",\"timestamp\":\"2026-11-27T08:%02d:00Z\"," \
+	"\"toolUseResult\":%s,\"message\":{\"content\":[{\"type\":" \
+	"\"tool_result\",\"tool_use_id\":\"%s\",\"content\":\"ok\"%s}]}}"
+#define SC_FIRE "{\"type\":\"system\",\"subtype\":\"scheduled_task_fire\"," \
+	"\"timestamp\":\"2026-11-27T08:%02d:00Z\",\"taskId\":\"%s\"," \
+	"\"cron\":\"* * * * *\",\"prompt\":\"fired\",\"isMeta\":true%s}"
+#define SC_SNAP "{\"type\":\"attachment\",\"timestamp\":" \
+	"\"2026-11-27T08:%02d:00Z\",\"attachment\":{\"type\":" \
+	"\"session_cron_carry\",%s}}"
+#define SC_CC(m, tu, id, rec) \
+	sc_feed(&f, SC_USE, m, tu, "CronCreate", "{\"cron\":\"*/10 * * * *\"," \
+	        "\"prompt\":\"check CI\",\"recurring\":" rec "}"); \
+	sc_feed(&f, SC_RES, m, "{\"id\":\"" id "\",\"humanSchedule\":" \
+	        "\"every 10 minutes\",\"recurring\":" rec ",\"durable\":false," \
+	        "\"nextFireAt\":1795767000000}", tu, "")
+
+static void
+t_scheds(void)
+{
+	struct sc_feed f;
+	char *o, *big;
+	size_t bl;
+	int k;
+
+	/* create, then its result: pending, with next and the 7-day expiry */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "3f9a12bc", "true");
+	o = sc_end(&f, 1, SC_T0 + 300);
+	CHECK("schedules: create then result: one pending cron, the header",
+	      !strncmp(o, "{\"schema\":1,\"block\":\"schedules\",\"session\":"
+	               "\"s\",\"session_id\":\"id\","
+	               "\"source\":\"claude\",\"live\":true,\"title\":null,"
+	               "\"partial\":false}\n", 123) && sc_lines(o) == 1 &&
+	      sc_row(o, "3f9a12bc", "{\"schedule\":{\"id\":\"3f9a12bc\","
+	             "\"kind\":\"cron\",\"status\":\"pending\",\"recurring\":true,"
+	             "\"cron\":\"*/10 * * * *\",\"human\":\"every 10 minutes\","
+	             "\"durable\":false,\"prompt\":\"check CI\",\"reason\":null,"
+	             "\"created\":\"2026-11-27T08:00:00Z\",\"next\":"
+	             "\"2026-11-27T08:10:00Z\",\"last_fired\":null,\"expires\":"
+	             "\"2026-12-04T08:00:00Z\",\"fires\":0,\"noop_streak\":null,"
+	             "\"chapter\":", NULL) &&
+	      strstr(o, "{\"done\":true,\"count\":1,\"dropped\":0}\n"));
+	free(o);
+
+	/* delete */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "3f9a12bc", "true");
+	sc_feed(&f, SC_USE, 1, "tu2", "CronDelete", "{\"id\":\"3f9a12bc\"}");
+	sc_feed(&f, SC_RES, 1, "{\"id\":\"3f9a12bc\"}", "tu2", "");
+	o = sc_end(&f, 1, SC_T0 + 300);
+	CHECK("schedules: CronDelete: deleted, next null",
+	      sc_row(o, "3f9a12bc", "\"status\":\"deleted\"", "\"next\":null",
+	             NULL));
+	free(o);
+
+	/* a one-shot's fire; a recurring one's fire */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "aaaa0001", "false");
+	SC_CC(0, "tu2", "bbbb0002", "true");
+	sc_feed(&f, SC_FIRE, 10, "aaaa0001", "");
+	sc_feed(&f, SC_FIRE, 10, "bbbb0002", "");
+	sc_feed(&f, SC_FIRE, 20, "bbbb0002", "");
+	o = sc_end(&f, 1, SC_T0 + 1500);
+	CHECK("schedules: a one-shot's fire: fired, fires 1, last_fired",
+	      sc_row(o, "aaaa0001", "\"status\":\"fired\"", "\"fires\":1,",
+	             "\"last_fired\":\"2026-11-27T08:10:00Z\"",
+	             "\"expires\":null", NULL));
+	CHECK("schedules: a recurring one's fires: still pending, fires 2, "
+	      "next cleared",
+	      sc_row(o, "bbbb0002", "\"status\":\"pending\"", "\"fires\":2,",
+	             "\"next\":null", "\"last_fired\":\"2026-11-27T08:20:00Z\"",
+	             NULL));
+	free(o);
+
+	/* 7 days on: expired */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "3f9a12bc", "true");
+	o = sc_end(&f, 1, SC_T0 + 7 * 86400);
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "3f9a12bc", "true");
+	big = sc_end(&f, 1, SC_T0 + 7 * 86400 - 1);
+	CHECK("schedules: a recurring cron 7 days old: expired, at created+7d; "
+	      "a second before: pending",
+	      sc_row(o, "3f9a12bc", "\"status\":\"expired\"",
+	             "\"expires\":\"2026-12-04T08:00:00Z\"", NULL) &&
+	      sc_row(big, "3f9a12bc", "\"status\":\"pending\"", NULL));
+	free(o);
+	free(big);
+
+	/* a snapshot only (a resumed session): pending, created from it */
+	sc_begin(&f, 0);
+	sc_feed(&f, SC_SNAP, 5, "\"tasks\":[{\"id\":\"cccc0003\",\"cron\":"
+	        "\"0 9 * * *\",\"prompt\":\"daily\",\"createdAt\":1795762800000,"
+	        "\"recurring\":true}],\"ended\":[]");
+	o = sc_end(&f, 1, SC_T0 + 600);
+	CHECK("schedules: a snapshot-only id: pending, created from createdAt",
+	      sc_row(o, "cccc0003", "\"status\":\"pending\"",
+	             "\"cron\":\"0 9 * * *\"", "\"prompt\":\"daily\"",
+	             "\"created\":\"2026-11-27T07:00:00Z\"", NULL));
+	free(o);
+
+	/* snapshot ended; a later snapshot without the id; a create after it */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "aaaa0001", "true");
+	SC_CC(0, "tu2", "bbbb0002", "true");
+	sc_feed(&f, SC_SNAP, 1, "\"tasks\":[{\"id\":\"aaaa0001\",\"cron\":"
+	        "\"* * * * *\",\"prompt\":\"x\",\"createdAt\":1795766400000,"
+	        "\"recurring\":true},{\"id\":\"bbbb0002\",\"cron\":\"* * * * *\","
+	        "\"prompt\":\"y\",\"createdAt\":1795766400000,\"recurring\":true}"
+	        "],\"ended\":[]");
+	sc_feed(&f, SC_SNAP, 2, "\"tasks\":[{\"id\":\"bbbb0002\",\"cron\":"
+	        "\"* * * * *\",\"prompt\":\"y\",\"createdAt\":1795766400000,"
+	        "\"recurring\":true}],\"ended\":[\"aaaa0001\"]");
+	sc_feed(&f, SC_SNAP, 3, "\"tasks\":[],\"ended\":[]");
+	SC_CC(4, "tu3", "dddd0004", "true");
+	o = sc_end(&f, 1, SC_T0 + 600);
+	CHECK("schedules: snapshot ended: deleted; left out of a later "
+	      "snapshot: ended; created after it: pending",
+	      sc_row(o, "aaaa0001", "\"status\":\"deleted\"", NULL) &&
+	      sc_row(o, "bbbb0002", "\"status\":\"ended\"", NULL) &&
+	      sc_row(o, "dddd0004", "\"status\":\"pending\"", NULL));
+	free(o);
+
+	/* the wake-up slot: replaced, a loop fire, a stop */
+	sc_begin(&f, 0);
+	sc_feed(&f, SC_USE, 0, "w1", "ScheduleWakeup", "{\"delaySeconds\":1200,"
+	        "\"reason\":\"r1\",\"prompt\":\"p1\",\"noop\":true}");
+	sc_feed(&f, SC_RES, 0, "{\"scheduledFor\":1795767600000,"
+	        "\"clampedDelaySeconds\":1200,\"wasClamped\":false}", "w1", "");
+	sc_feed(&f, SC_USE, 1, "w2", "ScheduleWakeup", "{\"delaySeconds\":30,"
+	        "\"reason\":\"r2\",\"prompt\":\"p2\",\"noop\":true}");
+	sc_feed(&f, SC_RES, 1, "{\"scheduledFor\":1795766520000,"
+	        "\"clampedDelaySeconds\":60,\"wasClamped\":true}", "w2", "");
+	o = sc_end(&f, 1, SC_T0 + 90);
+	CHECK("schedules: a newer wake-up replaces the slot: one row, pending, "
+	      "its next, human from the clamped delay, noop 2",
+	      sc_lines(o) == 1 &&
+	      sc_row(o, "wakeup", "\"kind\":\"wakeup\"", "\"status\":\"pending\"",
+	             "\"cron\":null", "\"human\":\"in 1m\"", "\"prompt\":\"p2\"",
+	             "\"reason\":\"r2\"", "\"next\":\"2026-11-27T08:02:00Z\"",
+	             "\"noop_streak\":2", NULL));
+	free(o);
+	sc_begin(&f, 0);
+	sc_feed(&f, SC_USE, 0, "w1", "ScheduleWakeup", "{\"delaySeconds\":1200,"
+	        "\"reason\":\"r1\",\"prompt\":\"p1\",\"noop\":false}");
+	sc_feed(&f, SC_RES, 0, "{\"scheduledFor\":1795767600000,"
+	        "\"clampedDelaySeconds\":1200,\"wasClamped\":false}", "w1", "");
+	sc_feed(&f, SC_FIRE, 20, "zz99", ",\"taskKind\":\"loop\",\"cronKind\":"
+	        "\"loop\",\"noOpStreak\":5");
+	big = sc_end(&f, 1, SC_T0 + 1300);
+	sc_begin(&f, 0);
+	sc_feed(&f, SC_USE, 0, "w1", "ScheduleWakeup", "{\"delaySeconds\":1200,"
+	        "\"reason\":\"r1\",\"prompt\":\"p1\",\"noop\":false}");
+	sc_feed(&f, SC_RES, 0, "{\"scheduledFor\":1795767600000,"
+	        "\"clampedDelaySeconds\":1200,\"wasClamped\":false}", "w1", "");
+	sc_feed(&f, SC_USE, 1, "w3", "ScheduleWakeup", "{\"delaySeconds\":60,"
+	        "\"reason\":\"done\",\"prompt\":\"p\",\"noop\":false,"
+	        "\"stop\":true}");
+	sc_feed(&f, SC_RES, 1, "{\"stopped\":true,\"cancelledWakeups\":1}", "w3",
+	        "");
+	o = sc_end(&f, 1, SC_T0 + 90);
+	CHECK("schedules: a loop fire: the wake-up fired, fires 1, noop from "
+	      "noOpStreak; a stop: deleted; no cron row for the fire's id",
+	      sc_lines(big) == 1 &&
+	      sc_row(big, "wakeup", "\"status\":\"fired\"", "\"fires\":1,",
+	             "\"last_fired\":\"2026-11-27T08:20:00Z\"",
+	             "\"noop_streak\":5", "\"human\":\"in 20m\"", NULL) &&
+	      sc_lines(o) == 1 && sc_row(o, "wakeup", "\"status\":\"deleted\"",
+	                                 "\"next\":null", NULL));
+	free(o);
+	free(big);
+
+	/* error results change nothing */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "aaaa0001", "true");
+	sc_feed(&f, SC_USE, 1, "tu2", "CronCreate", "{\"cron\":\"bad\","
+	        "\"prompt\":\"x\",\"recurring\":true}");
+	sc_feed(&f, SC_RES, 1, "\"Error: invalid cron\"", "tu2", "");
+	sc_feed(&f, SC_USE, 1, "tu3", "CronCreate", "{\"cron\":\"* * * * *\","
+	        "\"prompt\":\"x\",\"recurring\":true}");
+	sc_feed(&f, SC_RES, 1, "{\"id\":\"eeee0005\"}", "tu3",
+	        ",\"is_error\":true");
+	sc_feed(&f, SC_USE, 2, "tu4", "CronDelete", "{\"id\":\"aaaa0001\"}");
+	sc_feed(&f, SC_RES, 2, "\"Error: no such job\"", "tu4", "");
+	sc_feed(&f, SC_USE, 2, "tu5", "ScheduleWakeup", "{\"delaySeconds\":60,"
+	        "\"reason\":\"r\",\"prompt\":\"p\",\"noop\":false}");
+	sc_feed(&f, SC_RES, 2, "{\"scheduledFor\":1795766520000}", "tu5",
+	        ",\"is_error\":true");
+	o = sc_end(&f, 1, SC_T0 + 300);
+	CHECK("schedules: error results (a string toolUseResult, is_error) "
+	      "change nothing",
+	      sc_lines(o) == 1 &&
+	      sc_row(o, "aaaa0001", "\"status\":\"pending\"", NULL));
+	free(o);
+
+	/* a malformed snapshot, an oversized one: skipped whole */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "aaaa0001", "true");
+	sc_feed(&f, SC_SNAP, 1, "\"tasks\":{\"id\":\"x\"},\"ended\":[]");
+	sc_feed(&f, SC_SNAP, 1, "\"tasks\":[{\"id\":\"ffff0006\"},{\"cron\":"
+	        "\"* * * * *\"}],\"ended\":[]");
+	sc_feed(&f, SC_SNAP, 1, "\"tasks\":[],\"ended\":[\"aaaa0001\"],"
+	        "\"wakeup\":\"soon\"");
+	big = malloc(300 * 40 + 64);
+	bl = big ? (size_t)sprintf(big, "\"tasks\":[") : 0;
+	for (k = 0; big && k < 257; k++)
+		bl += (size_t)sprintf(big + bl, "%s{\"id\":\"g%07d\"}", k ? "," : "",
+		                      k);
+	if (big)
+	{
+		strcpy(big + bl, "],\"ended\":[]");
+		sc_feed(&f, SC_SNAP, 2, big);
+	}
+	free(big);
+	o = sc_end(&f, 1, SC_T0 + 300);
+	CHECK("schedules: a malformed snapshot (tasks no list, a task without "
+	      "an id, wakeup no object) or one of 257 tasks is skipped whole",
+	      sc_lines(o) == 1 &&
+	      sc_row(o, "aaaa0001", "\"status\":\"pending\"", NULL));
+	free(o);
+
+	/* past XR_PENDING open calls the oldest is not waited for */
+	sc_begin(&f, 0);
+	for (k = 0; k < 257; k++)
+	{
+		char tu[16];
+
+		snprintf(tu, sizeof tu, "t%d", k);
+		sc_feed(&f, SC_USE, 0, tu, "CronCreate",
+		        "{\"cron\":\"* * * * *\",\"prompt\":\"x\"}");
+	}
+	for (k = 0; k < 257; k++)
+	{
+		char tu[16], r[64];
+
+		snprintf(tu, sizeof tu, "t%d", k);
+		snprintf(r, sizeof r, "{\"id\":\"c%07d\"}", k);
+		sc_feed(&f, SC_RES, 1, r, tu, "");
+	}
+	o = sc_end(&f, 1, SC_T0);
+	CHECK("schedules: 257 open calls: the oldest's result is dropped, 256 "
+	      "rows",
+	      sc_lines(o) == 256 && !strstr(o, "\"c0000000\"") &&
+	      sc_row(o, "c0000256", "\"status\":\"pending\"",
+	             "\"recurring\":false", NULL));
+	free(o);
+
+	/* past XR_SCHEDS rows the oldest go, counted */
+	sc_begin(&f, 0);
+	big = malloc(256 * 40 + 64);
+	for (k = 0; big && k < 21; k++)
+	{
+		int j;
+
+		bl = (size_t)sprintf(big, "\"tasks\":[");
+		for (j = 0; j < 250; j++)
+			bl += (size_t)sprintf(big + bl, "%s{\"id\":\"h%07d\"}",
+			                      j ? "," : "", k * 250 + j);
+		strcpy(big + bl, "]");
+		sc_feed(&f, SC_SNAP, 1, big);
+	}
+	free(big);
+	o = sc_end(&f, 1, SC_T0);
+	CHECK("schedules: 5250 rows: the newest 5000 kept, dropped 250",
+	      sc_lines(o) == 5000 && !strstr(o, "\"h0000249\"") &&
+	      strstr(o, "\"h0000250\"") &&
+	      strstr(o, "{\"done\":true,\"count\":5000,\"dropped\":250}\n"));
+	free(o);
+
+	/* not live: a pending session row is ended */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "aaaa0001", "true");
+	sc_feed(&f, SC_USE, 0, "w1", "ScheduleWakeup", "{\"delaySeconds\":600,"
+	        "\"reason\":\"r\",\"prompt\":\"p\",\"noop\":false}");
+	sc_feed(&f, SC_RES, 0, "{\"scheduledFor\":1795767000000,"
+	        "\"clampedDelaySeconds\":600,\"wasClamped\":false}", "w1", "");
+	o = sc_end(&f, 0, SC_T0 + 60);
+	CHECK("schedules: not live: pending cron and wake-up are ended, next "
+	      "null, live false",
+	      strstr(o, "\"live\":false") &&
+	      sc_row(o, "aaaa0001", "\"status\":\"ended\"", "\"next\":null",
+	             NULL) &&
+	      sc_row(o, "wakeup", "\"status\":\"ended\"", NULL));
+	free(o);
+
+	/* order: pending by next, the wake-up, the rest newest first */
+	sc_begin(&f, 0);
+	SC_CC(0, "tu1", "aaaa0001", "false");
+	sc_feed(&f, SC_USE, 1, "tu2", "CronCreate", "{\"cron\":\"* * * * *\","
+	        "\"prompt\":\"x\",\"recurring\":true}");
+	sc_feed(&f, SC_RES, 1, "{\"id\":\"bbbb0002\",\"recurring\":true,"
+	        "\"nextFireAt\":1795766460000}", "tu2", "");
+	SC_CC(2, "tu3", "cccc0003", "false");
+	sc_feed(&f, SC_USE, 3, "w1", "ScheduleWakeup", "{\"delaySeconds\":60,"
+	        "\"reason\":\"r\",\"prompt\":\"p\",\"noop\":false}");
+	sc_feed(&f, SC_RES, 3, "{\"scheduledFor\":1795766640000,"
+	        "\"clampedDelaySeconds\":60,\"wasClamped\":false}", "w3", "");
+	sc_feed(&f, SC_RES, 3, "{\"scheduledFor\":1795766640000,"
+	        "\"clampedDelaySeconds\":60,\"wasClamped\":false}", "w1", "");
+	sc_feed(&f, SC_FIRE, 5, "aaaa0001", "");
+	sc_feed(&f, SC_FIRE, 6, "cccc0003", "");
+	SC_CC(7, "tu4", "dddd0004", "true");
+	o = sc_end(&f, 1, SC_T0 + 60);
+	{
+		const char *a = strstr(o, "\"bbbb0002\""),
+		           *b = strstr(o, "\"dddd0004\""),
+		           *w = strstr(o, "\"id\":\"wakeup\""),
+		           *c = strstr(o, "\"cccc0003\""),
+		           *x = strstr(o, "\"aaaa0001\"");
+
+		CHECK("schedules: order: pending by next soonest, the wake-up, "
+		      "then the rest newest first",
+		      a && b && w && c && x && a < b && b < w && w < c && c < x);
+	}
+	free(o);
+
+	/* Codex: heartbeats; none gives the warn */
+	sc_begin(&f, 1);
+	for (k = 0; k < 2; k++)
+		sc_feed(&f, "{\"timestamp\":\"2026-11-27T08:%02d:01Z\",\"type\":"
+		        "\"response_item\",\"payload\":{\"type\":\"message\","
+		        "\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
+		        "\"text\":\"<heartbeat>\\n  <automation_id>auto-1"
+		        "</automation_id>\\n  <current_time_iso>2026-11-27T08:%02d:"
+		        "00Z</current_time_iso>\\n  <instructions>\\nCheck the "
+		        "build\\n  </instructions>\\n</heartbeat>\"}]}}", k * 30,
+		        k * 30);
+	sc_feed(&f, "{\"timestamp\":\"2026-11-27T09:00:00Z\",\"type\":"
+	        "\"response_item\",\"payload\":{\"type\":\"message\",\"role\":"
+	        "\"user\",\"content\":[{\"type\":\"input_text\",\"text\":"
+	        "\"<heartbeat><automation_id>a b</automation_id></heartbeat>\"}"
+	        "]}}");
+	o = sc_end(&f, 1, SC_T0 + 3600);
+	big = sc_end((sc_begin(&f, 1), &f), 1, SC_T0);
+	CHECK("schedules: Codex: a heartbeat envelope gives a heartbeat row "
+	      "(fired, fires 2, last_fired its time), a bad id none; none at "
+	      "all: source codex and the warn",
+	      strstr(o, "\"source\":\"codex\"") && sc_lines(o) == 1 &&
+	      sc_row(o, "auto-1", "\"kind\":\"heartbeat\"", "\"status\":\"fired\"",
+	             "\"fires\":2,", "\"prompt\":\"Check the build\"",
+	             "\"last_fired\":\"2026-11-27T08:30:00Z\"",
+	             "\"created\":\"2026-11-27T08:00:00Z\"", NULL) &&
+	      strstr(big, "\"source\":\"codex\",\"live\":true,\"title\":null,"
+	             "\"partial\":false,\"warn\":\"Codex CLI has no session "
+	             "scheduler; Codex app automations show when they fire\"}") &&
+	      strstr(big, "{\"done\":true,\"count\":0,\"dropped\":0}"));
+	free(o);
+	free(big);
+	{
+		char *w = NULL;
+		size_t wl = 0;
+		FILE *m = open_memstream(&w, &wl);
+
+		if (m)
+		{
+			xr_scheds_print(m, NULL, "s", "id", 0, NULL, 0, SC_T0);
+			fclose(m);
+		}
+		CHECK("schedules: none (a shell): source none, done 0",
+		      w && !strcmp(w, "{\"schema\":1,\"block\":\"schedules\","
+		                   "\"session\":\"s\","
+		                   "\"session_id\":\"id\",\"source\":\"none\","
+		                   "\"live\":false,\"title\":null,\"partial\":false}\n"
+		                   "{\"done\":true,\"count\":0,\"dropped\":0}\n"));
+		free(w);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7962,6 +8426,7 @@ main(int argc, char **argv)
 	t_quote();
 	t_search();
 	t_tasks();
+	t_scheds();
 	t_anchors();
 	t_newest();
 	t_prefilter();

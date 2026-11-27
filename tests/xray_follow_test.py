@@ -1478,7 +1478,7 @@ def test_follow_fast():
         hdr0, tk0, _ = blocks(objs[:s2])
         check("fast: with --tasks --memory, the fast snapshot's blocks "
               "follow it (the window's tasks: the new, not the old)",
-              len(snaps) == 2 and ks[1] == "session" and
+              len(snaps) == 2 and ks[1] == "block" and
               sorted(hdr0) == ["memory", "task"] and
               [t["title"] for t in tk0.values()] == ["New task"],
               (ks[:8], tk0))

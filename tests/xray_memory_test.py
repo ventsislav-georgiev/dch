@@ -238,7 +238,8 @@ def test_claude():
     check("a FIFO in the directory does not hang the answer (%.1fs)"
           % (time.time() - t0), time.time() - t0 < 20)
     check("exit 0, the header line", rc == 0 and hd == {
-        "schema": 1, "source": "claude", "title": None, "partial": False},
+        "schema": 1, "block": "memory", "source": "claude", "title": None,
+        "partial": False},
         (rc, hd, err))
     rows = [r for r in rows if r["scope"] != "managed"]  # the host's own
     by = {r["id"]: r for r in rows}

@@ -874,8 +874,8 @@ def test_tasks():
         check("--tasks on a live Codex: source codex, the newest plan in "
               "its order, rows by position, times kept while a step stands",
               r.returncode == 0 and len(a) == 2 and ls and
-              ls[0] == {"schema": 1, "session": n, "session_id": TIDT,
-                        "source": "codex", "title": None,
+              ls[0] == {"schema": 1, "block": "tasks", "session": n,
+                        "session_id": TIDT, "source": "codex", "title": None,
                         "partial": False} and
               [(t["id"], t["title"], t["status"], t["label"], t["active"],
                 t["note"], t["created"], t["created_chapter"], t["updated"],
