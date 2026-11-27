@@ -6929,6 +6929,30 @@ dch_codex_below(long child)
 	return 0;
 }
 
+/* Both a Claude and a Codex under the session's program: the nearer one
+** wins, a tie Claude (#680). cxd = the Codex's depth (-1 none), n/depth =
+** claude_find's count and best.depth. */
+static int
+codex_wins(int cxd, int n, int depth)
+{
+	return cxd >= 0 && (n <= 0 || cxd < depth);
+}
+
+/* The agent the verbs act on below `root`, as --ls-json's "agent": -1 a
+** Codex (*cx its pid, else 0), or claude_find's count (*r the shallowest
+** Claude; 0 none). */
+static int
+agent_front(long root, struct crec *r, long *cx)
+{
+	int n = claude_find(root, 1, r);
+
+	*cx = dch_codex_below(root);
+	if (codex_wins(*cx > 0 ? proc_depth(*cx, root) : -1, n, r->depth))
+		return -1;
+	*cx = 0;
+	return n;
+}
+
 /* ---- --stop: pause, /exit, end the session (#046) --------------------
 **
 ** `--stop <name>...|--all` ends sessions for --revive to bring back: the
@@ -9366,12 +9390,12 @@ restart_agents(int force, const char *only, int json)
 		a->argc = a->ci.argc;
 		a->tok = dch_claude_tok(a->argv, a->argc);
 		n = a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0
-		    ? claude_find(a->ci.pid, 1, &r) : 0;
+		    ? agent_front(a->ci.pid, &r, &cx) : 0;
 		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
-		/* no Claude: a Codex is paused, /quit and resumed (#659) */
-		if (n == 0 && a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0 &&
-		    (cx = dch_codex_below(a->ci.pid)) > 0)
+		/* a Codex in front: paused, /quit and resumed (#659) */
+		if (n < 0)
 		{
+			n = 0;
 			a->codex = 1;
 			a->tok = codex_tok(a->argv, a->argc);
 		}
@@ -9653,7 +9677,8 @@ restart_agents(int force, const char *only, int json)
 	struct cmd_info ci;
 	char path[1100], onlyb[256];
 	struct crec r;
-	int k, hit = 0, h, cx;
+	long xp;
+	int k, hit = 0, h, cx, ag;
 
 	(void)force;
 	if (only)
@@ -9669,11 +9694,11 @@ restart_agents(int force, const char *only, int json)
 		if (cmd_query(path, &ci) == 0)
 		{
 			h = dch_claude_tok(ci.argv, ci.argc) < ci.argc;
-			cx = !h && ci.pid > 0 && strcmp(ci.state, "held") != 0 &&
-			     dch_codex_below(ci.pid) > 0;
-			/* a Claude typed into the session's shell, as the full build */
-			if (!h && !cx && ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0)
-				h = 1;
+			/* else the agent in front, as the full build */
+			ag = !h && ci.pid > 0 && strcmp(ci.state, "held") != 0
+			     ? agent_front(ci.pid, &r, &xp) : 0;
+			cx = ag < 0;
+			h |= ag > 0;
 			cmd_info_free(&ci);
 			if ((h || cx) && json)
 			{
@@ -9913,6 +9938,7 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 		struct cmd_info ci;
 		struct crec r;
 		long cx = 0;
+		int ag;
 
 		session_sock_path(names[k], path, sizeof path);
 		if (self && *self &&
@@ -9930,10 +9956,9 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			** suspended one reads nothing: the shell in front would
 			** (#282) */
 			c = ci.pid <= 0 ? SAY_NOT_CLAUDE
-			    : claude_find(ci.pid, 1, &r) != 0
-			    ? (proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : -1)
-			    : (cx = dch_codex_below(ci.pid)) <= 0 ? SAY_NOT_CLAUDE
-			    : proc_fg(ci.pid, cx) == 0 ? SAY_NOT_FG : -1;
+			    : (ag = agent_front(ci.pid, &r, &cx)) == 0 ? SAY_NOT_CLAUDE
+			    : proc_fg(ci.pid, ag < 0 ? cx : r.pid) == 0 ? SAY_NOT_FG
+			    : -1;
 			cmd_info_free(&ci);
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -10020,7 +10045,7 @@ do_run_verb(const char *name, char **words, int nwords)
 	struct crec r;
 	const char *self = getenv("DCH_SESSION");
 	char selfb[256], cb[256], path[1100];
-	long fg = -1;
+	long fg = -1, cx;
 	int c = 0;
 #ifdef HAVE_LIBGHOSTTY_VT
 	char *text;
@@ -10039,7 +10064,7 @@ do_run_verb(const char *name, char **words, int nwords)
 	/* a suspended Claude (#282): the burst, only when what is in front of
 	** its terminal is in front up to the session's (a wrapper that does
 	** not read keeps it for the shell around it, MED-CW1) */
-	if (ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
+	if (ci.pid > 0 && agent_front(ci.pid, &r, &cx) > 0 &&
 	    (c = proc_fg(ci.pid, r.pid)) == 0 &&
 	    (proc_stat(r.pid, &fg, NULL) < 0 || fg <= 0 ||
 	     /* a live member: in `grep … | less` the leader is gone (LOW-CW5) */
@@ -10168,8 +10193,7 @@ do_stop_verb(char **names, int nnames, int json)
 		}
 		mpid = proc_ppid(ci.pid);
 		/* no Claude: a Codex is paused and /quit the same way (#659) */
-		if (claude_find(ci.pid, 1, &r) == 0 &&
-		    (cx = dch_codex_below(ci.pid)) <= 0)
+		if (agent_front(ci.pid, &r, &cx) == 0)
 		{
 			int cp = claude_proc(ci.pid) > 0;
 
@@ -19495,7 +19519,8 @@ main_run(int argc, char **argv)
 			int cxd = cx > 0 && cr.v ? proc_depth(cx, cr.v[k].root) : -1;
 			const char *ag = cr.v && cr.v[k].n > 0 ? "claude" : NULL;
 
-			if (cxd >= 0 && (!ag || cxd < cr.v[k].best.depth))
+			if (codex_wins(cxd, ag ? cr.v[k].n : 0,
+			               ag ? cr.v[k].best.depth : 0))
 				ag = "codex";
 			printf(",\"agent\":%s%s%s", ag ? "\"" : "", ag ? ag : "null",
 			       ag ? "\"" : "");
