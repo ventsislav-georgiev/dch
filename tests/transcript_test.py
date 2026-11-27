@@ -34,13 +34,18 @@ or meta skipped at once; 32 unnamed shells x 250 x 1.2 MB subagent files
 under 2 s (the per-call read budget). #711: each shell's "output" and
 "pgid"; --stop-shell ends a shell and its child, not the Claude or a
 sibling shell; no_shell, not_claude, no_session, --json, usage exit 2.
-#712 "subagents": running (also one silent 30 min), done (tool_result,
+#712 "subagents": running (also one started 2000 s ago), done (tool_result,
 or meta finished:true alone), failed (is_error, with finished:true too),
 a background agent done or killed by its <task-notification>; ended
 before the 10-minute window, a day silent, no meta: left out. "row" off a
 fake "<glyph> <agentType>  <activity>" panel: the running ones by launch
 order, a lingering ended run aligned by type; a type mismatch, two
-offsets or a same-ms same-type tie give null; key order.
+offsets or a same-ms same-type tie give null; key order. #719: is_error
+in Claude Code's key order (before tool_use_id) and on a two-result line
+bound to its own block; meta stoppedByUser:true is failed; "ended" for
+ended ones; X Y X in one ms nulls both X; an agent with no end last
+written before its Claude started is left out; a panel cut at det_panel's
+4096 bytes gives null rows.
 
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
@@ -685,7 +690,7 @@ def main():
         # "<glyph> <agentType>  <activity>", reprinted per case from a file
         sa = "tt-sa"
         sapf = os.path.join(tmp, "sa-panel")
-        sap = spawn(sa, "/bin/sh", "-c",
+        sap = spawn(sa, "--size", "300x40", "/bin/sh", "-c",
                     "while :; do if [ -f %s ]; then printf '\\033[2J\\033[H'; "
                     "cat %s; rm -f %s; fi; sleep 0.2; done" % (sapf, sapf, sapf))
         sa_sid = "71271271-2712-7127-1271-271271271271"
@@ -697,13 +702,20 @@ def main():
         def jl2(o):
             return json.dumps(o, separators=(",", ":")) + "\n"
 
-        def tres(tu, t, err=False, bg=False):
-            c = {"tool_use_id": tu, "type": "tool_result",
-                 "content": [{"type": "text", "text": "ok"}]}
+        def tblock(tu, err=False):
+            # Claude Code's key orders: ok results put tool_use_id first,
+            # error ones last (after is_error)
             if err:
-                c["is_error"] = True
+                return {"type": "tool_result", "content": "[Request "
+                        "interrupted by user for tool use]",
+                        "is_error": True, "tool_use_id": tu}
+            return {"tool_use_id": tu, "type": "tool_result",
+                    "content": [{"type": "text", "text": "ok"}]}
+
+        def tres(tu, t, err=False, bg=False, more=()):
             return jl2({"type": "user", "timestamp": iso2(t),
-                        "message": {"role": "user", "content": [c]},
+                        "message": {"role": "user", "content":
+                                    [tblock(tu, err)] + list(more)},
                         "toolUseResult": {"status": "async_launched",
                                           "isAsync": True} if bg
                         else {"status": "completed"}})
@@ -720,7 +732,8 @@ def main():
         sad = os.path.join(os.path.dirname(satp), sa_sid, "subagents")
         os.makedirs(sad)
 
-        def agent(aid, typ, desc, start, mt, meta=True, fin=None):
+        def agent(aid, typ, desc, start, mt, meta=True, fin=None,
+                  stop=False):
             # fin: the meta says "finished":true, rewritten at that time
             if meta:
                 mp = os.path.join(sad, "agent-%s.meta.json" % aid)
@@ -729,6 +742,8 @@ def main():
                      "toolUseId": "toolu_" + aid}
                 if fin:
                     m["finished"] = True
+                if stop:
+                    m["stoppedByUser"] = True
                 with open(mp, "w") as f:
                     json.dump(m, f)
                 if fin:
@@ -743,10 +758,10 @@ def main():
 
         lite = run("--read", sa).returncode == 3
 
-        def panel(*types):
+        def panel(*types, act="Waiting …"):
             with open(sapf + ".tmp", "w") as f:
                 f.write("⏺ main\n" + "".join(
-                    "◯ %s  Waiting …\n" % t for t in types))
+                    "◯ %s  %s\n" % (t, act) for t in types))
             os.rename(sapf + ".tmp", sapf)
             until(lambda: lite or field(sa, "agents") == len(types))
             got = field(sa, "subagents")
@@ -759,7 +774,8 @@ def main():
         def nul(*r):
             return [None] * len(r) if lite else list(r)
 
-        agent("aSLOW", "slow-worker", "Long build", now - 2000, now - 1800)
+        # its file written since its Claude started (#719: else a leftover)
+        agent("aSLOW", "slow-worker", "Long build", now - 2000, now)
         agent("aKILL", "Explore", "Killed job", now - 210, now - 25)
         agent("aBG", "Explore", "Background job", now - 200, now - 25)
         agent("aDONE", "general-purpose", "Fix the flaky tests", now - 120,
@@ -794,42 +810,46 @@ def main():
               ids == ["aERR", "aRUN", "aFERR", "aFIN", "aDONE", "aBG",
                       "aKILL", "aSLOW"])
 
-        def want(aid, typ, desc, start, state, row):
-            return {"id": aid, "type": typ, "description": desc,
-                    "started": start, "state": state,
-                    "row": None if lite else row}
+        def want(aid, typ, desc, start, state, row, ended=None):
+            w = {"id": aid, "type": typ, "description": desc,
+                 "started": start, "state": state}
+            if ended is not None:
+                w["ended"] = ended
+            w["row"] = None if lite else row
+            return w
         check("running: no end line, no finished (%s)" % g.get("aRUN"),
               g.get("aRUN") == want("aRUN", "Explore", "Read the docs",
                                     now - 60, "running", 6))
-        check("running: its file 30 min old, still listed (%s)"
+        check("running: started 2000 s ago, still listed (%s)"
               % g.get("aSLOW"),
               g.get("aSLOW") == want("aSLOW", "slow-worker", "Long build",
                                      now - 2000, "running", 0))
         check("done: its tool_result (%s)" % g.get("aDONE"),
               g.get("aDONE") == want("aDONE", "general-purpose",
                                      "Fix the flaky tests", now - 120,
-                                     "done", 3))
+                                     "done", 3, now - 30))
         check("done: meta finished:true with no end line (%s)"
               % g.get("aFIN"),
               g.get("aFIN") == want("aFIN", "Plan", "Plan it", now - 100,
-                                    "done", 4))
+                                    "done", 4, now - 50))
         check("failed: meta finished:true and an is_error end (%s)"
               % g.get("aFERR"),
               g.get("aFERR") == want("aFERR", "Plan", "Plan badly", now - 90,
-                                     "failed", 5))
+                                     "failed", 5, now - 44))
         fs = g.get("aERR", {}).get("started")
         check("failed: is_error; no first-line timestamp: started from the "
               "file; past the panel: row null (%s)" % g.get("aERR"),
               isinstance(fs, int) and abs(fs - now) < 60 and
               dict(g.get("aERR", {}), started=0) ==
-              want("aERR", "Explore", "Break it", 0, "failed", None))
+              want("aERR", "Explore", "Break it", 0, "failed", None,
+                   now - 30))
         check("background: done by its <task-notification>, the launch "
               "result no end (%s)" % g.get("aBG"),
               g.get("aBG") == want("aBG", "Explore", "Background job",
-                                   now - 200, "done", 2))
+                                   now - 200, "done", 2, now - 20))
         check("background killed: failed (%s)" % g.get("aKILL"),
               g.get("aKILL") == want("aKILL", "Explore", "Killed job",
-                                     now - 210, "failed", 1))
+                                     now - 210, "failed", 1, now - 20))
         g, _ = panel("slow-worker", "Explore")
         r = rowsof(g, "aSLOW", "aRUN", "aDONE", "aERR")
         check("panel of the running ones: their rows by launch order, the "
@@ -847,9 +867,9 @@ def main():
                 keys = rk[rk.index("shells"):rk.index("shells") + 2] + \
                     [k for k, _ in sub[0]]
         check("keys: subagents right after shells; id, type, description, "
-              "started, state, row (%s)" % keys,
+              "started, state, ended (an ended one), row (%s)" % keys,
               keys == ["shells", "subagents", "id", "type", "description",
-                       "started", "state", "row"])
+                       "started", "state", "ended", "row"])
         for fn in os.listdir(sad):
             os.unlink(os.path.join(sad, fn))
         open(satp, "w").close()
@@ -860,6 +880,60 @@ def main():
         r = rowsof(g, "aT1", "aT2")
         check("same type, same start ms: rows null (%s)" % r,
               r == [None, None])
+        # #719: X Y X in one ms: Y between hides no tie (these names read
+        # back in that order on APFS, as in QA's probe)
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        for aid, typ in (("aT5", "Explore"), ("aT3", "Plan"),
+                         ("aT1", "Explore")):
+            agent(aid, typ, "t", "2026-01-01T00:00:00.123Z", now)
+        g, _ = panel("Explore", "Plan", "Explore")
+        r = rowsof(g, "aT5", "aT1")
+        check("X Y X in one ms: both X rows null (%s)" % r,
+              r == [None, None])
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        # #719: is_error bound to its own result block, both key orders
+        agent("aOKA", "Explore", "a", now - 50, now - 30)
+        agent("aBADB", "Plan", "b", now - 49, now - 30)
+        agent("aSTOP", "Explore", "s", now - 48, now - 35, fin=now - 35,
+              stop=True)
+        with open(satp, "w") as f:
+            f.write(tres("toolu_aOKA", now - 29,
+                         more=[tblock("toolu_aBADB", err=True)]))
+        g, _ = panel("Explore")
+        st = [(g.get(i, {}).get("state"), g.get(i, {}).get("ended"))
+              for i in ("aOKA", "aBADB", "aSTOP")]
+        check("two results on one line, ok A then error B (is_error before "
+              "its tool_use_id): A done, B failed; meta stoppedByUser: "
+              "failed (%s)" % st,
+              st == [("done", now - 29), ("failed", now - 29),
+                     ("failed", now - 35)])
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        open(satp, "w").close()
+        # #719: no end, last written before its Claude started: a dead
+        # Claude's leftover, left out; the live one gets its row
+        agent("aGHOST", "Explore", "g", now - 700, now - 600)
+        agent("aLIVE", "Explore", "l", now - 5, now)
+        g, _ = panel("Explore")
+        check("an agent with no end written before its Claude started: "
+              "left out; the live one's exact row (%s)" % sorted(g),
+              "aGHOST" not in g and g.get("aLIVE") ==
+              want("aLIVE", "Explore", "l", now - 5, "running", 0))
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        # #719: 2 lingering ended + 16 running, rows of 245 bytes: the
+        # panel copy keeps 16 rows of 18; matched as whole it would read
+        # rows 0..15 for the running ones (truly 2..17)
+        for i in range(18):
+            agent("aC%02d" % i, "Explore", "c", now - 100 + i,
+                  now - 30 if i < 2 else now,
+                  fin=now - 30 if i < 2 else None)
+        g, _ = panel(*["Explore"] * 18, act="x" * 236)
+        r = rowsof(g, *["aC%02d" % i for i in range(18)])
+        check("a panel cut at 4096 bytes: every row null (%s)" % r,
+              r == [None] * 18 and len(g) == 18)
         for fn in os.listdir(sad):
             os.unlink(os.path.join(sad, fn))
         for i in range(4):
