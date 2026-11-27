@@ -9644,6 +9644,7 @@ restart_agents(int force, const char *only, int json)
 	struct slist sl = {0};
 	struct cmd_info ci;
 	char path[1100], onlyb[256];
+	struct crec r;
 	int k, hit = 0, h, cx;
 
 	(void)force;
@@ -9662,6 +9663,9 @@ restart_agents(int force, const char *only, int json)
 			h = dch_claude_tok(ci.argv, ci.argc) < ci.argc;
 			cx = !h && ci.pid > 0 && strcmp(ci.state, "held") != 0 &&
 			     dch_codex_below(ci.pid) > 0;
+			/* a Claude typed into the session's shell, as the full build */
+			if (!h && !cx && ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0)
+				h = 1;
 			cmd_info_free(&ci);
 			if ((h || cx) && json)
 			{

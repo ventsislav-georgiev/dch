@@ -225,6 +225,16 @@ def main(part):
                       "c": ("skipped", "no_screen", "claude"),
                       "x": ("skipped", "no_screen", "codex"),
                       "s": ("skipped", "not_claude", None)})
+            hn = sess("liteh", "sh")
+            time.sleep(0.5)
+            run("--run", hn, "claude")
+            until(lambda: len(starts(hn)) >= 1)
+            time.sleep(0.5)
+            r = restart_all("--json")
+            f2 = (agent_finals(ndjson(r.stdout)).get(hn) or {})
+            check("lite: Claude typed into a shell: skipped/no_screen/claude",
+                  (f2.get("result"), f2.get("reason"), f2.get("agent")) ==
+                  ("skipped", "no_screen", "claude"))
             r = run("--restart", "--all")
             check("lite: no note without --include-agents",
                   "agents:" not in r.stdout)
