@@ -62,7 +62,10 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-restart
 .IR name \fR|\fP \fB\-\-all\fP
-.RB [ \-\-include\-agents ]
+.RB [ \-\-include\-agents
+.RB [ \-\-codex\-drop\-provider ]
+.RB [ \-\-codex\-config
+.IR K = V ]...]
 .RB [ \-f ]
 .RB [ \-\-json ]
 .br
@@ -75,6 +78,9 @@ dch \- detachable terminal sessions with a headless agent API
 .IR K = V ]...
 .RB [ \-\-unset
 .IR K ]...
+.RB [ \-\-codex\-drop\-provider ]
+.RB [ \-\-codex\-config
+.IR K = V ]...
 .RB [ \-\-json ]
 .br
 .BR "dch \-\-pin" | \-\-unpin
@@ -3304,6 +3310,49 @@ default stay dch's. They are local only: with a remote name or
 the revive is refused, exit 2, and nothing is sent.
 A shell that is revived reads its own rc files again, so a Claude typed
 into it gets what they export.
+.B \-\-codex\-drop\-provider
+and
+.B \-\-codex\-config
+.IR K = V
+(here and with
+.BR "\-\-restart \-\-include\-agents" )
+change a Codex's
+.B codex resume
+argv only, every Codex
+.B \-\-all
+selects included. The first leaves out each recorded
+.BI \-c " K=V" ,
+.BI \-c K=V ,
+.BI \-\-config " K=V"
+and
+.BI \-\-config= K=V
+whose key (before the first
+.BR = ,
+whitespace trimmed, a quote around it dropped) is
+.B model_provider
+or starts with
+.BR model_providers. ;
+other
+.B \-c
+words stay. Each
+.B \-\-codex\-config
+(at most 16;
+.I K
+of
+.BR [A\-Za\-z0\-9_.\-]+ ,
+at most 1024 bytes, no control character, else exit 2 and nothing runs)
+is appended as
+.BI \-c " K=V"
+after the kept options, before the prompt and its
+.BR \-\- ,
+in order. A Claude or shell session ignores them; its
+.B \-\-json
+line carries
+.B codex_ignored
+with their count. The new session's record keeps the argv it ran, so a later
+revive without the flags keeps the drop and the appended words. Allowed over
+.BR "dch serve" ,
+checked there too.
 A revive under another name
 .RB ( \-\-as ,
 or
@@ -3899,7 +3948,7 @@ a session name that passes the attach name check and does not start with
 \-k \fIn\fP;  \-d \fIn\fP;  \-m \fIn\fP \fIalias\fP
 \-\-spawn \fIn\fP [\-\-size \fIC\fPx\fIR\fP] [\-\-] \fIcmd...\fP    (create, and cwd)
 \-\-history \-\-json
-\-\-revive \fIn\fP [\-\-as \fInew\fP] [\-\-no\-message] \-\-json    (create; never \-\-env or \-\-unset)
+\-\-revive \fIn\fP [\-\-as \fInew\fP] [\-\-no\-message] [\-\-codex\-drop\-provider] [\-\-codex\-config \fIK=V\fP]... \-\-json    (create; never \-\-env or \-\-unset)
 \-\-pin|\-\-unpin|\-\-forget \fIn\fP... \-\-json;  \-\-forget \-\-all \-\-json
 \-\-stop \fIn\fP... \-\-json
 \-\-say \fIn\fP \-\-json \-\- \fItext\fP

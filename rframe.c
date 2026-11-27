@@ -482,7 +482,8 @@ static const struct ctl_verb
 	{ "--spawn",    CN_ONE,  CT_TEXT,  CTL_CREATE, " --size " },
 	{ "--history",  CN_NONE, CT_NONE,  CTL_JSON, "" },
 	{ "--revive",   CN_ONE,  CT_NONE,  CTL_CREATE | CTL_LONG | CTL_JSON,
-	                " --as --no-message " },
+	                " --as --no-message --codex-drop-provider"
+	                " --codex-config " },
 	{ "--pin",      CN_MANY, CT_NONE,  CTL_JSON, "" },
 	{ "--unpin",    CN_MANY, CT_NONE,  CTL_JSON, "" },
 	{ "--forget",   CN_MANY, CT_NONE,  CTL_JSON | CTL_ALL, "" },
@@ -505,6 +506,21 @@ int
 ctl_known(const char *verb)
 {
 	return ctl_find(verb) != NULL;
+}
+
+int
+ctl_codex_cfg_ok(const char *s)
+{
+	size_t k = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	                     "0123456789_.-");
+	const unsigned char *p;
+
+	if (!k || s[k] != '=' || strlen(s) > 1024)
+		return 0;
+	for (p = (const unsigned char *)s; *p; p++)
+		if (*p < 0x20 || *p == 0x7f)
+			return 0;
+	return 1;
 }
 
 /* Never in a ctl's argv, but in free text: dch's other modes and help, the
@@ -835,7 +851,7 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
           size_t cap)
 {
 	const struct ctl_verb *v;
-	int i = 1, names = 0, json = 0, all = 0, dd = 0;
+	int i = 1, names = 0, json = 0, all = 0, dd = 0, cxn = 0;
 
 	if (argc < 2)
 		return ctl_no(why, cap, "a ctl request takes a verb and a "
@@ -915,6 +931,14 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
 		{
 			if (++i >= argc || !ctl_size(argv[i]))
 				return ctl_no(why, cap, "--size wants COLSxROWS");
+			kind[i] = CK_VALUE;
+		}
+		else if (!strcmp(a, "--codex-config"))
+		{
+			if (++i >= argc || !ctl_codex_cfg_ok(argv[i]) || ++cxn > 16)
+				return ctl_no(why, cap, "--codex-config wants at most "
+				              "16 K=V, K of [A-Za-z0-9_.-], 1024 bytes, "
+				              "no control characters");
 			kind[i] = CK_VALUE;
 		}
 		else if (!strcmp(a, "--as"))

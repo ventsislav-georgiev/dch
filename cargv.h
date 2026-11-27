@@ -26,9 +26,12 @@ int dch_codex_id_ok(const char *s);
 ** codex word), then `resume <id> -C <cwd>`, then in's options with their
 ** values, less a subcommand, positionals (resume/fork, a SESSION_ID, the
 ** PROMPT, everything after `--`), --last and a -C of its own; msg, when
-** non-NULL and not empty, last as the PROMPT. out holds argc + 7 entries,
-** NULL-terminated; its count. */
+** non-NULL and not empty, last as the PROMPT. #696: drop leaves out each
+** -c/--config whose key is model_provider or model_providers.*; cfg's
+** ncfg K=V go as `-c K=V` after the options, before the PROMPT. out holds
+** argc + 7 + 2 * ncfg entries, NULL-terminated; its count. */
 int dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
-                     char *msg, char **out);
+                     char *msg, char **out, int drop, char *const *cfg,
+                     int ncfg);
 
 #endif

@@ -2983,6 +2983,11 @@ usage(void)
 	    "                                             set or drop env vars\n"
 	    "                                             over the login shell's\n"
 	    "                                             (local only)\n"
+	    "  dch --revive|--restart --include-agents ... [--codex-drop-provider]\n"
+	    "      [--codex-config K=V]...                a Codex's codex resume:\n"
+	    "                                             drop its recorded\n"
+	    "                                             model_provider(s) -c\n"
+	    "                                             words, add -c K=V (16)\n"
 	    "  dch --say <name>...|--all [--json] -- <text...>\n"
 	    "                                             type a message into\n"
 	    "                                             each session's Claude\n"
@@ -7482,6 +7487,20 @@ json_phase(const char *name, const char *phase, int json)
 	fflush(stdout);
 }
 
+/* #696: --revive's and --restart --include-agents' --codex-drop-provider
+** and --codex-config K=V words, for a Codex's resume argv only. */
+static int cx_drop, cx_ncfg;
+static char *cx_cfg[16];
+
+/* --json's "codex_ignored": the codex options a session that is not a
+** Codex left unused (#696), only when some were given. */
+static void
+cx_ignored_json(const char *ag)
+{
+	if ((cx_drop || cx_ncfg) && !(ag && strcmp(ag, "codex") == 0))
+		printf(",\"codex_ignored\":%d", cx_drop + cx_ncfg);
+}
+
 /* --json's result object; xk/xv (when xk) one more string field after
 ** "name": --revive's "as", the master pass's "phase":"master". Left open
 ** for a caller that appends keys (--revive's "running"). */
@@ -7527,6 +7546,7 @@ stop_json(const char *name, const char *res, const char *code,
           const char *detail, const char *sid)
 {
 	json_final_open(name, NULL, NULL, res, code, detail, sid);
+	cx_ignored_json(stop_ag);
 	if (stop_ag)
 		printf(",\"agent\":\"%s\"}\n", stop_ag);
 	else
@@ -8722,9 +8742,10 @@ ag_relaunch(struct agent *a)
 	if (!a->codex)
 		nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
 	else if ((m = strdup(a->rmsg)) &&
-	         (nv = calloc((size_t)a->argc + 7, sizeof *nv)))
+	         (nv = calloc((size_t)a->argc + 7 + 2 * (size_t)cx_ncfg,
+		                     sizeof *nv)))
 		nc = dch_codex_resume(a->argv, a->argc, a->tok, a->id, a->cwd, m,
-		                      nv);
+		                      nv, cx_drop, cx_cfg, cx_ncfg);
 	st = nv ? respawn_req(a->path, 'a', nv, nc) : -3;
 	free(nv);
 	free(m);
@@ -12366,6 +12387,7 @@ rv_json_final(const char *name, const char *as, const char *res,
               int argv, const char *ag)
 {
 	json_final_open(name, "as", as, res, code, detail, sid);
+	cx_ignored_json(ag);
 	/* "running" stays the last key (#182) */
 	fputs(",\"agent\":", stdout);
 	if (ag)
@@ -12489,9 +12511,11 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json,
 		char def[1200];
 		const char *hm = getenv("HOME");
 
-		if (!(nv = calloc((size_t)r->argc + 7, sizeof *nv)))
+		if (!(nv = calloc((size_t)r->argc + 7 + 2 * (size_t)cx_ncfg,
+		                  sizeof *nv)))
 			return -1;
-		nc = dch_codex_resume(r->argv, r->argc, cxat, r->cx, r->cwd, msg, nv);
+		nc = dch_codex_resume(r->argv, r->argc, cxat, r->cx, r->cwd, msg, nv,
+		                     cx_drop, cx_cfg, cx_ncfg);
 		v = nv;
 		r->mode = RV_CODEX;
 		o = getenv("CODEX_HOME");
@@ -19329,6 +19353,23 @@ main_run(int argc, char **argv)
 			opt_agents = 1;
 			i++;
 		}
+		else if (strcmp(a, "--codex-drop-provider") == 0)
+		{
+			cx_drop = 1;
+			i++;
+		}
+		else if (strcmp(a, "--codex-config") == 0)
+		{
+			i++;
+			if (i >= argc || !ctl_codex_cfg_ok(argv[i]) || cx_ncfg >= 16)
+			{
+				fprintf(stderr, "dch: --codex-config wants at most 16 "
+				        "K=V, K of [A-Za-z0-9_.-], at most 1024 bytes, "
+				        "no control characters\n");
+				return 2;
+			}
+			cx_cfg[cx_ncfg++] = argv[i++];
+		}
 		else if (strcmp(a, "--json") == 0)
 		{
 			/* --restart, --revive (#047); --say/--stop take it inline */
@@ -19573,6 +19614,13 @@ main_run(int argc, char **argv)
 	{
 		fprintf(stderr, "dch: --no-message only works with --revive\n");
 		return 1;
+	}
+	if ((cx_drop || cx_ncfg) && action != A_REVIVE &&
+	    !(action == A_RESTART && opt_agents))
+	{
+		fprintf(stderr, "dch: --codex-drop-provider and --codex-config only "
+		        "work with --revive and --restart --include-agents\n");
+		return 2;
 	}
 	if (opt_agents && action != A_RESTART)
 	{

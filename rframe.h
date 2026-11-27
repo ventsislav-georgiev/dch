@@ -111,6 +111,9 @@ enum { CK_VERB = 1, CK_FLAG, CK_VALUE, CK_NAME, CK_TEXT };
 int ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
               size_t cap);
 int ctl_known(const char *verb);
+/* #696: s is a --codex-config K=V: K of [A-Za-z0-9_.-]+, '=', at most
+** 1024 bytes, no control character. 1 or 0. */
+int ctl_codex_cfg_ok(const char *s);
 /* X-ray's value rules (spec #832 3.1), one copy for dch --xray and the ctl
 ** allowlist: --scope's enum; a --chapter anchor, [A-Za-z0-9:_.-]{1,128};
 ** --budget-ms as ASCII digits only (no sign, no 0x, no wrap), its value
