@@ -878,14 +878,17 @@ xv_ref(struct xv *v, const struct json_parser *p, int o)
 	v->rf[k] = r;
 }
 
+static void xv_tl_free(struct xv_tl *l);
+static int xv_rtab(const struct xv *v);
+
 static void
 xv_snapshot(struct xv *v, const struct json_parser *p, int o)
 {
 	int a, t;
+	char *osid = v->sid;
 
 	xv_drop(v);
 	xv_sfree(v->session);
-	xv_sfree(v->sid);
 	xv_sfree(v->corpus);
 	xv_sfree(v->reason);
 	xv_sfree(v->why);
@@ -909,6 +912,14 @@ xv_snapshot(struct xv *v, const struct json_parser *p, int o)
 			if (p->tok[t].kind == JSON_OBJECT)
 				xv_ref(v, p, t);
 	v->have = 1;
+	/* the one-query Schedules (poll mode, #703): a shell's snapshot, or
+	** another Claude's, drops the old answer; the next prompt one asks again */
+	if (v->poll && (!xv_rtab(v) || (osid && strcmp(osid, v->sid))))
+	{
+		xv_tl_free(&v->tq[2].tl);
+		v->tq[2].at = 0;
+	}
+	xv_sfree(osid);
 }
 
 static void xv_back(struct xv *v);
