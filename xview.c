@@ -1881,8 +1881,7 @@ xv_tfline(struct xv *v, const struct json_parser *p)
 		i = v->blk = !strcmp(b, "schedules") ? 2
 		             : dch_json_field(p, 0, "session") >= 0 ? 0 : 1;
 		xv_sfree(b);
-		if (xv_rtab(v))
-			xv_tbeg(v, i);
+		xv_tbeg(v, i);
 	}
 	else if (v->blk >= 0 && xv_bool(p, 0, "done"))
 	{
@@ -1898,9 +1897,9 @@ xv_tfline(struct xv *v, const struct json_parser *p)
 		i = 2;
 	else
 		return 0;
-	/* a shell session's view has neither tab (asked only of prompts) */
-	if (!xv_rtab(v))
-		return 1;
+	/* applied on a shell's snapshot too: the block after it replaces what
+	** a Claude that left it showed (live false: its crons ended), and a
+	** shell that never had one gets empty blocks, so no tab (MED-XA1) */
 	if (o >= 0 && v->blk < 0)
 		xv_tdelta(v, i, p, o);
 	else if (i == v->blk || end)
