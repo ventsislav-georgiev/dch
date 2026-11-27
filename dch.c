@@ -11201,6 +11201,22 @@ struct pkgrps
 	int n;
 };
 
+/* A group name the config can't hold: a control byte (the tab bar prints
+** it raw), an edge blank (config_line trims it), or a built-in tab's name.
+** pk_group and --group-rename share it. */
+static int
+group_name_bad(const char *v, size_t nl)
+{
+	size_t k;
+
+	for (k = 0; k < nl; k++)
+		if ((unsigned char)v[k] < 0x20 || v[k] == 0x7f)
+			return 1;
+	return nl && (v[0] == ' ' || v[nl - 1] == ' ' ||
+	              (nl == 8 && !strncasecmp(v, "Sessions", nl)) ||
+	              (nl == 7 && !strncasecmp(v, "History", nl)));
+}
+
 /* A `group = <name> = <regex>` line's value: split at its first '=', both
 ** trimmed; an empty name or regex, or one over its cap, is skipped. */
 static void
@@ -11220,12 +11236,8 @@ pk_group(void *arg, const char *v)
 	if (!nl || nl >= sizeof gs->g->name || !*r ||
 	    strlen(r) >= sizeof gs->g->pat)
 		return;
-	for (k = 0; k < nl; k++)	/* the tab bar prints it raw */
-		if ((unsigned char)v[k] < 0x20 || v[k] == 0x7f)
-			return;
-	/* the built-in tabs' names, and a name an earlier group has */
-	if ((nl == 8 && !strncasecmp(v, "Sessions", nl)) ||
-	    (nl == 7 && !strncasecmp(v, "History", nl)))
+	/* an unusable name, and a name an earlier group has */
+	if (group_name_bad(v, nl))
 		return;
 	for (k = 0; k < (size_t)gs->n; k++)
 		if (strlen(gs->g[k].name) == nl &&
@@ -14228,8 +14240,7 @@ do_group_rename_verb(const char *old, const char *nw, int json)
 		if (gs.g[k].mode == 1)
 			regfree(&gs.g[k].re);
 	o = pk_group_named(&gs, old);
-	if (!n || n > 32 || strpbrk(nw, "=\r\n") || !strcasecmp(nw, "Sessions") ||
-	    !strcasecmp(nw, "History"))
+	if (!n || n > 32 || strchr(nw, '=') || group_name_bad(nw, n))
 		why = "bad_name", what = "not a usable group name";
 	else if (o < 0)
 		why = "no_group", what = "no such group in the config";

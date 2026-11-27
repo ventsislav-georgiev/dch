@@ -922,6 +922,23 @@ rec_live(int dfd, const char *fn, size_t stem)
 	return 1;
 }
 
+/* Does a session named stem answer on this master's socket dir? A
+** DCH_NO_HISTORY session has no record but may hold a .group (#720).
+** shortcut: only this socket dir; another dir's no-record session loses its
+** .group at this prune, as before. */
+static int
+name_has_socket(const char *stem)
+{
+	char sp[1400];
+	int fd;
+
+	if (snprintf(sp, sizeof sp, "%s/%s.sock", rec_sdir, stem) >=
+	    (int)sizeof sp || (fd = control_connect_path(sp)) < 0)
+		return errno == EAGAIN;
+	close(fd);
+	return 1;
+}
+
 /* Is there a record of the name whose files are <stem>.*: <stem>.json, or
 ** one a cold start moved aside, <stem>.<digits>.json? */
 static int
@@ -1006,7 +1023,8 @@ rec_prune(int dfd)
 
 		if (n > 6 && strcmp(de->d_name + n - 6, ".group") == 0 &&
 		    snprintf(stem, sizeof stem, "%.*s", (int)(n - 6), de->d_name)
-		    < (int)sizeof stem && !rec_any(dfd, stem))
+		    < (int)sizeof stem && !rec_any(dfd, stem) &&
+		    !name_has_socket(stem))
 			unlinkat(dfd, de->d_name, 0);
 	}
 	closedir(d);
