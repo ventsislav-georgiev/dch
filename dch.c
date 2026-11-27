@@ -6520,7 +6520,9 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 ** first call takes it, 2 then reuses it); 0 closes the batch. */
 static int proc_tree_keep;
 
-/* Pids a walk collects: a Codex under a shell with 70 jobs is still found (#679). */
+/* Pids a walk collects, and a parent's children read at once (#679, #682).
+** shortcut: a session with over 1024 processes can still hide an agent;
+** report a cut walk on --stop/--restart if that is ever seen. */
 #define PROC_TREE_MAX 1024
 
 /* `root` and its descendants, breadth first, at most max: the pids. */
@@ -6529,7 +6531,7 @@ proc_tree(long root, long *out, int max)
 {
 	int n = 1, i;
 #ifdef __APPLE__
-	int kids[512], c, k;
+	int kids[PROC_TREE_MAX], c, k;
 
 	out[0] = root;
 	for (i = 0; i < n && n < max; i++)
