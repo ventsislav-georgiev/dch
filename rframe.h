@@ -91,6 +91,7 @@ int nonblock(int fd);
 int pipe_ce(int p[2]);
 void exec_prep(void);
 char *ctl_text_read(int fd, char b[257], int ms);
+char *ctl_text_readn(int fd, char *b, size_t max, int ms);
 int rf_run(char *const argv[], char **out, size_t *outn, size_t cap,
            char *err, size_t errcap, int timeout_ms);
 
@@ -118,6 +119,14 @@ int xray_scope_ok(const char *s);
 int xray_anchor_ok(const char *s);
 int xray_budget(const char *s);
 int xray_search_ok(const char *s);
+#define XRAY_ANSWER_MAX 4000	/* --answer's text, bytes (#692) */
+int xray_qid_ok(const char *s);
+int xray_answer_ok(const char *s);
+#define XRAY_QID_BAD "bad qid: 1 to 32 of A-Z a-z 0-9 . _ -, not starting " \
+                     "with -"
+#define XRAY_ANSWER_BAD "bad answer: 1 to 4000 bytes of UTF-8, no control " \
+                        "character but LF and tab"
+
 long long xray_since(const char *s, long long now);
 #define XRAY_SINCE_BAD "bad since: epoch seconds, 2026-11-19T10:00:00Z " \
                        "(UTC) or <N>m, <N>h, <N>d"

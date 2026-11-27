@@ -3079,6 +3079,9 @@ usage(void)
 	    "                                             JSON lines;\n"
 	    "  dch --xray <n> --questions --json          questions_command's open\n"
 	    "                                             questions as JSON lines;\n"
+	    "  dch --xray <n> --answer <qid> - --json     answer_command records\n"
+	    "                                             the answer on stdin; one\n"
+	    "                                             JSON result line;\n"
 	    "                                             <n> as host:name runs\n"
 	    "                                             on that host's dch serve\n"
 	    "  dch --xray host:name --requests --json     one warm connection: X-ray\n"
@@ -14706,7 +14709,7 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 	                      stat(label, &st) == 0 && S_ISDIR(st.st_mode)
 	                      ? label : getenv("HOME"), agent, asid,
 	                      ref, xr_shape_name[sp->shape], xr_span_text(sp),
-	                      hn, an };
+	                      hn, an, NULL };
 	int set, d0 = xr_scan_defs(sc);
 
 	if (xr_scan_cancelled(sc))
@@ -15624,6 +15627,61 @@ xr_tkc_row(const char *line, void *arg)
 	return fflush(k->o) != 0 || ferror(k->o);
 }
 
+/* --answer (#692): its qid and checked text, set once by xray_main */
+static const char *xr_ans_qid, *xr_ans_text;
+
+/* answer_command with the qid as its last word and the text on its stdin,
+** the session as questions_command sees it: one result line, the exit
+** (0 answered; 5 not open or no such question, the command's 5 or 3, 4;
+** 3 refused, its 2, or failed; 1 no command). Its stdout is ignored. */
+static int
+xr_answer(struct xcmd_ctx *c, char *cmd, size_t cap)
+{
+	struct xcmd_result res;
+	const char *why = NULL, *detail = NULL;
+	int set = dch_config_get("answer_command", cmd, cap), rc = 3;
+
+	if (set == 0 || (set > 0 && !cmd[0]))
+	{
+		fputs("{\"answered\":false,\"why\":\"no_command\"}\n", stdout);
+		return fflush(stdout) == 0 && !ferror(stdout) ? 1 : xr_out_exit(0);
+	}
+	c->ref = xr_ans_qid;	/* define_command's last word, its - guard */
+	c->input = xr_ans_text;
+	memset(&res, 0, sizeof res);
+	if (set < 0)
+		detail = "answer_command: not a command line (the config line is "
+		         "over 1023 bytes)";
+	else
+		(void)xcmd_rows(XCMD_ANSWER, c, NULL, NULL, &res);
+	if (detail)
+		why = "failed";
+	else if (res.stopped)
+		why = "failed", detail = "timeout";
+	else if (res.ran && res.code == 0)
+		rc = 0;
+	else if (res.ran && (res.code == 3 || res.code == 4 || res.code == 5))
+		why = res.code == 4 ? "no_question" : "not_open", rc = 5,
+		detail = res.err;
+	else if (res.ran && res.code == 2)	/* it rejected the qid or text */
+		why = "refused", detail = res.err;
+	else
+		why = "failed", detail = res.err[0] ? res.err : res.warn;
+	fputs(rc ? "{\"answered\":false" : "{\"answered\":true", stdout);
+	if (rc != 3)	/* failed names no id (the design's line) */
+	{
+		fputs(",\"id\":", stdout);
+		xr_put_str(stdout, xr_ans_qid);
+	}
+	if (why)
+	{
+		fprintf(stdout, ",\"why\":\"%s\",\"detail\":", why);
+		xr_put_str(stdout, detail);
+	}
+	fputs("}\n", stdout);	/* #693's "told" goes before this */
+	return fflush(stdout) == 0 && !ferror(stdout) ? rc : xr_out_exit(0);
+}
+
 /* The user's tasks_command or memory_command (their own dch config only),
 ** before any built-in source. 1: it gave a row and answered, *rc its exit;
 ** its stop or failure after rows is the done line's warn. 0: the built-in
@@ -15644,9 +15702,15 @@ xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
 	/* a session cwd not known: HOME, never the querying process's (a
 	** dch serve ctl's is the peer's choice) */
 	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
-	                      agent, asid, NULL, NULL, NULL, hn, an };
+	                      agent, asid, NULL, NULL, NULL, hn, an, NULL };
 
 	warn[0] = '\0';
+	if (kind == XCMD_ANSWER)
+	{
+		xr_names(session, hn, an, sizeof hn);
+		*rc = xr_answer(&c, cmd, sizeof cmd);
+		return 1;
+	}
 	if ((set = dch_config_get(what, cmd, sizeof cmd)) < 0)
 		snprintf(warn, cap, "%s: not a command line (the config line is "
 		         "over 1023 bytes)", what);
@@ -18111,8 +18175,8 @@ static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
-	const char *chapter = NULL, *search = NULL, *since = NULL;
-	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
+	const char *chapter = NULL, *search = NULL, *since = NULL, *qid = NULL;
+	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0, qi = 0;
 	int requests = 0, tasks = 0, memory = 0, nogh = 0, questions = 0;
 	int schedules = 0;
 	struct hrec *r = NULL;
@@ -18182,6 +18246,19 @@ xray_main(int argc, char **argv)
 			questions = 1;
 		else if (!strcmp(argv[k], "--schedules") && !schedules)
 			schedules = 1;
+		else if (!strcmp(argv[k], "--answer") && !qid)
+		{
+			/* the qid, then "-": the text only ever on stdin, never in
+			** ps (#692) */
+			if (k + 2 >= argc || strcmp(argv[k + 2], "-"))
+			{
+				fputs("dch: bad usage: --answer <qid> - (the answer on "
+				      "stdin)\n", stderr);
+				return 2;
+			}
+			qid = argv[++k];
+			qi = ++k;
+		}
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
@@ -18195,7 +18272,8 @@ xray_main(int argc, char **argv)
 			           !strcmp(argv[k], "--tasks") ||
 			           !strcmp(argv[k], "--memory") ||
 			           !strcmp(argv[k], "--questions") ||
-			           !strcmp(argv[k], "--schedules")) ? " twice"
+			           !strcmp(argv[k], "--schedules") ||
+			           !strcmp(argv[k], "--answer")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -18279,6 +18357,19 @@ xray_main(int argc, char **argv)
 		          "only)");
 		return 2;
 	}
+	/* --answer (#692): one write, --json only */
+	if (qid && (follow || tasks || memory || questions || schedules || ref ||
+	            search || chapter || clear || since || scope || full ||
+	            budget || nogh))
+	{
+		fprintf(stderr, "dch: bad usage: --answer and %s\n",
+		        follow ? "--follow" : tasks ? "--tasks" : memory ? "--memory"
+		        : questions ? "--questions" : schedules ? "--schedules"
+		        : ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
+		        : clear ? "--clear" : since ? "--since" : scope ? "--scope"
+		        : full ? "--full" : budget ? "--budget-ms" : "--no-github");
+		return 2;
+	}
 	if (follow && (ref || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --follow and %s\n",
@@ -18302,7 +18393,7 @@ xray_main(int argc, char **argv)
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
 		    budget || search || tasks || memory || since ||
-		    nogh || questions || schedules)
+		    nogh || questions || schedules || qid)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -18331,6 +18422,45 @@ xray_main(int argc, char **argv)
 
 		unsetenv("DCH_XRAY_STDIN");
 		unsetenv("DCH_XRAY_STDIN_MS");
+		/* --answer (#692): the operator's, from a UI; a speed bump for an
+		** agent's shell (env -u gets past it), not a wall. Its text is
+		** read here for a host:name too, and sent in the request. */
+		if (qid && !json)
+		{
+			fputs("dch: bad usage: --json is required (the --xray view "
+			      "takes no flag)\n", stderr);
+			return 2;
+		}
+		if (qid && getenv("DCH_SESSION"))
+		{
+			fputs("dch: --answer is the operator's: not from inside a "
+			      "session\n", stderr);
+			return 2;
+		}
+		if (qid && !xray_qid_ok(qid))
+		{
+			fputs("dch: " XRAY_QID_BAD "\n", stderr);
+			return 2;
+		}
+		if (qid)
+		{
+			static char ab[4096 + 1];
+			size_t l;
+
+			if (isatty(STDIN_FILENO) ||
+			    !ctl_text_readn(STDIN_FILENO, ab, sizeof ab - 1, ms))
+				ab[0] = '\0';
+			/* one trailing "\n" (echo's, a heredoc's) */
+			if ((l = strlen(ab)) && ab[l - 1] == '\n')
+				ab[--l] = '\0';
+			if (!xray_answer_ok(ab))
+			{
+				fputs("dch: " XRAY_ANSWER_BAD "\n", stderr);
+				return 2;
+			}
+			xr_ans_qid = qid;
+			xr_ans_text = argv[qi] = ab;	/* the request's text */
+		}
 		if (v && !isatty(STDIN_FILENO) && !name_routes_remote(n) &&
 		    !(*v = ctl_text_read(STDIN_FILENO, tb, ms)))
 			*v = "";
@@ -18453,6 +18583,7 @@ xray_main(int argc, char **argv)
 		     : tasks ? xr_tasks_q(&t)
 		     : questions ? xr_list_q(&t, XCMD_QUESTION, 0)
 		     : schedules ? xr_list_q(&t, XCMD_TASK, 1)
+		     : qid ? xr_list_q(&t, XCMD_ANSWER, 0)
 		     : memory ? xr_memory(&t)
 		     : xr_json(&t, ref || search || since ? &q : NULL, 0);
 	hrec_free(r, nr);

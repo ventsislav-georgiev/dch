@@ -36,13 +36,17 @@
 #define XCMD_DEF_BODY    2048		/* a definition's body: bytes, */
 #define XCMD_DEF_LINES   20		/* and lines */
 
-enum xcmd_kind { XCMD_TASK, XCMD_MEMORY, XCMD_DEFINE, XCMD_QUESTION };
+enum xcmd_kind { XCMD_TASK, XCMD_MEMORY, XCMD_DEFINE, XCMD_QUESTION,
+                 XCMD_ANSWER };
 
 /* What the query knows about the session; NULL reads as "". command is the
 ** config value (dch_config_get("tasks_command", ...)), unsplit. XCMD_DEFINE:
 ** ref (as written), the last argv word and DCH_REF; its shape DCH_REF_SHAPE;
 ** key, X-ray's normalized text, DCH_REF_KEY. Not run when ref or key starts
-** with '-' (an option to the user's program). */
+** with '-' (an option to the user's program). XCMD_ANSWER (#692): ref is
+** the qid, the last word too (no DCH_REF*); input, its stdin (a pipe that
+** holds it and a "\n", then EOF; 4 KB fits the pipe before the fork); its
+** stdout is read and dropped, res->code its verdict. */
 struct xcmd_ctx
 {
 	const char *command;
@@ -50,6 +54,7 @@ struct xcmd_ctx
 	const char *ref, *shape, *key;
 	const char *harness, *alias;	/* DCH_SESSION_HARNESS / _ALIAS: the
 				** --ls-json values; NULL reads as "" */
+	const char *input;		/* XCMD_ANSWER: stdin's text; else NULL */
 };
 
 struct xcmd_result

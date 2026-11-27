@@ -4,7 +4,8 @@
  * lines, hand each valid row on as the contract's row line while the rest is
  * still arriving. See xcmd.h.
  *
- * The run follows xray.c's git resolver (res_run): stdin /dev/null, its own
+ * The run follows xray.c's git resolver (res_run): stdin /dev/null (an
+ * answer_command's: its text on a pipe, #692), its own
  * process group, signals reset, no other fd of ours, a group kill when the
  * querying process is ended, the leader reaped only after the group kill.
  * It forks rather than posix_spawn()s: the cwd needs addchdir, which is
@@ -748,9 +749,10 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 {
 	const char *v[XC_NAMES];
 	char rows[16], **e;
-	size_t n = 0, k, j, mn = c->ref ? XC_NAMES : XC_NAMES - 3;
+	int def = c->ref && !c->input;	/* an answer's qid is no DCH_REF */
+	size_t n = 0, k, j, mn = def ? XC_NAMES : XC_NAMES - 3;
 
-	snprintf(rows, sizeof rows, "%d", c->ref ? XR_DEFS : XCMD_ROWS_MAX);
+	snprintf(rows, sizeof rows, "%d", def ? XR_DEFS : XCMD_ROWS_MAX);
 	v[0] = c->session;
 	v[1] = c->cwd;
 	v[2] = c->agent;
@@ -983,13 +985,34 @@ xc_warn(struct xcmd_result *res, const char *what, const char *fmt, ...)
 	va_end(ap);
 }
 
+/* XCMD_ANSWER's stdin: a pipe's read end holding s and a "\n", its write
+** end closed (EOF after them); -1 on a failure. s is at most 4 KB, which an
+** empty pipe takes whole, so the write never waits for a reader. */
+static int
+xc_input(const char *s)
+{
+	int p[2];
+	size_t n = strlen(s);
+
+	if (pipe(p) != 0)
+		return -1;
+	if (write(p[1], s, n) != (ssize_t)n || write(p[1], "\n", 1) != 1)
+	{
+		close(p[0]);
+		p[0] = -1;
+	}
+	close(p[1]);
+	return p[0];
+}
+
 int
 xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
           void *arg, struct xcmd_result *res)
 {
 	const char *what = kind == XCMD_TASK ? "tasks_command" : kind ==
 	                   XCMD_MEMORY ? "memory_command" : kind ==
-	                   XCMD_QUESTION ? "questions_command" : "define_command";
+	                   XCMD_QUESTION ? "questions_command" : kind ==
+	                   XCMD_ANSWER ? "answer_command" : "define_command";
 	int wall = kind == XCMD_DEFINE ? XCMD_DEF_WALL_MS : XCMD_WALL_MS;
 	size_t omax = kind == XCMD_DEFINE ? XCMD_DEF_OUT_MAX : XCMD_OUT_MAX;
 	char buf[4096], *argv[XCMD_ARGS_MAX + 1], *mine[XC_NAMES] = {0}, **envp;
@@ -1041,8 +1064,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	if (!(envp = xc_envp(ctx, mine)) ||
 	    !(r.line = malloc(XCMD_LINE_MAX + 1)) ||
 	    !(r.row = malloc(XCMD_LINE_MAX + 1)) || pipe(po) != 0 ||
-	    pipe(pe) != 0 || pipe(ep) != 0 ||
-	    (in = open("/dev/null", O_RDONLY)) < 0)
+	    pipe(pe) != 0 || pipe(ep) != 0 || (in = ctx->input
+	    ? xc_input(ctx->input) : open("/dev/null", O_RDONLY)) < 0)
 	{
 		xc_warn(res, what, "cannot run %s: %s", prog, strerror(errno));
 		goto out;
@@ -1141,7 +1164,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 				              ? (size_t)n : omax - total;
 
 				total += take;
-				xc_feed(&r, chunk, take);
+				if (kind != XCMD_ANSWER)	/* its stdout: ignored */
+					xc_feed(&r, chunk, take);
 				if (r.stop == XC_RUN && take < (size_t)n)
 					r.stop = XC_BYTES;
 			}

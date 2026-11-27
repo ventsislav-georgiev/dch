@@ -435,6 +435,7 @@ dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt,
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
 dch --xray <n> --schedules --json               # its crons, /loop wake-up and Codex heartbeats, JSON lines
 dch --xray <n> --questions --json               # open questions from your questions_command, JSON lines
+dch --xray <n> --answer <qid> - --json          # answer one, the text on stdin, through your answer_command
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -520,7 +521,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--schedules` its crons, `/loop` wake-up and Codex heartbeats; `--questions` lists your `questions_command`'s open questions; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--schedules` its crons, `/loop` wake-up and Codex heartbeats; `--questions` lists your `questions_command`'s open questions; `--answer <qid> -` answers one through your `answer_command`, its text on standard input; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure (`--answer`: not answered), 5 `--answer`: the question is not open (answered or dropped elsewhere) or gone; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end (all of it when none had gone in yet) and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held); the text's start may still be in its input`. | 0 ok, 1 input dropped |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z, when that one is in front as `claude_foreground` defines it), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A Claude that is not in front with nothing in front of it that is — under a wrapper that does not read the keyboard (plain `unbuffer`), or a shell in front of it inside one — fails `not_foreground` and nothing is typed (dch-lite too): the text would wait there and the shell around it would run it once the wrapper exits. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `not_foreground` (see above); `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure / input dropped (plain burst, as `--send`) |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -954,7 +955,7 @@ running sessions.
 | `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
 | `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
 | `questions_command` | the same for X-ray's open questions (`--questions`); no built-in list (see [Your own open questions](#your-own-open-questions-questions_command)) | empty |
-| `answer_command` | the command that records an answer to an open question; see `--answer` (#692) | empty |
+| `answer_command` | a program and its arguments, run with no shell, the qid last and the answer on its stdin: records your answer to an open question (`--answer`). Its exit is the contract: 0 answered, 5 or 3 not open any more, 4 no such question, 2 refused the qid or text, any other failed (see [Answering](#answering-answer_command)). Your own config only; through `dch serve` the host's | empty |
 | `define_command` | a program and its arguments, run with no shell, the ref last: X-ray's definition of a ref no transcript defines (see [Your own definitions](#your-own-definitions-define_command)). Your own config only; through `dch serve` the host's | empty |
 | `xray_github` | `true`/`false`: X-ray looks up a `#N`, `owner/repo#N` or GitHub issue/pull URL with your `gh` (title and state; see [Refs](#refs)) | `true` |
 
@@ -2649,6 +2650,46 @@ questions_command = ~/bin/my-questions
 block, so poll it), and not in `--requests`. On `host:name` it runs on
 that host's `dch serve`, with the host's config and command.
 
+##### Answering (`answer_command`)
+
+`dch --xray <n> --answer <qid> - --json` records the operator's answer to
+one open question (#692), the way Prosper's Questions tab sends it:
+```
+answer_command = ~/bin/my-answer
+printf 'Yes, ship it.' | dch --xray api --answer OQ-7 - --json
+```
+- **The qid**, 1 to 32 of `A-Z a-z 0-9 . _ -`, not starting with `-`, is
+  the command's last argv word; the answer is never in argv (`ps` would
+  show it): `-` is always standard input, read to its end (5 s at most).
+  One trailing newline is dropped. The text must be 1 to 4000 bytes of
+  UTF-8 with no control character but LF and tab (`dch: bad answer: …`,
+  exit 2, nothing runs).
+- **The run.** `questions_command`'s: the same session, environment
+  (`DCH_SESSION`, `DCH_SESSION_CWD`, `DCH_AGENT`, …), cwd, no shell and
+  5 s clock. Its stdin holds the text and one newline, then ends. Its
+  stdout is ignored; its stderr's first line is the `detail`.
+- **The result**, one JSON line:
+
+  | Command exit | Line | dch exit |
+  | --- | --- | --- |
+  | 0 | `{"answered":true,"id":"OQ-7"}` | 0 |
+  | 5 or 3 | `{"answered":false,"id":"OQ-7","why":"not_open","detail":"…"}` | 5 |
+  | 4 | `{"answered":false,"id":"OQ-7","why":"no_question","detail":"…"}` | 5 |
+  | 2 | `{"answered":false,"why":"refused","detail":"…"}` | 3 |
+  | other, killed, the clock | `{"answered":false,"why":"failed","detail":"…"}` (`timeout` past 5 s) | 3 |
+  | no `answer_command` | `{"answered":false,"why":"no_command"}` | 1 |
+
+- **The operator's only.** From inside a session (`DCH_SESSION` set) it
+  is refused: `dch: --answer is the operator's: not from inside a
+  session`, exit 2. A speed bump for an agent's shell, not a wall.
+- **Usage.** `--json` only: `dch: bad usage: --answer and --tasks`, also
+  with `--follow`, `--memory`, `--questions`, `--schedules`, `--ref`,
+  `--search`, `--chapter`, `--clear` and `--since`; not in `--requests`.
+  On `host:name` the client reads the text and sends it in the request;
+  the host's `dch serve` checks the qid and text again and runs the
+  host's `answer_command` (no opt-in). A host whose dch does not know it:
+  `dch: <host>: the host's dch does not know --answer`, exit 1.
+
 #### Your own definitions (`define_command`)
 
 X-ray defines a ref only from what the transcript shows (a heading, a
@@ -2969,9 +3010,10 @@ system, like any name.
 | --- | --- |
 | 0 | the object was printed (the view: quit); a `--follow` ended with its session, its connection, or its reader |
 | 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--search`, `--tasks`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell; also after the snapshot, when a stalled follower's slot went to a fifth: the stream stopped, the session did not end) |
-| 2 | bad usage: `--json` missing (the view: any other flag, or a stdout that is not a terminal), a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, `--search`, `--tasks`, `--questions` or `--memory` with any of them, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope`, `--budget-ms` or `--search` text |
+| 2 | bad usage: `--json` missing (the view: any other flag, or a stdout that is not a terminal), a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, `--search`, `--tasks`, `--questions` or `--memory` with any of them, `--answer` with any other flag but `--json`, from inside a session, or a bad qid or answer text, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope`, `--budget-ms` or `--search` text |
 | 4, 6, 7 | a remote `host:name` only: refused by the host's gate; the host lacks `xray`; the host is unreachable or the connection was lost |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
+| 5 | `--answer`: not answered, the question changed: not open any more (answered or dropped elsewhere) or no such question; the result line says which (`--answer`'s exit 1 is no `answer_command`, 3 refused or failed, see [Answering](#answering-answer_command)) |
 
 ### Auto-allow
 
@@ -3917,6 +3959,7 @@ for a local session named that way.
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |
 | `--xray` | `--xray <n> --questions --json` | 60 s |
+| `--xray` | `--xray <n> --answer <qid> <text> --json` (the client's `-` read and put in its place; the host's `answer_command` gets it on stdin, its ctl child's argv a `-`) | 60 s |
 | `--xray` | `--xray <n> --memory --json` | 60 s |
 
 Refused, before anything runs: an `argv` of fewer than 2 elements; a verb
@@ -3931,7 +3974,7 @@ on this host (dch serve --allow-create)`).
 once (`--json twice`). A flag's value is the next element even when it
 starts with `-`. Refused: no `--json` (`--xray needs --json (the view is
 client-side only)`); two of `--ref`, `--search`, `--tasks`, `--memory`,
-`--questions`, `--follow`, `--chapter` and `--clear`;
+`--questions`, `--answer`, `--follow`, `--chapter` and `--clear`;
 `--scope`, `--full` or `--budget-ms` without `--ref`; a flag not in the
 table (`--requests is not allowed with --xray`); a missing value (`--ref
 needs a value`); and a value that fails `dch --xray`'s rules (`bad ref`,

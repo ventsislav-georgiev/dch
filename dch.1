@@ -131,6 +131,12 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-answer
+.I qid
+.B \- \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-memory \-\-json
 .br
 .B dch \-\-xray
@@ -3899,6 +3905,7 @@ a session name that passes the attach name check and does not start with
 \-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
 \-\-xray \fIn\fP \-\-tasks \-\-json
 \-\-xray \fIn\fP \-\-questions \-\-json
+\-\-xray \fIn\fP \-\-answer \fIqid\fP \fItext\fP \-\-json
 \-\-xray \fIn\fP \-\-memory \-\-json
 \-\-xray \fIn\fP \-\-follow [\-\-tasks] [\-\-memory] \-\-json
 .fi
@@ -3945,6 +3952,7 @@ two of
 .BR \-\-tasks ,
 .BR \-\-memory ,
 .BR \-\-questions ,
+.BR \-\-answer ,
 .BR \-\-follow ,
 .B \-\-chapter
 and
@@ -4558,6 +4566,34 @@ goes with
 .B \-\-json
 only, not with
 .BR \-\-follow .
+.TP
+.B answer_command
+Records the operator's answer to an open question:
+.B dch \-\-xray
+.I n
+.B \-\-answer
+.I qid
+.B \- \-\-json
+(#692) runs it as
+.B questions_command
+runs (same session, environment, 5 s clock), the
+.I qid
+.RB ( [A\-Za\-z0\-9._\-] ,
+1 to 32, no leading
+.BR \- )
+its last word and the answer, read from dch's standard input (1 to 4000
+bytes of UTF\-8, no control character but LF and tab), on its stdin with a
+newline. Its exit: 0 answered (dch exit 0), 5 or 3 not open and 4 no such
+question (dch exit 5), 2 refused, any other or the clock failed (dch exit
+3); no command is
+.B why:no_command
+(exit 1). One JSON line says it. Refused from inside a session
+.RB ( DCH_SESSION
+set) and with any flag but
+.BR \-\-json .
+On
+.I host:name
+the host's command runs; the client sends the text.
 .TP
 .B define_command
 A ref that no transcript defines, from your own command:
