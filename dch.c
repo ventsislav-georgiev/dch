@@ -20841,6 +20841,23 @@ main_run(int argc, char **argv)
 			if (codex_wins(cxd, ag ? cr.v[k].n : 0,
 			               ag ? cr.v[k].best.depth : 0))
 				ag = "codex";
+			/* the effective group (the picker's tab), and the one
+			** --group-set stored, even when no config group has it;
+			** before agent, so agent and cwd stay last (#714) */
+			char man[64];
+			int g = pk_group_of(&gs, sl.v[k], sl.alias[k], sl.harness[k],
+			                    man, sizeof man);
+
+			fputs(",\"group\":", stdout);
+			if (g < gs.n)
+				put_json_str(gs.g[g].name);
+			else
+				fputs("null", stdout);
+			fputs(",\"group_manual\":", stdout);
+			if (man[0])
+				put_json_str(man);
+			else
+				fputs("null", stdout);
 			printf(",\"agent\":%s%s%s", ag ? "\"" : "", ag ? ag : "null",
 			       ag ? "\"" : "");
 			/* after the others, so every key before keeps its place;
@@ -20858,22 +20875,6 @@ main_run(int argc, char **argv)
 			free(h.body);
 			free(h.argv);
 			free(h.launch);
-			/* the effective group (the picker's tab), and the one
-			** --group-set stored, even when no config group has it */
-			char man[64];
-			int g = pk_group_of(&gs, sl.v[k], sl.alias[k], sl.harness[k],
-			                    man, sizeof man);
-
-			fputs(",\"group\":", stdout);
-			if (g < gs.n)
-				put_json_str(gs.g[g].name);
-			else
-				fputs("null", stdout);
-			fputs(",\"group_manual\":", stdout);
-			if (man[0])
-				put_json_str(man);
-			else
-				fputs("null", stdout);
 			putchar('}');
 		}
 		for (int gk = 0; gk < gs.n; gk++)	/* k: the remote rows' comma */

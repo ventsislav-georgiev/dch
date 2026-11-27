@@ -233,7 +233,8 @@ def main():
               and row["agent"] is None
               and keys[:len(LS_KEYS)] == LS_KEYS
               and set(keys[len(LS_KEYS):-2]) <= {"cols", "rows", "clients",
-                                                  "passive_clients"},
+                                                  "passive_clients",
+                                                  "group", "group_manual"},
               r.stdout)
         r = dch(slow, "--ls-json", "--remote", *H)
         rem = [x for x in json.loads(r.stdout) if "host" in x]
