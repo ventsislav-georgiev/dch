@@ -328,7 +328,8 @@ meta_wire(struct sb *b, size_t base, const struct json_parser *jp, int meta,
 }
 
 /* `dch --ls-json` as listResp's payload into *b: per row name; alias, else
-** the harness name; state when one of the four; agents when > 0; meta; cwd
+** the harness name; state when one of the four; agents when > 0; agent
+** when claude or codex (#677); meta; cwd
 ** when known (#115, a dch client's --ls-json --remote shows it). Keys
 ** sorted, so equal rows are equal bytes (the watch stream compares). Rows
 ** that would take the payload past the send limit are left out. 0, or -1
@@ -347,7 +348,7 @@ rows_wire(const char *ls, struct sb *b)
 	sb_s(b, "[");
 	for (i = 1; i < jp.tok[0].next; i = jp.tok[i].next)
 	{
-		char name[1024], alias[2048], state[16], cwd[512];
+		char name[1024], alias[2048], state[16], cwd[512], agent[8];
 		long long agents = 0, ep = 0;
 		struct sb r = {0};
 		size_t base;
@@ -367,10 +368,18 @@ rows_wire(const char *ls, struct sb *b)
 			agents = 0;
 		if (jstr(&jp, i, "cwd", cwd, sizeof cwd) != 1)
 			cwd[0] = '\0';
+		if (jstr(&jp, i, "agent", agent, sizeof agent) != 1 ||
+		    (strcmp(agent, "claude") && strcmp(agent, "codex")))
+			agent[0] = '\0';
 		if (jint(&jp, i, "meta_epoch", &ep) != 1)
 			ep = 0;
 		sb_s(&r, b->n > 1 ? ",{" : "{");
 		base = r.n;
+		if (agent[0])
+		{
+			sb_key(&r, base, "agent");
+			sb_q(&r, agent);
+		}
 		if (agents > 0)
 		{
 			sb_key(&r, base, "agents");

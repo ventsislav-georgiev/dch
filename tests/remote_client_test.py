@@ -2327,6 +2327,39 @@ def main(part="a"):
                        "-lj", "--remote", "--hosts", hosts)
             check("-lj --remote: srv:rs1<TAB>alias<TAB>0",
                   "srv:rs1\t\t0" in r.stdout.splitlines(), r.stdout)
+            # --- "agent" (#677): the host's claude/codex, else left out --
+            ag = Fake("list", rows=[{"name": "a1", "agent": "codex"},
+                                    {"name": "a2", "agent": "bogus"},
+                                    {"name": "a3", "agent": None},
+                                    {"name": "a4"}])
+            fakes.append(ag)
+            r = listed(lambda r: "a4" in r.stdout, "--ls-json", "--remote",
+                       "--hosts", "ag=127.0.0.1:%d" % ag.port)
+            rem = {x["name"]: x for x in json.loads(r.stdout)
+                   if x.get("host") == "ag"}
+            check("--ls-json --remote: the host's agent passed through just "
+                  "before cwd; one it does not send, or no kind, left out",
+                  list(rem.get("a1", {}))[-2:] == ["agent", "cwd"]
+                  and rem["a1"]["agent"] == "codex"
+                  and all("agent" not in rem.get(n, {"agent": 1})
+                          for n in ("a2", "a3", "a4")), r.stdout)
+            fcx = os.path.join(tmp, "fcx")
+            os.makedirs(fcx)
+            b = subprocess.run(["cc", "-o", os.path.join(fcx, "codex"),
+                                os.path.join(HERE, "fake_codex.c")],
+                               capture_output=True, text=True, timeout=60)
+            check("the fake codex builds", b.returncode == 0, b.stderr)
+            dch(senv, "--spawn", "rcx", "--size", "80x24", "--",
+                os.path.join(fcx, "codex"))
+            r = listed(lambda r: '"name":"rcx"' in r.stdout and
+                       '"agent":"codex"' in r.stdout,
+                       "--ls-json", "--remote", "--hosts", hosts)
+            rem = {x["name"]: x for x in json.loads(r.stdout)
+                   if x.get("host") == "srv"}
+            check("dch serve sends agent: srv:rcx (a Codex) codex, srv:rs1 "
+                  "(a shell) none", rem.get("rcx", {}).get("agent") == "codex"
+                  and "agent" not in rem.get("rs1", {"agent": 1}), r.stdout)
+            dch(senv, "-k", "rcx")
             r = dch(cenv, "--remote", "-kl")
             check("--remote with -kl is refused", r.returncode == 1
                   and "--remote only works" in r.stderr, r.stderr)

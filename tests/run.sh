@@ -471,6 +471,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "Codex 0.167 screens: blocked, working, suppressed (#654)" detect_codex_test.py
     pyrun "--ls-json claude_session_id and transcript_path" transcript_test.py
     pyrun "--ls-json cols, rows and attached clients" ls_json_size_test.py
+    pyrun "--ls-json agent: claude, codex or null, typed or the program (#677)" ls_json_agent_test.py
     pyrun "a stopped master with a full backlog hangs no verb (#265)" stuck_master_test.py
     pyrun "master self-heals a deleted socket" socket_heal_test.py
     pyrun "native agent bridge public CLI and wire protocol" agent_bridge_test.py

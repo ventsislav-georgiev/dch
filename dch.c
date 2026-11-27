@@ -6575,14 +6575,19 @@ proc_tree(long root, long *out, int max)
 ** which may run under its own CLAUDE_CONFIG_DIR or HOME
 ** (`CLAUDE_CONFIG_DIR=~/.claude-work claude`, #062). Once by inode, not by
 ** string: `~/.claude/` and `~/.claude` read twice would count every record
-** twice. The new count. */
+** twice. The new count. *cx (when cx): the shallowest Codex in the same
+** tree, 0 none (--ls-json's "agent", no second walk). */
 static int
-claude_dirs(long root, char (*dirs)[1100], int nd, int max)
+claude_dirs(long root, char (*dirs)[1100], int nd, int max, long *cx)
 {
 	struct stat st[16];
 	long tree[64];
 	int n = proc_tree(root, tree, 64), i, j;
 
+	if (cx)
+		for (*cx = 0, i = 0; !*cx && i < n; i++)
+			if (proc_is_codex(tree[i]))
+				*cx = tree[i];
 	for (j = 0; j < nd && j < 16; j++)
 		if (stat(dirs[j], &st[j]) < 0)
 			memset(&st[j], 0, sizeof st[j]);
@@ -6609,7 +6614,7 @@ claude_find_sid(long root, int verify, const char *sid, struct crec *best,
 {
 	struct crec_scan cs;
 	char dirs[8][1100];
-	int nd = claude_dirs(root, dirs, 0, 8), i;
+	int nd = claude_dirs(root, dirs, 0, 8, NULL), i;
 
 	memset(&cs, 0, sizeof cs);
 	cs.root = root;
@@ -19375,6 +19380,8 @@ main_run(int argc, char **argv)
 		** round trip; rows/cols/clients, or -1: the master can't say */
 		long (*sz)[4] = cr.v ? calloc((size_t)sl.n + 1, sizeof *sz)
 		                     : NULL;
+		/* the shallowest Codex under each child, from claude_dirs' walk */
+		long *cxs = cr.v ? calloc((size_t)sl.n + 1, sizeof *cxs) : NULL;
 		char cdirs[16][1100], sp[1100];
 		int nd = 0;
 
@@ -19400,7 +19407,8 @@ main_run(int argc, char **argv)
 			if (ci.pid > 0 && strcmp(ci.state, "held") != 0)
 			{
 				cr.v[k].root = ci.pid;
-				nd = claude_dirs(ci.pid, cdirs, nd, 16);
+				nd = claude_dirs(ci.pid, cdirs, nd, 16,
+				                 cxs ? &cxs[k] : NULL);
 			}
 			cmd_info_free(&ci);
 		}
@@ -19476,6 +19484,18 @@ main_run(int argc, char **argv)
 				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld,"
 				       "\"passive_clients\":%ld",
 				       sz[k][1], sz[k][0], sz[k][2], sz[k][3]);
+			/* "agent": any live Claude (kind, not id: two, or a
+			** non-UUID sid, still say claude) or Codex under the
+			** child; both nested, the shallowest (nearest the
+			** session's program) wins */
+			long cx = cxs ? cxs[k] : 0;
+			int cxd = cx > 0 && cr.v ? proc_depth(cx, cr.v[k].root) : -1;
+			const char *ag = cr.v && cr.v[k].n > 0 ? "claude" : NULL;
+
+			if (cxd >= 0 && (!ag || cxd < cr.v[k].best.depth))
+				ag = "codex";
+			printf(",\"agent\":%s%s%s", ag ? "\"" : "", ag ? ag : "null",
+			       ag ? "\"" : "");
 			/* last, so every key before keeps its place; null with
 			** no record (DCH_NO_HISTORY) or an ended one */
 			struct hrec h = {0};
@@ -19511,8 +19531,12 @@ main_run(int argc, char **argv)
 				put_json_str(rr[r].alias);
 				fputs(",\"host\":", stdout);
 				put_json_str(rr[r].host);
-				printf(",\"state\":\"%s\",\"stale\":%s,\"cwd\":",
+				printf(",\"state\":\"%s\",\"stale\":%s",
 				       rr[r].state, rr[r].stale ? "true" : "false");
+				/* only when the host's list says (#677) */
+				if (rr[r].agent[0])
+					printf(",\"agent\":\"%s\"", rr[r].agent);
+				fputs(",\"cwd\":", stdout);
 				if (rr[r].cwd[0])
 					put_json_str(rr[r].cwd);
 				else
@@ -19524,6 +19548,7 @@ main_run(int argc, char **argv)
 		puts("]");
 		free(cr.v);
 		free(sz);
+		free(cxs);
 		slist_free(&sl);
 		return 0;
 	}

@@ -15,6 +15,7 @@ struct dch_rrow
 	char name[256], alias[256];
 	char state[16];		/* working|idle|blocked|done, or "" */
 	char cwd[512];		/* its directory, "" unknown (#115) */
+	char agent[8];		/* claude|codex, "" the host did not say (#677) */
 	long at;		/* when the host answered, epoch seconds */
 	int stale;		/* the host did not answer this time */
 };
