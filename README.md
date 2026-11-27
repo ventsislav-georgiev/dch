@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.188.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.189.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -410,11 +410,13 @@ dch --ls-json                                   # sessions as a JSON array
 dch --ls-json [--remote] --follow               # ...again, one line per change
 dch --restart <name>|--all [-f]                 # upgrade a live session in place
 dch --restart <name>|--all --include-agents [-f] [--json]  # ...then restart its stale Claude agents
+dch --restart ... --include-agents [--codex-drop-provider] [--codex-config K=V]...  # a Codex resumes on another provider
 dch --respawn <name> [-- cmd...]                # on child exit, start cmd in its place
 dch --respawn <name> --cancel                   # drop a pending respawn
 dch --cmd <name>                                # child pid, state, argv, exit status (JSON)
 dch --history [--json]                          # sessions that ended, and how
 dch --revive <name> [--as <new>]|--all [--no-message] [--env K=V]... [--unset K]... [--json]  # bring ended sessions back, claude resumed
+dch --revive ... [--codex-drop-provider] [--codex-config K=V]...  # a Codex resumes on another provider
 dch --pin|--unpin <name>... [--json]            # keep a record past the 30-day prune, or stop
 dch --forget <name>... [-f]|--all [--json]      # delete ended sessions' records
 dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code or Codex, busy too (queued), never over a prompt
@@ -435,6 +437,8 @@ dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt,
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
 dch --xray <n> --schedules --json               # its crons, /loop wake-up and Codex heartbeats, JSON lines
 dch --xray <n> --questions --json               # open questions from your questions_command, JSON lines
+dch --xray <n> --answer <qid> - --json          # answer one, the text on stdin, through your answer_command
+dch --xray <n> --answer <qid> - --notify <s> --json  # ...then tell session <s> the ruling
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -520,7 +524,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--schedules` its crons, `/loop` wake-up and Codex heartbeats; `--questions` lists your `questions_command`'s open questions; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--schedules` its crons, `/loop` wake-up and Codex heartbeats; `--questions` lists your `questions_command`'s open questions; `--answer <qid> -` answers one through your `answer_command`, its text on standard input; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure (`--answer`: not answered), 5 `--answer`: the question is not open (answered or dropped elsewhere) or gone; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end (all of it when none had gone in yet) and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held); the text's start may still be in its input`. | 0 ok, 1 input dropped |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z, when that one is in front as `claude_foreground` defines it), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A Claude that is not in front with nothing in front of it that is — under a wrapper that does not read the keyboard (plain `unbuffer`), or a shell in front of it inside one — fails `not_foreground` and nothing is typed (dch-lite too): the text would wait there and the shell around it would run it once the wrapper exits. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `not_foreground` (see above); `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure / input dropped (plain burst, as `--send`) |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -533,14 +537,14 @@ someone is watching is invisible to them.
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
 | `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","claude_foreground","shells","cols","rows","clients","passive_clients","agent","cwd"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now, passive ones left out, and `passive_clients` how many passive ones are (see `--passive`; `0` from a master before passive attach); read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. Every row ends with `"cwd"`, after every other key: the directory the session started in, from its live history record, `null` when it has none (a master from before history records) or the record already says it ended; a `--remote` row's is the host's, from its `dch serve` list, `null` from a server that does not send one. `agent`, just before `cwd`, is the live agent under the session's program, as the session's command or typed at its shell prompt: `"claude"` while a live interactive Claude Code runs there (also two of them, or one whose id is no UUID: it is the kind, not the id), `"codex"` while a Codex does (as `--stop` finds it), `null` with neither; one nested in the other, the one nearest the session's program wins. Read from the kernel by the client like `claude_foreground` (in the same process walk), so a master of any version gets it; a `--remote` row has it only when the host's `dch serve` list sends `"claude"` or `"codex"` (a server from before it does not). `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does (Claudes below another one, such as a test's fake Claude under one of its tool calls, count as that one), once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). `claude_foreground` is `true` while that Claude is in front (the session terminal's foreground job), `false` while it is not — suspended with Ctrl-Z or sent to the background, a shell or another program in front, which is what reads typed keys then. Under a wrapper with a pty of its own (`script`, `unbuffer -p`), in front means Claude is the foreground job of its own terminal and each wrapper the foreground job of the terminal around it, that terminal raw with no echo and no signal keys (as `script`, `unbuffer -p` and `ssh` set it to forward the keyboard); plain `unbuffer` (expect without `-p`) never reads the keyboard and leaves the terminal in the shell's mode, so it is not in front, nor is a wrapper resumed with `fg` after the shell put its own line-buffered mode back. A terminal left non-canonical by an earlier command (`stty -icanon`) does not count either. Limit: the kernel records neither who set a terminal's mode nor who reads it, so a terminal left with line editing, signal keys and echo all off (ICANON, ISIG and ECHO: `stty raw -echo`, `stty raw` on macOS, `stty -icanon -isig -echo`, or a full-screen program that exited without restoring the terminal; such a terminal can look normal at a shell prompt) makes plain `unbuffer` count as in front again, and auto-allow's `1` and `--say` text then reach the shell around it once `unbuffer` exits; `stty sane` puts the terminal back. It is left out when `claude_session_id` is `null` or the process groups cannot be read. A suspended Claude keeps its `claude_session_id` and `transcript_path`. Read from the kernel by the client, so a master of any version gets it. `shells` is that Claude's live Bash tool shells (foreground and `run_in_background` alike), newest first, `[{"id","pid","started","command"}]`, `[]` with none: each process below the Claude whose stdout is its own `<tmp>/claude-<uid>/<project>/<sessionId>/tasks/<id>.output`, the topmost one per id (its children write there too). `id` is that file's name without `.output` (the task id Claude Code shows), `started` the process's start time from the kernel (epoch seconds; `pid` and `started` together name one shell), `command` the command the shell runs, taken from its wrapper's `eval '…'` with the quoting undone (else its argv joined with spaces), at most 200 bytes cut between UTF-8 characters, each byte of a control character (C0, DEL, and C1 such as U+0085 and U+009B, as X-ray does) or of invalid UTF-8 as a space. The kernel shows a foreground and a background shell alike and cannot tell which conversation started one (every shell is that Claude's child), so after `command` come, only when `transcript_path` is set and a transcript holds the shell's `run_in_background` Bash result (`toolUseResult.backgroundTaskId` equal to `id`): `agent`, `null` when the main conversation started it, else the subagent's `agentId` (its lines are in `<sessionId>/subagents/agent-<agentId>.jsonl` beside the transcript), then `agent_description`, that subagent's `description` from its `agent-<agentId>.meta.json`; `description`, the Bash call's own `description` input; and `"background":true`. Each key is left out when unknown, never `null` or `false` for it: a foreground call (its result line is written when it ends), a shell sent to the background later with Ctrl-B, a result line not written yet or still being written, or a description the call or the meta does not have. Both descriptions are cut like `command`. The transcripts are never read whole: the result line is written right after its shell starts, so a binary search by line `timestamp` finds the place 10 s before `started`, and from 64 KB before that place at most about 1 MB is read; only subagent files written since the shell started are searched, and they share a budget of 16 MB read per `--ls-json` call, spent by the shells in listed order (newest first): past it, a shell not found yet gets none of these keys, so many shells no transcript names (foreground calls, Ctrl-B'd ones) times many busy subagents stay well under a second (64 x 256 took seconds before). The main transcript is outside the budget: one window per shell. A transcript, subagent file or meta that is no regular file (a FIFO, a device) is skipped at once. Left out when `claude_session_id` is `null`, and for `--remote` rows; read from the kernel by the client like `claude_foreground`. | 0 |
 | `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe; a stdout closed from the start (`>&-`) exits 0 at once. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
-| `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions, and every stale `--no-daemon` Codex (its binary changed since it started; resumed `codex resume <id> -C <cwd> <resume message>`; a daemon-attached or `--remote` one is skipped, `codex_daemon`; see [Codex agents](#codex-agents)) — the agent as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
+| `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions, and every stale `--no-daemon` Codex (its binary changed since it started; resumed `codex resume <id> -C <cwd> <resume message>`; a daemon-attached or `--remote` one is skipped, `codex_daemon`; see [Codex agents](#codex-agents)) — the agent as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--codex-drop-provider` and `--codex-config K=V` change a Codex's `codex resume` argv (see [Codex provider](#codex-provider)); without `--include-agents` they are a usage error, exit 2. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--passive <n> --pid <pid>` | Mark the client attached to the session from process `<pid>` passive (the master finds it by the pid the kernel recorded for its connection). A passive client still gets all output, and its input still goes in except its focus reports (`ESC [ I` / `ESC [ O`, dropped by the master: focus, like size, is the session's), but it never sets the session's size (no resize, no focus-in resize), counts in `--ls-json`'s `passive_clients`, not `clients`, and does not make the session busy: plain `dch --` joins a session whose only clients are passive instead of starting `<name>-2`. `dch -a <n> --passive` (with `-E`, `--scrollback` as usual) attaches passive from the start. A `--restart` keeps the mark. Local attaches only: a remote attach (`host:name`) attaches active. | 0 ok, 1 no session, no attached client with that pid, or a master too old to know it |
 | `--active <n> --pid <pid>` | Undo `--passive`: the client counts and makes the session busy again, and follows the focus rules again. It does not take the size at once: its next focus-in or window resize does (see [The focused client sets the size](#the-focused-client-sets-the-size)). | 0 ok, 1 as for `--passive` |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
 | `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `signal N from <pid> <command>` (the master itself got SIGTERM or SIGINT from that process: its command line made printable, cut at 120 bytes; `signal N from <pid>` when it was already gone), `killed` (`dch -k`), `stopped` (`dch --stop`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. A pinned record (`--pin`) ends its line with `  [pinned]`, one a new session under its name moved aside with `  [record <name>.<ended>]`. `--json` prints the stored records as an array, a pinned one with `"pinned":true` added (absent otherwise), every one with `"file"`, its record file without `.json` (`work`, or `work.<ended>` for a moved one), the exact handle for `--pin`/`--unpin`/`--forget <file>.json` (see [Bringing sessions back](#bringing-sessions-back)). With `--remote`, after the local records (unchanged, byte for byte) come the remote hosts' (see [Remote hosts](#remote-hosts)): text lines as `host:name ...`, ending `  [stale]` for a host's cached answer; JSON records as the host sent them plus `"host"` and `"stale"`. | 0 |
-| `--revive <n> [--as <new>] [--no-message] [--env K=V]... [--unset K]...` \| `--revive --all [--no-message] [--env K=V]... [--unset K]...` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `--no-message`: resumed only, no message typed (`ok`, the line says it was not sent). `--env` (as `--spawn`'s: max 32, first `=` splits, `K=` sets it empty) and `--unset K` (a bare name, max 32; removed, not emptied) apply to every session the revive starts, after the login shell's environment, so they win over your rc files; `DCH_SESSION`, `DCH_SOCKET_DIR`, `XDG_RUNTIME_DIR` and the `TERM` default stay dch's (so a session's own dch calls find its socket; `--spawn --env` likewise). Local only: with a remote name or `--host`, exit 2, nothing sent. `<n>` revives its newest ended record, whatever its end — never a live session's; `<file>.json` (or the bare file `--history` prints, `[record <file>]`) exactly that record file; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. Never two Claudes on one conversation: a record whose Claude id a live Claude already runs is skipped by `--all` and refused by name (`live_sid`, naming the holder), and of two records carrying one id `--all` revives only the newest (`dup_sid`). One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok (skips included), 1 no history / ambiguous / name live / id live / a revive or resume failed |
+| `--revive <n> [--as <new>] [--no-message] [--env K=V]... [--unset K]...` \| `--revive --all [--no-message] [--env K=V]... [--unset K]...` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `--codex-drop-provider` and `--codex-config K=V` change a Codex's `codex resume` argv, every Codex `--all` revives included (see [Codex provider](#codex-provider)). `--no-message`: resumed only, no message typed (`ok`, the line says it was not sent). `--env` (as `--spawn`'s: max 32, first `=` splits, `K=` sets it empty) and `--unset K` (a bare name, max 32; removed, not emptied) apply to every session the revive starts, after the login shell's environment, so they win over your rc files; `DCH_SESSION`, `DCH_SOCKET_DIR`, `XDG_RUNTIME_DIR` and the `TERM` default stay dch's (so a session's own dch calls find its socket; `--spawn --env` likewise). Local only: with a remote name or `--host`, exit 2, nothing sent. `<n>` revives its newest ended record, whatever its end — never a live session's; `<file>.json` (or the bare file `--history` prints, `[record <file>]`) exactly that record file; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. Never two Claudes on one conversation: a record whose Claude id a live Claude already runs is skipped by `--all` and refused by name (`live_sid`, naming the holder), and of two records carrying one id `--all` revives only the newest (`dup_sid`). One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok (skips included), 1 no history / ambiguous / name live / id live / a revive or resume failed |
 | `--pin <n>... [--json]` \| `--unpin <n>... [--json]` | Pin a session's history record so the 30-day prune never takes it, or unpin it (see [Bringing sessions back](#bringing-sessions-back)). `--pin` needs a record for the name, live or ended (`<n>: failed — …`, `not_found`, otherwise), and pins every record of the name; pinning a pinned one is `ok`. `--unpin` unpins every record of the name and is `ok` with or without a pin, but `not_found` when there is no record (nor a stray pin) to act on. An argument ending in `.json` names exactly one record file instead, never a name: `--pin work.json` pins the primary `work.json` only, `--pin work.<ended>.json` only that moved record. One that is also a session's name (sessions `a` and `a.json`: `a.json` would be both) is refused, `ambiguous`, nothing touched: `a.json.json` names session `a.json`'s record. A bare argument also matches a record file exactly as given, so the `[record <file>]` that `--history` prints works for a long name's moved record (which the name shortening would hash again). One line per name: `<n>: pinned`, `<n>: unpinned` or `<n>: failed — <why>`. `-f` is a usage error. | 0 nothing failed, 1 usage error / a name failed |
 | `--forget <n>... [-f] [--json]` \| `--forget --all [--json]` | Delete history records of the current socket dir, matched by name as `--revive` matches them (every record that matches); `<file>.json` (`work.json`, `work.<ended>.json`) deletes exactly that one record file; one that is also a session's name is refused, `ambiguous`, as for `--pin`. Never a live session's (`live`: its master would write it back; `-f` does not change that); a pinned one only with `-f`, which removes its pin too (`pinned` otherwise); `not_found` when no record matches. One line per record: `<n>: forgotten` or `<n>: failed — <why>`. `--all` deletes every record that is neither live nor pinned and skips the rest: one `<n>: forgotten` per record deleted, then `forgot N (K pinned, L live kept)`; `-f` with `--all` is a usage error (it never removes a pin). | 0 nothing failed (skips included), 1 usage error / a name failed |
 | `--say <n>... [--json] -- <text...>` \| `--say --all [--json] -- <text...>` | Type one message into the Claude Code running in each session — as its command or typed into its shell — and submit it, idle or busy: a busy Claude (or one running a background shell) queues the message, just as Enter does when you type it yourself, and takes it once its turn ends; one with messages already queued queues it after them. Typed only when the screen shows its empty composer (its placeholder, also the "Press up to edit queued messages" one), never over a prompt or dialog (the Enter would answer it) or an unsent draft, never waiting for either. Text is the words after the required `--` joined with spaces. A text starting with `/` and holding no control characters is typed as keys, not pasted (Claude Code opens its slash menu only on typed keys): `dch --say <n> --json -- /model <model>` switches a live Claude's model. A text starting with `!` is typed as keys the same way: Claude Code's bash mode opens and the command runs, its output landing in the conversation (`dch --say <n> -- '! git status'`); a composer already in bash mode reads as a `draft`, never typed into, and a take-back leaves bash mode with a Backspace. `--say --all` with a `/` or `!` text is a usage error, exit 1, nothing typed, and so is a bare `!` or `/` (nothing after it but spaces) to any session. A `!` text that fails `not_submitted` or `not_typed` is taken back out of the composer (Ctrl-U, then the Backspace), bash mode left, so the next Enter there runs nothing; the `detail` then says `taken back out` (when the take-back stops early, because the composer holds something that is no start of ours, a dialog is over it or time ran out, the `detail` says it may be left there in bash mode and to clear it before pressing Enter). Only text that is still a start of ours is removed, never anything else in the composer. Sessions are typed into concurrently; Enter is pressed again while the text still sits in the composer, never once a dialog is up; text that left the composer — submitted, or shown queued above it — is `sent`. One result per session as it finishes: `<n>: sent`, `<n>: skipped — <why>` (`not_claude` under `--all`, `self` = `$DCH_SESSION`, `prompt`, `draft`, `no_screen` — always on dch-lite) or `<n>: failed — <why>` (`no_session`, `not_submitted`, `not_typed`, `old_master`, `interrupted`, `withdrawn`, `draft_left`, `not_foreground` — Claude is not in front, as `claude_foreground` defines it: suspended, in the background or under a wrapper that does not read the keyboard, nothing typed). A first SIGINT, SIGTERM or SIGHUP stops every session at a safe point: once it is handled nothing more is typed and no Enter is pressed; text already in the composer is taken back out one Ctrl-U at a time (Claude Code's Ctrl-U kills one wrapped row), the screen re-read after each; each session not yet `sent` fails with one of the last three; a second signal exits at once (`--run` and `--revive` do the same). A paste still painting is waited for first (up to `DCH_AGENT_LAND_MS`, 30 s). Limit: an Enter sent before the signal that Claude takes only after it sends the text, which is then reported `withdrawn`; likewise a `!` text read as `not_submitted` whose Enter takes right after is reported `taken back … nothing run` though it ran. `--json` prints one `{"name","result":"ok\|skipped\|failed","reason","detail"}` object per line instead. **Codex** (a session whose agent is a Codex: the agent nearest the session's program; a tie, Claude, as `--ls-json`'s `agent`) gets the same gate, results and codes: typed only when the screen shows the main composer's empty placeholder `Ask Codex to do anything` (the side conversation's `Ask a follow-up question` reads `no_screen`: its text would go to a side thread), never over an approval, form or startup dialog (`prompt`, no key sent) or a draft (`draft`). Every text is pasted, `/` and `!` ones too: a pasted `/command` still runs as one, a pasted `!` opens no shell mode, so it goes to Codex as a message. Then, as a later push, Tab, busy or idle: in a running turn Tab queues the message for its end, as Claude's Enter does (Enter would steer the turn), and on an idle composer it submits as Enter does; so a turn whose busy row is hidden while its answer streams still gets a queued message. A `/command` gets Enter: the slash popup takes Tab. A long paste Codex collapses into `[Pasted Content N chars]` counts as landed. Nothing ever sends Ctrl-C or Esc to Codex (one Ctrl-C quits an idle one). `reason` keeps its names (`not_claude` means neither Claude Code nor Codex runs there). | 0 nothing failed (skips included), 1 usage error / a session failed |
@@ -954,6 +958,7 @@ running sessions.
 | `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
 | `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
 | `questions_command` | the same for X-ray's open questions (`--questions`); no built-in list (see [Your own open questions](#your-own-open-questions-questions_command)) | empty |
+| `answer_command` | a program and its arguments, run with no shell, the qid last and the answer on its stdin: records your answer to an open question (`--answer`). Its exit is the contract: 0 answered, 5 or 3 not open any more, 4 no such question, 2 refused the qid or text, any other failed (see [Answering](#answering-answer_command)). Your own config only; through `dch serve` the host's | empty |
 | `define_command` | a program and its arguments, run with no shell, the ref last: X-ray's definition of a ref no transcript defines (see [Your own definitions](#your-own-definitions-define_command)). Your own config only; through `dch serve` the host's | empty |
 | `xray_github` | `true`/`false`: X-ray looks up a `#N`, `owner/repo#N` or GitHub issue/pull URL with your `gh` (title and state; see [Refs](#refs)) | `true` |
 
@@ -1424,8 +1429,8 @@ standard input is a request, as NDJSON:
   taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`, `--no-github`),
   `--search` (with `--scope`; `["--search","push retry","--scope","project",
   "--json"]`, one answer per request, the bytes `dch --xray <n> --search
-  ... --json` writes on the host), `--since` (#516), `--chapter` and
-  `--clear`. A request
+  ... --json` writes on the host), `--since` (#516), `--chapter`,
+  `--clear`, `--tasks`, `--memory`, `--schedules` and `--questions`. A request
   without `--json` is refused, so there is no text answer here. dch checks them by its own rules first; any
   other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
   value is answered `{"req":N,"stderr":"dch: ..."}` and
@@ -2468,6 +2473,13 @@ the host's dch does not know --tasks` (exit 1).
   and every pending non-durable cron and the pending wake-up then read
   `ended`, with `next: null`. A cron Claude Code's newer carried-over list
   leaves out is `ended` too.
+- **Durable crons** (`durable:true`, #689) are checked against the
+  project's `.claude/scheduled_tasks.json` (the session's cwd): one the
+  file lists stays `pending` (live or not), with its `lastFiredAt` as
+  `last_fired`; one it no longer lists is `ended`; a job only the file
+  names is not added. An absent file, a symlink, a non-regular file or one
+  over 1 MiB leaves the transcript's answer; one that does not parse does
+  too, with a `warn` in the header.
 - **Order.** Pending crons by `next`, soonest first; the wake-up; the rest,
   newest change first.
 - **Codex.** The rollout's `<heartbeat>` envelopes (Codex app automations)
@@ -2481,7 +2493,7 @@ the host's dch does not know --tasks` (exit 1).
 
 `--schedules` takes no other flag but `--json` (`dch: bad usage:
 --schedules and --ref`, also `--search`, `--chapter`, `--clear`, `--tasks`,
-`--memory`), and is not in `--requests`. `--follow` carries it (see
+`--memory`), and is a `--requests` request. `--follow` carries it (see
 **Schedules in the stream** below; a dch before #686 exits 2 there). A
 transcript that is gone
 says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that host's
@@ -2530,7 +2542,7 @@ per file (`"cut":true` after `body` when it was cut), then
   Nothing is written.
 
 `--memory` goes with no other flag but `--json` (`dch: bad usage: --memory
-and --tasks`) and not in `--requests`; `--follow` carries it, with or
+and --tasks`) and is a `--requests` request; `--follow` carries it, with or
 without `--tasks` (see below). On `host:name` it runs on that host;
 a host whose dch predates it says `dch: <host>: the host's dch does not know
 --memory` (exit 1).
@@ -2627,7 +2639,10 @@ questions_command = ~/bin/my-questions
   `title` (required), `id`, `status` (read as a task's: `pending`,
   `active`, `done`, `dropped`, any other word pending with the word as its
   `label`), `label`, `note`, `created`, `updated` and `url`, bare or
-  wrapped as `{"question":{…}}`, cut and checked as task rows are.
+  wrapped as `{"question":{…}}`, cut and checked as task rows are. Optional, left
+  out when absent or malformed: `options` (at most 8 strings, 300 bytes each),
+  `recommended` (a string, 300 bytes) and `asker` (a session-like name, 64
+  bytes). The header gains `"answer":true` when `answer_command` is set.
 - **Output.** `--tasks`' header (`schema`, `session`, `session_id`,
   `source`, `title`, `partial`), one row per question, the `done` line:
   ```json
@@ -2642,8 +2657,71 @@ questions_command = ~/bin/my-questions
 `--questions` goes with no other flag but `--json` (`dch: bad usage:
 --questions and --tasks`, also with `--memory`, `--ref`, `--search`,
 `--chapter`, `--clear` and `--follow`: the stream carries no questions
-block, so poll it), and not in `--requests`. On `host:name` it runs on
+block, so poll it), and is a `--requests` request. On `host:name` it runs on
 that host's `dch serve`, with the host's config and command.
+
+##### Answering (`answer_command`)
+
+`dch --xray <n> --answer <qid> - --json` records the operator's answer to
+one open question (#692), the way Prosper's Questions tab sends it:
+```
+answer_command = ~/bin/my-answer
+printf 'Yes, ship it.' | dch --xray api --answer OQ-7 - --json
+```
+- **The qid**, 1 to 32 of `A-Z a-z 0-9 . _ -`, not starting with `-`, is
+  the command's last argv word; the answer is never in argv (`ps` would
+  show it): `-` is always standard input, read to its end (5 s at most).
+  One trailing newline is dropped. The text must be 1 to 4000 bytes of
+  UTF-8 with no control character but LF and tab (`dch: bad answer: …`,
+  exit 2, nothing runs).
+- **The run.** `questions_command`'s: the same session, environment
+  (`DCH_SESSION`, `DCH_SESSION_CWD`, `DCH_AGENT`, …), cwd, no shell and
+  5 s clock. Its stdin holds the text and one newline, then ends. Its
+  stdout is ignored; its stderr's first line is the `detail`.
+- **The result**, one JSON line:
+
+  | Command exit | Line | dch exit |
+  | --- | --- | --- |
+  | 0 | `{"answered":true,"id":"OQ-7"}` | 0 |
+  | 5 or 3 | `{"answered":false,"id":"OQ-7","why":"not_open","detail":"…"}` | 5 |
+  | 4 | `{"answered":false,"id":"OQ-7","why":"no_question","detail":"…"}` | 5 |
+  | 2 | `{"answered":false,"why":"refused","detail":"…"}` | 3 |
+  | other, killed, the clock | `{"answered":false,"why":"failed","detail":"…"}` (`timeout` past 5 s) | 3 |
+  | no `answer_command` | `{"answered":false,"why":"no_command"}` | 1 |
+
+- **The operator's only.** From inside a session (`DCH_SESSION` set) it
+  is refused: `dch: --answer is the operator's: not from inside a
+  session`, exit 2. A speed bump for an agent's shell, not a wall.
+- **Usage.** `--json` only: `dch: bad usage: --answer and --tasks`, also
+  with `--follow`, `--memory`, `--questions`, `--schedules`, `--ref`,
+  `--search`, `--chapter`, `--clear` and `--since`; not in `--requests`.
+  On `host:name` the client reads the text and sends it in the request;
+  the host's `dch serve` checks the qid and text again and runs the
+  host's `answer_command` (no opt-in). A host whose dch does not know it:
+  `dch: <host>: the host's dch does not know --answer`, exit 1.
+- **Telling the session (`--notify <session>`, #693).** Once the answer is
+  recorded (exit 0 only; any other result sends nothing and has no
+  `told`), dch tells one live session in the same socket dir as `<n>`:
+  `--answer OQ-7 - --notify api-main --json`. The text is
+  `OQ-7 answered: <ruling>`, each LF and tab a space and runs of spaces
+  one. A Claude Code session gets it through Claude's native inbox (the
+  peer record of that very Claude, found by its pid and session id, never
+  by name; see [Native Claude and Codex
+  messages](#native-claude-and-codex-messages)): Claude queues it into a
+  running turn. The frame names no reply address (dch has no inbox) and
+  its sender is `operator (dch xray)`. A Codex session gets one `--say`,
+  no retry. The result line gains
+  `"told":{"session":"api-main","via":"native"|"say","ok":true}`, or
+  `"ok":false` with a `why`: `no_inbox` (that Claude publishes no peer
+  record) or `failed` (the frame was not written); `--say`'s `prompt`,
+  `draft`, `no_screen`, `not_foreground`, …; `no_agent` (a shell, no
+  agent) and `no_session`. Claude sends no receipt, so `ok` means the
+  frame was written. The exit stays the answer's: telling is best effort.
+  The session is a plain name (1 to 64 of `A-Z a-z 0-9 . _ -`, not
+  starting with `-`: `dch: bad notify: …`, exit 2); `--notify` without
+  `--answer` is `dch: bad usage: --notify comes with --answer`. On
+  `host:name` the flag goes with the request and the host tells its own
+  session (it alone reaches that Claude's socket).
 
 #### Your own definitions (`define_command`)
 
@@ -2833,6 +2911,10 @@ its version probe.
   cap), its `done` line when it changes, and the whole block again when
   its header changes or its rows' order does. Its rows come from the
   follow's own read of the transcript; it has no command and no timer.
+  Durable crons (#689) are reconciled with the session's
+  `.claude/scheduled_tasks.json` on every block build, as the one-shot does
+  (the file is reread then; a change alone builds nothing, the next
+  transcript line does).
 - The session's Claude (or Codex) leaving: the master wakes the follow,
   which sends `reset` `rotated` and the shell's snapshot, then this block
   again, whole: the agent's rows with `"live":false`, its pending crons and
@@ -2965,9 +3047,10 @@ system, like any name.
 | --- | --- |
 | 0 | the object was printed (the view: quit); a `--follow` ended with its session, its connection, or its reader |
 | 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--search`, `--tasks`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell; also after the snapshot, when a stalled follower's slot went to a fifth: the stream stopped, the session did not end) |
-| 2 | bad usage: `--json` missing (the view: any other flag, or a stdout that is not a terminal), a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, `--search`, `--tasks`, `--questions` or `--memory` with any of them, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope`, `--budget-ms` or `--search` text |
+| 2 | bad usage: `--json` missing (the view: any other flag, or a stdout that is not a terminal), a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, `--search`, `--tasks`, `--questions` or `--memory` with any of them, `--answer` with any other flag but `--json`, from inside a session, or a bad qid or answer text, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope`, `--budget-ms` or `--search` text |
 | 4, 6, 7 | a remote `host:name` only: refused by the host's gate; the host lacks `xray`; the host is unreachable or the connection was lost |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
+| 5 | `--answer`: not answered, the question changed: not open any more (answered or dropped elsewhere) or no such question; the result line says which (`--answer`'s exit 1 is no `answer_command`, 3 refused or failed, see [Answering](#answering-answer_command)) |
 
 ### Auto-allow
 
@@ -3220,6 +3303,32 @@ gets the same steps, in Codex's own terms (Codex 0.167):
 - **Typed into the shell.** As for Claude: `--include-agents` skips it
   (`in_shell`); `--stop` pauses it and ends the session without `/quit`, the
   record keeping the thread seen live.
+
+##### Codex provider
+
+`codex resume` gets every option the Codex ran with, its `-c` words
+included, so one pointed at a local proxy that has since stopped or moved
+would come back pointed at it. `--revive` and `--restart --include-agents`
+take two flags for that, applied to a Codex's resume argv only (with
+`--all`, to every Codex selected):
+
+- `--codex-drop-provider` leaves out each recorded `-c K=V`, `-cK=V`,
+  `--config K=V` and `--config=K=V` whose key — the text before the first
+  `=`, whitespace trimmed, a quote around it dropped — is `model_provider` or
+  starts with `model_providers.`. Other `-c` words stay.
+- `--codex-config K=V` (repeatable, at most 16) appends `-c K=V` after the
+  kept options and before the PROMPT (and its `--`), in the order given.
+  `K` is `[A-Za-z0-9_.-]+`, the value at most 1024 bytes in all, no control
+  character; otherwise exit 2 and nothing runs.
+
+A Claude or shell session ignores them; its `--json` result line then
+carries `"codex_ignored": <count>` (the drop flag counts one, each
+`--codex-config` one). The revived session runs, and its new record keeps,
+the argv as changed, so a later `--revive` without the flags resumes with the
+words dropped and the `--codex-config` ones still there. A `--restart
+--include-agents` relaunch likewise becomes the session's command. Over
+`dch serve` (`--revive host:name`) both flags are allowed and checked on the
+host as here; `--restart` is not a remote verb.
 
 Limitations:
 
@@ -3903,7 +4012,7 @@ for a local session named that way.
 | `-m` | `-m <n> <alias>` | 60 s |
 | `--spawn` | `--spawn <n> [--size CxR] [--] <cmd...>`, with `cwd`; needs `--allow-create` | 60 s |
 | `--history` | `--history --json` | 60 s |
-| `--revive` | `--revive <n> [--as <new>] [--no-message] --json`; needs `--allow-create`; never `--env` or `--unset` (local only) | 660 s |
+| `--revive` | `--revive <n> [--as <new>] [--no-message] [--codex-drop-provider] [--codex-config K=V]... --json`; needs `--allow-create`; never `--env` or `--unset` (local only) | 660 s |
 | `--pin`, `--unpin`, `--forget` | `--pin <n>... --json`; `--forget --all --json` | 60 s |
 | `--stop` | `--stop <n>... --json` | 660 s |
 | `--say` | `--say <n> --json -- <text>` | 660 s |
@@ -3913,6 +4022,7 @@ for a local session named that way.
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |
 | `--xray` | `--xray <n> --questions --json` | 60 s |
+| `--xray` | `--xray <n> --answer <qid> <text> [--notify <session>] --json` (the client's `-` read and put in its place; the host's `answer_command` gets it on stdin, its ctl child's argv a `-`; `--notify`'s session checked as the client does) | 60 s |
 | `--xray` | `--xray <n> --memory --json` | 60 s |
 
 Refused, before anything runs: an `argv` of fewer than 2 elements; a verb
@@ -3927,7 +4037,7 @@ on this host (dch serve --allow-create)`).
 once (`--json twice`). A flag's value is the next element even when it
 starts with `-`. Refused: no `--json` (`--xray needs --json (the view is
 client-side only)`); two of `--ref`, `--search`, `--tasks`, `--memory`,
-`--questions`, `--follow`, `--chapter` and `--clear`;
+`--questions`, `--answer`, `--follow`, `--chapter` and `--clear`;
 `--scope`, `--full` or `--budget-ms` without `--ref`; a flag not in the
 table (`--requests is not allowed with --xray`); a missing value (`--ref
 needs a value`); and a value that fails `dch --xray`'s rules (`bad ref`,
@@ -4378,7 +4488,9 @@ sandbox does not need permission to run `ps`.
 An inbound message identifies its authenticated sender and includes the reply
 command before the untrusted content. `--agent-send` exits 0 once the frame is
 written to the peer; Claude sends no receipt for a message it accepts. Refused,
-ambiguous, and timed-out sends exit 1.
+ambiguous, and timed-out sends exit 1. A `<cross-session-message` or
+`</cross-session-message` tag inside the content (any case) is altered with a
+backslash after the `<`, so it cannot close or reopen the wrapper.
 
 The peer stays absent until Codex writes its shell snapshot and dch can bind
 the current session to exactly one snapshot UUID.

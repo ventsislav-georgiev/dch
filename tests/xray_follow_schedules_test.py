@@ -251,11 +251,78 @@ def test_all_blocks():
             fl.stop()
 
 
+def test_durable():
+    """#695: block [2] reconciles durable crons with <cwd>/.claude/
+    scheduled_tasks.json like the one-shot; a rebuild (a transcript line)
+    rereads it"""
+    n = "xfs-dur"
+    env, proj = fake_env("dur")
+    proj = os.path.realpath(proj)
+    cdir = os.path.join(proj, ".claude")
+    os.makedirs(cdir, exist_ok=True)
+    fpath = os.path.join(cdir, "scheduled_tasks.json")
+    lf = (NOW - 30) * 1000
+    with open(fpath, "w") as f:
+        json.dump({"tasks": [{"id": "dddd0001", "cron": "*/10 * * * *",
+                              "prompt": "p", "createdAt": NOW * 1000,
+                              "lastFiredAt": lf}]}, f)
+    had = records()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("durable: claude spawned", r.returncode == 0, r.stderr)
+    fl = None
+    try:
+        sid = new_record(had)
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        os.makedirs(pdir, exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+
+        def put(objs, mode="a"):
+            with open(tp, mode) as f:
+                f.write("".join(json.dumps(o) + "\n" for o in objs))
+
+        def dcron(tuid, cid):
+            o = cron(tuid, cid, "p")
+            o[0]["message"]["content"][0]["input"]["durable"] = True
+            o[1]["toolUseResult"]["durable"] = True
+            return o
+
+        put([{"type": "user", "cwd": proj, "timestamp": ts(NOW),
+              "message": {"content": "jobs"}}] + dcron("tu1", "dddd0001"),
+            "w")
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 10)
+        fl = Follow(n, extra=["--schedules"])
+        fl.wait(lambda o: "done" in o)
+        one = sched_lines(n)
+        r1 = rows(sched_blocks(fl.objs())[0])["dddd0001"]
+        check("durable: listed in the file, pending with its lastFiredAt, "
+              "as the one-shot", r1["status"] == "pending" and
+              r1["last_fired"] == ts(NOW - 30).replace(".000", "") and
+              rows(one)["dddd0001"] == r1, (r1, one))
+        with open(fpath, "w") as f:
+            json.dump({"tasks": []}, f)
+        time.sleep(0.4)
+        k0 = len(fl.got)
+        put(dcron("tu2", "dddd0002"))
+        d = fl.wait(lambda o: "schedule" in o and
+                    o["schedule"]["id"] == "dddd0001" and
+                    o["schedule"]["status"] == "ended", frm=k0)
+        check("durable: the file edited (dropped) flips it to ended in the "
+              "next delta", d, fl.objs(k0))
+    finally:
+        dch("-k", n)
+        if fl:
+            fl.stop()
+
+
 def main():
     print("xray_follow_schedules_test: %s" % DCH)
     try:
         test_shell_claude_exit()
         test_all_blocks()
+        test_durable()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

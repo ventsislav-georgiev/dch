@@ -482,7 +482,8 @@ static const struct ctl_verb
 	{ "--spawn",    CN_ONE,  CT_TEXT,  CTL_CREATE, " --size " },
 	{ "--history",  CN_NONE, CT_NONE,  CTL_JSON, "" },
 	{ "--revive",   CN_ONE,  CT_NONE,  CTL_CREATE | CTL_LONG | CTL_JSON,
-	                " --as --no-message " },
+	                " --as --no-message --codex-drop-provider"
+	                " --codex-config " },
 	{ "--pin",      CN_MANY, CT_NONE,  CTL_JSON, "" },
 	{ "--unpin",    CN_MANY, CT_NONE,  CTL_JSON, "" },
 	{ "--forget",   CN_MANY, CT_NONE,  CTL_JSON | CTL_ALL, "" },
@@ -505,6 +506,21 @@ int
 ctl_known(const char *verb)
 {
 	return ctl_find(verb) != NULL;
+}
+
+int
+ctl_codex_cfg_ok(const char *s)
+{
+	size_t k = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	                     "0123456789_.-");
+	const unsigned char *p;
+
+	if (!k || s[k] != '=' || strlen(s) > 1024)
+		return 0;
+	for (p = (const unsigned char *)s; *p; p++)
+		if (*p < 0x20 || *p == 0x7f)
+			return 0;
+	return 1;
 }
 
 /* Never in a ctl's argv, but in free text: dch's other modes and help, the
@@ -603,6 +619,47 @@ xray_search_ok(const char *s)
 	return 1;
 }
 
+/* --answer's qid (#692): 1 to 32 of [A-Za-z0-9._-], never a leading '-'
+** (it is the answer_command's last argv word). */
+int
+xray_qid_ok(const char *s)
+{
+	size_t n = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	                     "0123456789._-");
+
+	return n >= 1 && n <= 32 && !s[n] && s[0] != '-';
+}
+
+/* --notify's session (#693): the asker rule, 1 to 64 of [A-Za-z0-9._-],
+** never a leading '-'. */
+int
+xray_notify_ok(const char *s)
+{
+	size_t n = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	                     "0123456789._-");
+
+	return n >= 1 && n <= 64 && !s[n] && s[0] != '-';
+}
+
+/* --answer's text (#692): 1 to XRAY_ANSWER_MAX bytes of UTF-8, no C0, DEL
+** or C1 but LF and tab: the operator's ruling, several lines allowed. */
+int
+xray_answer_ok(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+	size_t n = strlen(s);
+	unsigned cp;
+	int k;
+
+	if (n < 1 || n > XRAY_ANSWER_MAX)
+		return 0;
+	for (; *p; p += k)
+		if (!(k = utf8_at(p, &cp)) || (cp < 0x20 && cp != '\n' &&
+		    cp != '\t') || (cp >= 0x7f && cp < 0xa0))
+			return 0;
+	return 1;
+}
+
 int
 xray_budget(const char *s)
 {
@@ -663,8 +720,10 @@ xray_since(const char *s, long long now)
 ** flags in any order, each once: --json, required (the view is the
 ** client's own, as --requests is); one of --follow, --ref <text>,
 ** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
-** (#322), --questions (#652), --schedules (#685), --since <time> (#516)
-** and --clear, but
+** (#322), --questions (#652), --schedules (#685), --since <time> (#516),
+** --answer <qid> <text> (#692: the client's "-" read and put in its place;
+** qid CK_VALUE, the text CK_TEXT, both checked here; with it --notify
+** <session>, CK_VALUE, #693) and --clear, but
 ** --follow takes --tasks,
 ** --memory (#446) and --schedules (#686);
 ** --scope with --ref or --search (#501), --full
@@ -683,12 +742,13 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	                                   "--scope", "--budget-ms", "--search",
 	                                   "--tasks", "--memory", "--since",
 	                                   "--no-github", "--questions",
-	                                   "--schedules" };
+	                                   "--schedules", "--answer", "--notify" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
 	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256,
 	       X_TASKS = 512, X_MEMORY = 1024, X_SINCE = 2048,
-	       X_NOGH = 4096, X_QUESTIONS = 8192, X_SCHEDULES = 16384 };
-	const char *val[12] = { NULL };
+	       X_NOGH = 4096, X_QUESTIONS = 8192, X_SCHEDULES = 16384,
+	       X_ANSWER = 32768, X_NOTIFY = 65536 };
+	const char *val[12] = { NULL }, *qid = NULL, *text = NULL, *tell = NULL;
 	unsigned seen = 0, k, one;
 	int i;
 
@@ -700,9 +760,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 15 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 17 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 15)
+		if (k == 17)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -721,9 +781,26 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 			/* --since's ISO time holds ':', as an anchor may */
 			kind[i] = k == 6 || k == 7 ? CK_VALUE : CK_TEXT;
 		}
+		else if (k == 15)
+		{
+			if (i + 2 >= argc)
+				return ctl_no(why, cap, "--answer needs a qid and a text");
+			qid = argv[++i];
+			kind[i] = CK_VALUE;
+			text = argv[++i];
+			kind[i] = CK_TEXT;
+		}
+		else if (k == 16)
+		{
+			if (++i >= argc)
+				return ctl_no(why, cap, "--notify needs a value");
+			tell = argv[i];
+			kind[i] = CK_VALUE;
+		}
 	}
 	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
-	              X_TASKS | X_MEMORY | X_SINCE | X_QUESTIONS | X_SCHEDULES);
+	              X_TASKS | X_MEMORY | X_SINCE | X_QUESTIONS | X_SCHEDULES |
+	              X_ANSWER);
 	if (seen & X_FOLLOW)	/* the stream carries them (#446, #686) */
 		one &= ~(unsigned)(X_TASKS | X_MEMORY | X_SCHEDULES);
 	if (!(seen & X_JSON))
@@ -757,6 +834,15 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 		              "character");
 	if (val[11] && xray_since(val[11], 0) < 0)
 		return ctl_no(why, cap, XRAY_SINCE_BAD);
+	/* the client checked them; an older or a forged one may not have */
+	if (qid && !xray_qid_ok(qid))
+		return ctl_no(why, cap, XRAY_QID_BAD);
+	if (text && !xray_answer_ok(text))
+		return ctl_no(why, cap, XRAY_ANSWER_BAD);
+	if (tell && !qid)
+		return ctl_no(why, cap, "--notify comes with --answer");
+	if (tell && !xray_notify_ok(tell))
+		return ctl_no(why, cap, XRAY_NOTIFY_BAD);
 	return seen & X_FOLLOW ? CTL_FOREVER | CTL_NOCAP : 0;
 }
 
@@ -765,7 +851,7 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
           size_t cap)
 {
 	const struct ctl_verb *v;
-	int i = 1, names = 0, json = 0, all = 0, dd = 0;
+	int i = 1, names = 0, json = 0, all = 0, dd = 0, cxn = 0;
 
 	if (argc < 2)
 		return ctl_no(why, cap, "a ctl request takes a verb and a "
@@ -845,6 +931,14 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
 		{
 			if (++i >= argc || !ctl_size(argv[i]))
 				return ctl_no(why, cap, "--size wants COLSxROWS");
+			kind[i] = CK_VALUE;
+		}
+		else if (!strcmp(a, "--codex-config"))
+		{
+			if (++i >= argc || !ctl_codex_cfg_ok(argv[i]) || ++cxn > 16)
+				return ctl_no(why, cap, "--codex-config wants at most "
+				              "16 K=V, K of [A-Za-z0-9_.-], 1024 bytes, "
+				              "no control characters");
 			kind[i] = CK_VALUE;
 		}
 		else if (!strcmp(a, "--as"))
@@ -933,13 +1027,21 @@ exec_prep(void)
 char *
 ctl_text_read(int fd, char b[257], int ms)
 {
+	return ctl_text_readn(fd, b, 256, ms);
+}
+
+/* ctl_text_read's rules for up to max bytes into b[max + 1] (--answer's
+** text, #692) */
+char *
+ctl_text_readn(int fd, char *b, size_t max, int ms)
+{
 	struct pollfd p = { .fd = fd, .events = POLLIN };
 	long long end = now_ms() + ms;
 	size_t n = 0;
 	ssize_t r;
 	int left;
 
-	while (n < 257)
+	while (n < max + 1)
 	{
 		if ((left = (int)(end - now_ms())) <= 0)
 			return NULL;
@@ -947,14 +1049,14 @@ ctl_text_read(int fd, char b[257], int ms)
 			return NULL;
 		if (r <= 0)
 			continue;
-		if ((r = read(fd, b + n, 257 - n)) == 0)
+		if ((r = read(fd, b + n, max + 1 - n)) == 0)
 			break;
 		if (r > 0)
 			n += (size_t)r;
 		else if (errno != EINTR && errno != EAGAIN)
 			return NULL;
 	}
-	if (n > 256 || memchr(b, '\0', n))
+	if (n > max || memchr(b, '\0', n))
 		return NULL;
 	b[n] = '\0';
 	return b;

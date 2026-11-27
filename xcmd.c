@@ -4,13 +4,15 @@
  * lines, hand each valid row on as the contract's row line while the rest is
  * still arriving. See xcmd.h.
  *
- * The run follows xray.c's git resolver (res_run): stdin /dev/null, its own
+ * The run follows xray.c's git resolver (res_run): stdin /dev/null (an
+ * answer_command's: its text on a pipe, #692), its own
  * process group, signals reset, no other fd of ours, a group kill when the
  * querying process is ended, the leader reaped only after the group kill.
  * It forks rather than posix_spawn()s: the cwd needs addchdir, which is
  * _np on glibc and deprecated on macOS 26.
  */
 #include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -275,13 +277,64 @@ row_task(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 	put(w, "}}");
 }
 
+/* A text field cut at 300 bytes (never inside a UTF-8 sequence), control
+** bytes as blanks, blank runs as one, ends trimmed; NULL when empty. */
+#define XQ_CUT 300
+static const char *
+cut300(const struct json_parser *p, int t, char *tmp, char out[XQ_CUT + 1])
+{
+	const unsigned char *s = (const unsigned char *)text(p, t, 0, tmp);
+	size_t o = 0, i;
+
+	if (!s)
+		return NULL;
+	for (i = 0; s[i] && o < XQ_CUT; i++)
+	{
+		if (s[i] < 32 || s[i] == 0x7f || s[i] == ' ')
+		{
+			if (o && out[o - 1] != ' ')
+				out[o++] = ' ';
+			continue;
+		}
+		out[o++] = (char)s[i];
+	}
+	if ((s[i] & 0xc0) == 0x80)	/* cut inside a sequence: drop it */
+	{
+		while (o && ((unsigned char)out[o - 1] & 0xc0) == 0x80)
+			o--;
+		if (o)
+			o--;
+	}
+	while (o && out[o - 1] == ' ')
+		o--;
+	out[o] = '\0';
+	return o ? out : NULL;
+}
+
+/* an asker: a plain session-like name, 64 bytes at most */
+static const char *
+asker_name(const struct json_parser *p, int t, char *tmp)
+{
+	const char *s = text(p, t, 0, tmp);
+	size_t i;
+
+	if (!s || !*s || strlen(s) > 64 || *s == '-')
+		return NULL;
+	for (i = 0; s[i]; i++)
+		if (!isalnum((unsigned char)s[i]) && !strchr("._-", s[i]))
+			return NULL;
+	return s;
+}
+
 /* questions_command (#652): a task row's validation, its fields only */
 static void
 row_question(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
              const char *id, const char *title)
 {
 	char b[XR_TITLE_MAX * 4 + 1], lb[XR_TITLE_MAX * 4 + 1];
-	const char *st, *word, *label;
+	char ob[XQ_CUT + 1];
+	const char *st, *word, *label, *s;
+	int t, i, n = 0;
 
 	word = cut(p, dch_json_field(p, r, "status"), 0, tmp, b);
 	st = word ? status_of(word) : NULL;
@@ -303,6 +356,31 @@ row_question(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 	putq(w, cut(p, dch_json_field(p, r, "updated"), 0, tmp, b));
 	key(w, "url");
 	putq(w, link_text(p, dch_json_field(p, r, "url"), 0, tmp));
+	/* options, recommended, asker: left out, not null, when absent or bad */
+	if ((t = dch_json_field(p, r, "options")) >= 0 &&
+	    p->tok[t].kind == JSON_ARRAY)
+	{
+		for (i = t + 1; i < p->tok[t].next && n < 8; i = p->tok[i].next)
+			if (p->tok[i].kind == JSON_STRING &&
+			    cut300(p, i, tmp, ob))
+			{
+				put(w, n ? "," : ",\"options\":[");
+				putq(w, ob);
+				n++;
+			}
+		if (n)
+			put(w, "]");
+	}
+	if ((s = cut300(p, dch_json_field(p, r, "recommended"), tmp, ob)))
+	{
+		key(w, "recommended");
+		putq(w, s);
+	}
+	if ((s = asker_name(p, dch_json_field(p, r, "asker"), tmp)))
+	{
+		key(w, "asker");
+		putq(w, s);
+	}
 	put(w, "}}");
 }
 
@@ -671,9 +749,10 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 {
 	const char *v[XC_NAMES];
 	char rows[16], **e;
-	size_t n = 0, k, j, mn = c->ref ? XC_NAMES : XC_NAMES - 3;
+	int def = c->ref && !c->input;	/* an answer's qid is no DCH_REF */
+	size_t n = 0, k, j, mn = def ? XC_NAMES : XC_NAMES - 3;
 
-	snprintf(rows, sizeof rows, "%d", c->ref ? XR_DEFS : XCMD_ROWS_MAX);
+	snprintf(rows, sizeof rows, "%d", def ? XR_DEFS : XCMD_ROWS_MAX);
 	v[0] = c->session;
 	v[1] = c->cwd;
 	v[2] = c->agent;
@@ -906,13 +985,34 @@ xc_warn(struct xcmd_result *res, const char *what, const char *fmt, ...)
 	va_end(ap);
 }
 
+/* XCMD_ANSWER's stdin: a pipe's read end holding s and a "\n", its write
+** end closed (EOF after them); -1 on a failure. s is at most 4 KB, which an
+** empty pipe takes whole, so the write never waits for a reader. */
+static int
+xc_input(const char *s)
+{
+	int p[2];
+	size_t n = strlen(s);
+
+	if (pipe(p) != 0)
+		return -1;
+	if (write(p[1], s, n) != (ssize_t)n || write(p[1], "\n", 1) != 1)
+	{
+		close(p[0]);
+		p[0] = -1;
+	}
+	close(p[1]);
+	return p[0];
+}
+
 int
 xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
           void *arg, struct xcmd_result *res)
 {
 	const char *what = kind == XCMD_TASK ? "tasks_command" : kind ==
 	                   XCMD_MEMORY ? "memory_command" : kind ==
-	                   XCMD_QUESTION ? "questions_command" : "define_command";
+	                   XCMD_QUESTION ? "questions_command" : kind ==
+	                   XCMD_ANSWER ? "answer_command" : "define_command";
 	int wall = kind == XCMD_DEFINE ? XCMD_DEF_WALL_MS : XCMD_WALL_MS;
 	size_t omax = kind == XCMD_DEFINE ? XCMD_DEF_OUT_MAX : XCMD_OUT_MAX;
 	char buf[4096], *argv[XCMD_ARGS_MAX + 1], *mine[XC_NAMES] = {0}, **envp;
@@ -964,8 +1064,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	if (!(envp = xc_envp(ctx, mine)) ||
 	    !(r.line = malloc(XCMD_LINE_MAX + 1)) ||
 	    !(r.row = malloc(XCMD_LINE_MAX + 1)) || pipe(po) != 0 ||
-	    pipe(pe) != 0 || pipe(ep) != 0 ||
-	    (in = open("/dev/null", O_RDONLY)) < 0)
+	    pipe(pe) != 0 || pipe(ep) != 0 || (in = ctx->input
+	    ? xc_input(ctx->input) : open("/dev/null", O_RDONLY)) < 0)
 	{
 		xc_warn(res, what, "cannot run %s: %s", prog, strerror(errno));
 		goto out;
@@ -1064,7 +1164,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 				              ? (size_t)n : omax - total;
 
 				total += take;
-				xc_feed(&r, chunk, take);
+				if (kind != XCMD_ANSWER)	/* its stdout: ignored */
+					xc_feed(&r, chunk, take);
 				if (r.stop == XC_RUN && take < (size_t)n)
 					r.stop = XC_BYTES;
 			}

@@ -186,7 +186,8 @@ def main():
                "remote_hosts = ", "focus_resize = true",
                "xray_ring = 2M", "tasks_command = ",
                "memory_command = ", "define_command = ",
-               "questions_command = ", "xray_github = true"])
+               "questions_command = ", "answer_command = ",
+               "xray_github = true"])
         r = run("--config", "auto_allow")
         check("--config <key> unset: exit 1, nothing printed, no error",
               r.returncode == 1 and r.stdout == r.stderr == "")

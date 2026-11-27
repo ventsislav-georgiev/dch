@@ -423,6 +423,7 @@ pyrun "the --xray view of host:name: the chord's failure lines, re-arm, suspend"
 pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
 pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
 pyrun "--questions with a questions_command: command rows, else source none, warn" xcmd_questions_test.py
+pyrun "--answer: answer_command, the result line, bounds, self-guard, serve (#692)" xray_answer_test.py
 # 45-55 s each, last in the queue before: the pool's tail waited on them (#393)
 pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
 pyrun "remote hosts: dark hosts, stalled readers, hostile lines (#180)" remote_client_more_test.py

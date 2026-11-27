@@ -206,8 +206,25 @@ def main():
             got = ctl1(port, ["--revive", n] + a + ["--json"])
             check("serve: --revive %s refused" % a[0],
                   got == ("refused", "%s is not allowed with --revive" % a[0]))
+        # #696: --codex-config is checked here too: a bad one never runs
+        cxw = ("--codex-config wants at most 16 K=V, K of [A-Za-z0-9_.-], "
+               "1024 bytes, no control characters")
+        for a in (["--codex-config", "bad key=1"],
+                  ["--codex-config", "a=b\x01"],
+                  ["--codex-config", "a=" + "x" * 1023],
+                  ["--codex-config", "a=1"] * 17):
+            got = ctl1(port, ["--revive", n] + a + ["--json"])
+            check("serve: --revive %r... refused" % a[:2],
+                  got == ("refused", cxw), got)
         check("serve: ...and no dch --revive ran",
               rvran() == rv0)
+        got = ctl1(port, ["--revive", "nosuch696", "--codex-drop-provider",
+                          "--codex-config", "a=1", "--json"])
+        # (this host has no --allow-create: that refusal comes after the
+        # allowlist passed)
+        check("serve: --revive with the #696 flags passes the allowlist",
+              got == ("refused", "creating sessions is off on this host "
+                      "(dch serve --allow-create)"), got)
         check("xray serve: every accepted form ran a dch, no refused one",
               ran - before == len(ok) + len(names)
               and text(log).count(" ctl --xray ") == ran)

@@ -1396,7 +1396,7 @@ ctl_action(unsigned int type, pid_t ctl, const char *why)
 	return type == 0x34 && ctl > 0 && !why ? CA_CANCEL : CA_IGNORE;
 }
 
-/* An allowlisted argv's --search or --ref text: its index in av, else -1.
+/* An allowlisted argv's --search, --ref or --answer text: its index in av, else -1.
 ** on_ctl hands it to the child on stdin, "-" in its argv, so the host's
 ** other users never see it in ps (LOW-XN1). Pure. */
 static int
@@ -1412,6 +1412,8 @@ ctl_secret(int ac, char *const av[])
 		if (kind[i] == CK_FLAG &&
 		    (!strcmp(av[i], "--search") || !strcmp(av[i], "--ref")))
 			return i + 1;
+		else if (kind[i] == CK_FLAG && !strcmp(av[i], "--answer"))
+			return i + 2;	/* ctl_xray: a qid, then the text */
 	return -1;
 }
 
@@ -1458,7 +1460,8 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 		argv[0] = dch_exe;
 		memcpy(argv + 1, av, (size_t)ac * sizeof *av);
 		argv[ac + 1] = NULL;
-		/* at most 256 bytes: the pipe holds it all before the fork */
+		/* at most 4000 bytes (--answer's): an empty pipe holds it all
+		** before the fork */
 		if ((sx = ctl_secret(ac, av)) >= 0)
 			argv[sx + 1] = "-";
 		if ((sx < 0 || (pipe_ce(pi) == 0 &&

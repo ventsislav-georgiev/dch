@@ -4,6 +4,7 @@
 ** out of every relaunch and every History record, so a revive, a restart or
 ** a resume never sends it again. Pure: no I/O.
 */
+#include <ctype.h>
 #include <string.h>
 
 #include "cargv.h"
@@ -309,9 +310,32 @@ static const char *const cxval[] = {
 	"--ask-for-approval", "-C", "--cd", "--add-dir", NULL
 };
 
+/* #696: a -c/--config value whose key (before the first '=', trimmed,
+** a quote around it dropped) is model_provider or model_providers.*. */
+static int
+cx_provider(const char *kv)
+{
+	const char *e = strchr(kv, '=');
+	size_t l;
+
+	if (!e)
+		return 0;
+	while (kv < e && isspace((unsigned char)*kv))
+		kv++;
+	while (e > kv && isspace((unsigned char)e[-1]))
+		e--;
+	if (kv < e && (*kv == '"' || *kv == '\''))
+		kv++;
+	if (e > kv && (e[-1] == '"' || e[-1] == '\''))
+		e--;
+	l = (size_t)(e - kv);
+	return (l == 14 && strncmp(kv, "model_provider", 14) == 0) ||
+	       (l > 16 && strncmp(kv, "model_providers.", 16) == 0);
+}
+
 int
 dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
-                 char *msg, char **out)
+                 char *msg, char **out, int drop, char *const *cfg, int ncfg)
 {
 	int k, n = 0, val, i;
 
@@ -341,9 +365,19 @@ dch_codex_resume(char **in, int argc, int at, char *id, char *cwd,
 			k++;
 			continue;
 		}
+		if (drop && (((!strcmp(a, "-c") || !strcmp(a, "--config")) &&
+		              k + 1 < argc && cx_provider(in[k + 1]) && ++k) ||
+		             (a[1] == 'c' && a[2] && cx_provider(a + 2)) ||
+		             (!strncmp(a, "--config=", 9) && cx_provider(a + 9))))
+			continue;
 		out[n++] = in[k];
 		if (val && k + 1 < argc)
 			out[n++] = in[++k];
+	}
+	for (i = 0; i < ncfg; i++)
+	{
+		out[n++] = "-c";
+		out[n++] = cfg[i];
 	}
 	if (msg && *msg)
 	{

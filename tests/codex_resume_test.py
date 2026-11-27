@@ -309,6 +309,72 @@ def main():
         r = dch("--revive", "cx6")
         check("#676 not_utf8 Codex record, text: same hint",
               ("codex resume " + T1) in r.stdout, r.stdout)
+
+        # 9. (#696) --codex-drop-provider drops the recorded provider words
+        # in all four forms, other -c words stay; --codex-config appends
+        # -c K=V after them, in order, before `--` and the PROMPT
+        got = spawn("cx7", [fake, "-c", 'model_provider="old"',
+                            "-cmodel_providers.old.base_url=http://x",
+                            "--config", ' "model_providers.old.name" =Old',
+                            "--config=model_provider=old2", "-c", "foo=1",
+                            "--config=model_providerx=keep", "-c",
+                            "model_providers=keep", "-m", "o3"],
+                    {"CODEX_HOME": cxhome, "FAKE_CODEX_TID": T1,
+                     "FAKE_CODEX_SNAP": "1"})
+        until(lambda: ((rec("cx7") or {}).get("codex") or {})
+              .get("thread_id"), 10)
+        if got:
+            os.kill(int(got[0]), signal.SIGKILL)
+        ended("cx7")
+        cfg = ["model_provider=prosperpool",
+               'model_providers.prosperpool.base_url="http://127.0.0.1:1/codex"'
+               ] + ["k%d.x-y_z=%d" % (i, i) for i in range(14)]
+        flags = ["--codex-drop-provider"]
+        for c in cfg:
+            flags += ["--codex-config", c]
+        k0 = len(launches())
+        for bad, why in ((flags + ["--codex-config", "k16=1"], "a 17th"),
+                         (["--codex-config", "bad key=1"], "a bad key"),
+                         (["--codex-config", "=1"], "an empty key"),
+                         (["--codex-config", "nokey"], "no ="),
+                         (["--codex-config", "a=b\x01c"], "a control char"),
+                         (["--codex-config", "a=" + "x" * 1023],
+                          "1025 bytes")):
+            r = dch("--revive", "cx7", *bad)
+            check("#696 --codex-config refuses %s: exit 2" % why,
+                  r.returncode == 2 and "--codex-config" in r.stderr,
+                  (r.returncode, r.stderr))
+        r = dch("--history", "--codex-drop-provider")
+        check("#696 the flags on --history: exit 2", r.returncode == 2,
+              (r.returncode, r.stderr))
+        time.sleep(0.5)
+        check("#696 refused: nothing revived", len(launches()) == k0,
+              launches()[k0:])
+        kept = ["-c", "foo=1", "--config=model_providerx=keep", "-c",
+                "model_providers=keep", "-m", "o3"]
+        added = [w for c in cfg for w in ("-c", c)]
+        r, got = revive("cx7", "--json", *flags,
+                        extra={"DCH_REVIVE_MSG": "-go on"})
+        check("#696 drop: the four provider forms gone, other -c kept; "
+              "16 --codex-config appended in order before -- and the PROMPT",
+              got and got[2:] == [fake, "--no-daemon", "resume", T1, "-C",
+                                  proj] + kept + added + ["--", "-go on"], got)
+        fin = [json.loads(l) for l in r.stdout.splitlines() if '"result"' in l]
+        check("#696 a Codex: no codex_ignored in --json", fin and
+              fin[-1]["result"] == "ok" and "codex_ignored" not in fin[-1],
+              r.stdout)
+        if got:
+            os.kill(int(got[0]), signal.SIGKILL)
+        ended("cx7")
+        # the revive re-records what it ran: a second one without the
+        # flags keeps the drop and brings the appended words again
+        r, got = revive("cx7", "--no-message")
+        check("#696 re-recorded: a plain revive runs the last revive's words",
+              got and got[2:] == [fake, "--no-daemon", "resume", T1, "-C",
+                                  proj] + kept + added, got)
+        if got:
+            os.kill(int(got[0]), signal.SIGKILL)
+        ended("cx7")
     finally:
         for n in names:
             dch("-k", n)

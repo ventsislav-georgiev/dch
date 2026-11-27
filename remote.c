@@ -3660,7 +3660,7 @@ rq_argv(char *name, int ac, char **av)
 }
 
 /* A request's argv (after --xray <name>) by 3.1's value rules, in 4.3's
-** request forms only: --json, --ref <text> [--scope] [--full]
+** request forms only (never --answer, #692): --json, --ref <text> [--scope] [--full]
 ** [--budget-ms], --chapter <anchor>, --clear. 0, else -1 with its stderr
 ** line in msg[cap], worded as dch --xray's for a value rule. Pure. */
 static int
@@ -3690,6 +3690,14 @@ rq_check(char *name, int ac, char **av, char *msg, size_t cap)
 		snprintf(msg, cap, "dch: bad usage: --follow is not a request");
 		fl = -1;
 	}
+	/* one write per process: the warm connection stays read-only (#692) */
+	for (i = 2; fl >= 0 && i < ac + 2; i++)
+		if (kind[i] == CK_FLAG && !strcmp(xv[i], "--answer"))
+		{
+			snprintf(msg, cap, "dch: bad usage: --answer is not a "
+			         "request");
+			fl = -1;
+		}
 	for (i = 2; fl >= 0 && i + 1 < ac + 2; i++)
 		if (kind[i] == CK_FLAG && !strcmp(xv[i], "--ref"))
 		{

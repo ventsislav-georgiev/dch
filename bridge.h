@@ -12,6 +12,9 @@ void dch_bridge_start(char **argv, int resumed, int ptyfd, int listenfd,
 void dch_bridge_reap(void);
 int dch_bridge_agent_list(int json);
 int dch_bridge_agent_send(const char *name, int argc, char **argv);
+/* One native message from dch into the Claude at pid running sid (#693): 0
+   written, -1 no live peer record for it, -2 the write failed. */
+int dch_bridge_notify(long pid, const char *sid, const char *text);
 int dch_codex_snapshot_id(const char *home, const char *sess,
                           const char *marker, char *out, size_t outsz,
                           int strict);

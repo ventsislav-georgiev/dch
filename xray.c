@@ -2305,7 +2305,7 @@ iso_num(const char *p, int w, int *v)
 {
 	int neg = 0, k = 0;
 
-	while (isspace((unsigned char)*p))
+	while (*p && isspace((unsigned char)*p))	/* *p: clang --analyze on glibc */
 		p++;
 	if (*p == '+' || *p == '-')
 		neg = *p++ == '-', w--;
@@ -16551,6 +16551,7 @@ struct sch_row
 	char *cron, *human, *prompt, *reason;	/* NULL for none */
 	int kind, status, recurring, durable;
 	int unk;		/* known from a fire only: recurring unsure */
+	int perm;		/* the durable file's permanent: never ages out */
 	int hnext;		/* the next row of its hash chain, -1 */
 	long fires, noop;	/* noop -1: none */
 	long long created, next, last;	/* epoch seconds, -1 none */
@@ -17190,15 +17191,92 @@ sch_line(struct xr_claude *d, const struct json_parser *p)
 	free(t);
 }
 
-/* the status as of now: a recurring cron past its age is expired; a pending
-** session one is ended when its Claude is not live */
+#define SCH_FILE_MAX (1L << 20)	/* Claude Code's own cap on the file */
+static const char *const A_LASTF[] = { "lastFiredAt", 0 };
+static const char *const A_PERM[] = { "permanent", 0 };
+
+void
+xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
+{
+	char path[PATH_MAX], *buf = NULL, *id;
+	struct json_parser p;
+	struct stat st;
+	struct sch_row *r;
+	size_t k, n = 0;
+	ssize_t got = 0;
+	int fd, ts = -1, i, seen = 0;
+	long long t;
+
+	for (k = 0; s && k < s->n; k++)
+		seen |= s->v[k].durable && s->v[k].kind == SCK_CRON;
+	if (!seen || !cwd || cwd[0] != '/' ||
+	    snprintf(path, sizeof path, "%s/.claude/scheduled_tasks.json", cwd)
+	    >= (int)sizeof path ||
+	    (fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
+		return;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+	    st.st_size <= SCH_FILE_MAX && (buf = calloc(1, (size_t)st.st_size + 1)))
+		while (n < (size_t)st.st_size &&
+		       (got = read(fd, buf + n, (size_t)st.st_size - n)) > 0)
+			n += (size_t)got;
+	close(fd);
+	if (!buf || got < 0)	/* refused or unreadable: the transcript's */
+	{
+		free(buf);
+		return;
+	}
+	buf[n] = '\0';
+	memset(&p, 0, sizeof p);
+	if (memchr(buf, '\0', n) || tokens_max(buf, n) > XR_LINE_TOKENS ||
+	    dch_json_parse(&p, buf) < 0 || p.tok[0].kind != JSON_OBJECT ||
+	    (ts = j_get(&p, 0, A_TASKS)) < 0 || p.tok[ts].kind != JSON_ARRAY)
+	{
+		snprintf(warn, cap, ".claude/scheduled_tasks.json: not readable "
+		         "JSON; durable rows are the transcript's");
+		dch_json_free(&p);
+		free(buf);
+		return;
+	}
+	/* a pending durable cron the file no longer lists is gone (a CronDelete
+	** the transcript shows made it deleted already); the file's jobs the
+	** transcript never names are not added: this block is one session's */
+	for (k = 0; k < s->n; k++)
+		if ((r = &s->v[k])->durable && r->kind == SCK_CRON &&
+		    r->status == SCS_PENDING)
+			r->status = SCS_ENDED;	/* no durable row was ended before */
+	for (i = ts + 1; i < p.tok[ts].next; i = p.tok[i].next)
+	{
+		if (p.tok[i].kind != JSON_OBJECT ||
+		    !(id = tk_id(&p, j_get(&p, i, A_ID))))
+			continue;
+		if ((r = sch_find(s, id)) && r->durable && r->kind == SCK_CRON &&
+		    r->status == SCS_ENDED)
+		{
+			r->status = SCS_PENDING;
+			r->perm = k_bool(&p, i, A_PERM);
+			if ((t = sch_time(&p, i, A_LASTF)) > r->last)
+			{
+				r->last = t;
+				if (r->next >= 0 && r->next <= t)
+					r->next = -1;	/* fired since: "next ~cron" */
+			}
+		}
+		free(id);
+	}
+	dch_json_free(&p);
+	free(buf);
+}
+
+/* the status as of now: a recurring cron past its age is expired (not a
+** permanent durable one); a pending session one is ended when its Claude
+** is not live */
 static int
 sch_status(const struct sch_row *r, int live, long long now, long long *exp)
 {
 	int st = r->status;
 
 	*exp = -1;
-	if (r->kind == SCK_CRON && r->recurring && r->created >= 0)
+	if (r->kind == SCK_CRON && r->recurring && r->created >= 0 && !r->perm)
 	{
 		*exp = r->created + SCH_MAXAGE;
 		if (st == SCS_PENDING && now >= *exp)
@@ -17262,6 +17340,37 @@ sch_put(FILE *f, const struct xr_scheds *s, const struct sch_row *r,
 	fputs(",\"created_chapter\":", f);
 	tk_anchor(f, s->ino, r->cch);
 	fputs("}}\n", f);
+}
+
+/* #695: the follow's block: xr_scheds_durable on a copy of the rows' four
+** moving fields, restored after, so the follow's own state stays the transcript's */
+int
+xr_scheds_print_durable(FILE *f, struct xr_scheds *s, const char *cwd,
+                        const char *session, const char *session_id,
+                        int partial, int live, long long now)
+{
+	struct sch_save { int status, perm; long long next, last; } *sv = NULL;
+	char dw[128] = "";
+	size_t k;
+	int rc;
+
+	if (s && !s->codex && s->n && (sv = malloc(s->n * sizeof *sv)))
+	{
+		for (k = 0; k < s->n; k++)
+			sv[k] = (struct sch_save){ s->v[k].status, s->v[k].perm,
+			                           s->v[k].next, s->v[k].last };
+		xr_scheds_durable(s, cwd, dw, sizeof dw);
+	}
+	rc = xr_scheds_print(f, s, session, session_id, partial, dw, live, now);
+	for (k = 0; sv && k < s->n; k++)
+	{
+		s->v[k].status = sv[k].status;
+		s->v[k].perm = sv[k].perm;
+		s->v[k].next = sv[k].next;
+		s->v[k].last = sv[k].last;
+	}
+	free(sv);
+	return rc;
 }
 
 int

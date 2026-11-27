@@ -120,6 +120,20 @@ def main():
                   r.returncode == 0 and got == ["--resume", sid] + want)
             run("-k", name + "2", timeout=30)
 
+        # #696: the codex options leave a Claude's resume alone, and its
+        # --json line counts them as ignored
+        sid = plant("rh", ["--model", "x"])
+        r = run("--revive", "rh", "--no-message", "--json",
+                "--codex-drop-provider", "--codex-config", "a=b")
+        got = until(lambda: started("rh"), 15)
+        fin = [json.loads(l) for l in r.stdout.splitlines() if '"result"' in l]
+        check("#696 a Claude ignores --codex-* [rc=%d got=%r out=%r]" %
+              (r.returncode, got, r.stdout), r.returncode == 0 and
+              got == ["--resume", sid, "--model", "x"] and fin and
+              fin[-1].get("codex_ignored") == 2 and
+              list(fin[-1])[-1] == "running")
+        run("-k", "rh", timeout=30)
+
         # --all: the name is taken, the copy is <name>-2 and so is claude's
         # (the live ta writes ta.json: the dead one's is moved aside)
         subprocess.run([DCH, "--spawn", "ta", "--size", "100x30", "sleep",

@@ -10,6 +10,10 @@ wake-up and Codex heartbeats as JSON lines, over fake transcripts only.
   - an ended Codex rollout: a heartbeat envelope's row; none: the warn
   - a shell: source "none"; the usage errors
   - the tasks and memory headers carry "block" too
+  - durable crons (#689) against the project's .claude/scheduled_tasks.json:
+    listed stays pending with its lastFiredAt, not listed ended, a job only
+    the file names not added; absent, a symlink or over 1 MiB: the
+    transcript's answer; unparsable: that answer plus a warn
 
 Run:  python3 tests/xray_schedules_test.py    (uses ./dch; run.sh isolates)
 """
@@ -386,6 +390,102 @@ def test_usage():
           "--json is required" in r.stderr, (r.returncode, r.stderr))
 
 
+def test_durable():
+    """an ended record whose transcript made two durable crons, the fake
+    project's .claude/scheduled_tasks.json rewritten between asks"""
+    cfg = os.path.join(HOME, ".claude")
+    cwd = os.path.join(T, "dproj")
+    sid = "11111111-2222-4333-8444-5555555555d9"
+    pdir = os.path.join(cfg, "projects", key(cwd))
+    cdir = os.path.join(cwd, ".claude")
+    os.makedirs(pdir, exist_ok=True)
+    os.makedirs(cdir, exist_ok=True)
+    lines = [ask(B, "durable jobs", cwd)]
+    for tu, cid, rec in (("d1", "dddd0001", True), ("d2", "dddd0002", False)):
+        lines += [use(B + 60, tu, "CronCreate", {"cron": "*/10 * * * *",
+                                                 "prompt": "p " + cid,
+                                                 "recurring": rec,
+                                                 "durable": True}),
+                  res(B + 60, tu, {"id": cid, "humanSchedule": "x",
+                                   "recurring": rec, "durable": True,
+                                   "nextFireAt": (NOW + 600) * 1000})]
+    write(os.path.join(pdir, sid + ".jsonl"), lines)
+    history("xs-dur", sid, cfg, cwd)
+    fpath = os.path.join(cdir, "scheduled_tasks.json")
+
+    def task(cid, **kw):
+        return dict({"id": cid, "cron": "*/10 * * * *", "prompt": "p " + cid,
+                     "createdAt": (B + 60) * 1000}, **kw)
+
+    def put(body):
+        if os.path.lexists(fpath):
+            os.unlink(fpath)
+        if body is not None:
+            with open(fpath, "w") as f:
+                f.write(body)
+
+    def ask_rows(what, st1, st2, warn=False, last=None):
+        rc, h, rows, done, err, out = scheds("xs-dur")
+        by = {r["id"]: r for r in rows if r}
+        check("durable: %s" % what,
+              rc == 0 and h.get("live") is False and
+              sorted(by) == ["dddd0001", "dddd0002"] and
+              by["dddd0001"]["status"] == st1 and
+              by["dddd0002"]["status"] == st2 and
+              by["dddd0001"]["durable"] is True and
+              by["dddd0001"]["last_fired"] == last and
+              (list(h) == HEAD + ["warn"] and
+               "scheduled_tasks.json" in h["warn"] if warn
+               else list(h) == HEAD), out)
+
+    put(None)
+    ask_rows("no file: both pending (the transcript's), no warn",
+             "pending", "pending")
+    put(json.dumps({"tasks": [task("dddd0001", recurring=True,
+                                   lastFiredAt=(NOW - 30) * 1000),
+                              task("ffff0009")]}))
+    ask_rows("listed stays pending with the file's lastFiredAt; not listed "
+             "ended; a file-only job is not added",
+             "pending", "ended", last=iso(NOW - 30))
+    put(json.dumps({"tasks": []}))
+    ask_rows("an empty task list: both ended", "ended", "ended")
+    put('{"tasks": [ {"id": "dddd0001"')
+    ask_rows("a malformed file: the transcript's answer and a warn",
+             "pending", "pending", warn=True)
+    other = os.path.join(T, "elsewhere.json")
+    with open(other, "w") as f:
+        f.write(json.dumps({"tasks": []}))
+    put(None)
+    os.symlink(other, fpath)
+    ask_rows("a symlinked file is refused: the transcript's answer, no warn",
+             "pending", "pending")
+    put(json.dumps({"tasks": []}) + " " * (1 << 20))
+    ask_rows("a file over 1 MiB is refused: the transcript's answer, no "
+             "warn", "pending", "pending")
+    put(None)
+    # a durable recurring cron 8 days old: permanent in the file never ages
+    old = NOW - 8 * 86400
+    sid8 = "11111111-2222-4333-8444-5555555555da"
+    write(os.path.join(pdir, sid8 + ".jsonl"),
+          [ask(old, "old job", cwd),
+           use(old, "p1", "CronCreate", {"cron": "0 9 * * *", "prompt": "daily",
+                                         "recurring": True, "durable": True}),
+           res(old, "p1", {"id": "eeee0008", "humanSchedule": "x",
+                           "recurring": True, "durable": True})])
+    history("xs-dur8", sid8, cfg, cwd)
+    for perm, st, exp in ((True, "pending", None),
+                          (False, "expired", iso(old + WEEK))):
+        t8 = dict(task("eeee0008", recurring=True, createdAt=old * 1000),
+                  **({"permanent": True} if perm else {}))
+        put(json.dumps({"tasks": [t8]}))
+        rc, h, rows, done, err, out = scheds("xs-dur8")
+        check("durable: a recurring cron 8 days old, %s: %s, expires %s" %
+              ("permanent" if perm else "not permanent", st, exp),
+              rc == 0 and len(rows) == 1 and rows[0]["status"] == st and
+              rows[0]["expires"] == exp, out)
+    put(None)
+
+
 def main():
     print("xray_schedules_test: %s" % DCH)
     try:
@@ -394,6 +494,7 @@ def main():
         test_codex()
         test_shell()
         test_live_claude()
+        test_durable()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

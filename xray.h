@@ -735,6 +735,14 @@ struct xr_scheds;
 struct xr_scheds *xr_scheds_new(void);
 void xr_scheds_free(struct xr_scheds *s);
 void xr_claude_scheds(struct xr_claude *d, struct xr_scheds *s, uint64_t ino);
+/* #689, after the read: when a durable:true cron was seen, its state from
+** <cwd>/.claude/scheduled_tasks.json (Claude Code's {"tasks":[{"id",
+** "lastFiredAt","permanent",...}]}): listed, a pending one stays pending
+** with its lastFiredAt (permanent: no 7-day expiry); not listed, ended. Opened O_NOFOLLOW, a regular file of at
+** most 1 MiB, else (or absent, unreadable) nothing changes; not parsable: a
+** warn in warn[cap], nothing changes. */
+void xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn,
+                       size_t cap);
 /* JSON lines: {"schema":1,"block":"schedules","session","session_id",
 ** "source","live","title",
 ** "partial"[,"warn"]}, one {"schedule":{"id","kind","status","recurring",
@@ -748,5 +756,10 @@ void xr_claude_scheds(struct xr_claude *d, struct xr_scheds *s, uint64_t ino);
 int xr_scheds_print(FILE *f, const struct xr_scheds *s, const char *session,
                     const char *session_id, int partial, const char *warn,
                     int live, long long now);
+/* #695: xr_scheds_print after xr_scheds_durable, on s unchanged after (the
+** follow's block); the durable warn is the header's warn. */
+int xr_scheds_print_durable(FILE *f, struct xr_scheds *s, const char *cwd,
+                            const char *session, const char *session_id,
+                            int partial, int live, long long now);
 
 #endif /* DCH_XRAY_H */

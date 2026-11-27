@@ -328,6 +328,9 @@ const struct dch_conf config_keys[] = {
 	/* #652: open questions (--questions), from a command only */
 	{ "questions_command", 0, "", NULL,
 	  "X-ray's open questions from a command; empty: none" },
+	/* #691: records an answer to an open question (--answer, #692) */
+	{ "answer_command", 0, "", NULL,
+	  "X-ray's answer to an open question, by a command; empty: none" },
 	/* #507: #N, o/r#N and issue/pull URLs resolved by gh (read-only) */
 	{ "xray_github", 1, "true", NULL,
 	  "X-ray looks up GitHub issues and pull requests with gh" },
@@ -2980,6 +2983,11 @@ usage(void)
 	    "                                             set or drop env vars\n"
 	    "                                             over the login shell's\n"
 	    "                                             (local only)\n"
+	    "  dch --revive|--restart --include-agents ... [--codex-drop-provider]\n"
+	    "      [--codex-config K=V]...                a Codex's codex resume:\n"
+	    "                                             drop its recorded\n"
+	    "                                             model_provider(s) -c\n"
+	    "                                             words, add -c K=V (16)\n"
 	    "  dch --say <name>...|--all [--json] -- <text...>\n"
 	    "                                             type a message into\n"
 	    "                                             each session's Claude\n"
@@ -3076,6 +3084,9 @@ usage(void)
 	    "                                             JSON lines;\n"
 	    "  dch --xray <n> --questions --json          questions_command's open\n"
 	    "                                             questions as JSON lines;\n"
+	    "  dch --xray <n> --answer <qid> - --json     answer_command records\n"
+	    "                                             the answer on stdin; one\n"
+	    "                                             JSON result line;\n"
 	    "                                             <n> as host:name runs\n"
 	    "                                             on that host's dch serve\n"
 	    "  dch --xray host:name --requests --json     one warm connection: X-ray\n"
@@ -7476,6 +7487,20 @@ json_phase(const char *name, const char *phase, int json)
 	fflush(stdout);
 }
 
+/* #696: --revive's and --restart --include-agents' --codex-drop-provider
+** and --codex-config K=V words, for a Codex's resume argv only. */
+static int cx_drop, cx_ncfg;
+static char *cx_cfg[16];
+
+/* --json's "codex_ignored": the codex options a session that is not a
+** Codex left unused (#696), only when some were given. */
+static void
+cx_ignored_json(const char *ag)
+{
+	if ((cx_drop || cx_ncfg) && !(ag && strcmp(ag, "codex") == 0))
+		printf(",\"codex_ignored\":%d", cx_drop + cx_ncfg);
+}
+
 /* --json's result object; xk/xv (when xk) one more string field after
 ** "name": --revive's "as", the master pass's "phase":"master". Left open
 ** for a caller that appends keys (--revive's "running"). */
@@ -7521,6 +7546,7 @@ stop_json(const char *name, const char *res, const char *code,
           const char *detail, const char *sid)
 {
 	json_final_open(name, NULL, NULL, res, code, detail, sid);
+	cx_ignored_json(stop_ag);
 	if (stop_ag)
 		printf(",\"agent\":\"%s\"}\n", stop_ag);
 	else
@@ -8716,9 +8742,10 @@ ag_relaunch(struct agent *a)
 	if (!a->codex)
 		nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
 	else if ((m = strdup(a->rmsg)) &&
-	         (nv = calloc((size_t)a->argc + 7, sizeof *nv)))
+	         (nv = calloc((size_t)a->argc + 7 + 2 * (size_t)cx_ncfg,
+		                     sizeof *nv)))
 		nc = dch_codex_resume(a->argv, a->argc, a->tok, a->id, a->cwd, m,
-		                      nv);
+		                      nv, cx_drop, cx_cfg, cx_ncfg);
 	st = nv ? respawn_req(a->path, 'a', nv, nc) : -3;
 	free(nv);
 	free(m);
@@ -9781,6 +9808,9 @@ static const char *const say_why[] = {
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
 
+/* --answer --notify (#693): the last outcome, and no line printed */
+static int say_last = -1, say_quiet;
+
 static void
 say_print(const char *name, int c, int json)
 {
@@ -9789,6 +9819,9 @@ say_print(const char *name, int c, int json)
 	size_t cap = strlen(name) * 6 + 3;
 	char *q;
 
+	say_last = c;
+	if (say_quiet)
+		return;
 	if (!json)
 		printf(c == SAY_OK ? "%s: %s\n" : "%s: %s — %s\n", name, res,
 		       say_why[c]);
@@ -12354,6 +12387,7 @@ rv_json_final(const char *name, const char *as, const char *res,
               int argv, const char *ag)
 {
 	json_final_open(name, "as", as, res, code, detail, sid);
+	cx_ignored_json(ag);
 	/* "running" stays the last key (#182) */
 	fputs(",\"agent\":", stdout);
 	if (ag)
@@ -12477,9 +12511,11 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json,
 		char def[1200];
 		const char *hm = getenv("HOME");
 
-		if (!(nv = calloc((size_t)r->argc + 7, sizeof *nv)))
+		if (!(nv = calloc((size_t)r->argc + 7 + 2 * (size_t)cx_ncfg,
+		                  sizeof *nv)))
 			return -1;
-		nc = dch_codex_resume(r->argv, r->argc, cxat, r->cx, r->cwd, msg, nv);
+		nc = dch_codex_resume(r->argv, r->argc, cxat, r->cx, r->cwd, msg, nv,
+		                     cx_drop, cx_cfg, cx_ncfg);
 		v = nv;
 		r->mode = RV_CODEX;
 		o = getenv("CODEX_HOME");
@@ -14703,7 +14739,7 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 	                      stat(label, &st) == 0 && S_ISDIR(st.st_mode)
 	                      ? label : getenv("HOME"), agent, asid,
 	                      ref, xr_shape_name[sp->shape], xr_span_text(sp),
-	                      hn, an };
+	                      hn, an, NULL };
 	int set, d0 = xr_scan_defs(sc);
 
 	if (xr_scan_cancelled(sc))
@@ -15510,16 +15546,18 @@ xr_tasks_none(const char *session, const char *sid, const char *warn)
 
 /* A looked-up transcript (codex: a rollout), read as --json reads it, its
 ** task records gathered on the way; live >= 0: its schedules instead
-** (#685), live the session's Claude running. */
+** (#685), live the session's Claude running; cwd: the session's, for a
+** durable cron's .claude/scheduled_tasks.json (#689), NULL none. */
 static int
 xr_tasks_file(const char *path, const struct stat *st, int codex,
               const char *sid, const char *session, const char *warn,
-              int live)
+              int live, const char *cwd)
 {
 	struct xr_tasks *tk = NULL;
 	struct xr_scheds *sc = NULL;
 	struct xr_claude *d = NULL;
 	int fd, capped = 0, rc = -1;
+	char dw[128] = "";
 
 	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
 		return errno == EACCES || errno == EPERM || errno == EIO
@@ -15537,11 +15575,13 @@ xr_tasks_file(const char *path, const struct stat *st, int codex,
 	}
 	close(fd);
 	xr_claude_free(d);
+	if (sc && rc >= 0 && !codex)
+		xr_scheds_durable(sc, cwd, dw, sizeof dw);
 	rc = rc < 0 ? xr_failed()
 	     : xr_out_exit((tk ? xr_tasks_print(stdout, tk, session, sid, capped,
 	                                        warn, "tasks")
 	                    : xr_scheds_print(stdout, sc, session, sid, capped,
-	                                      warn, live,
+	                                      warn && warn[0] ? warn : dw, live,
 	                                      (long long)time(NULL))) == 0);
 	xr_tasks_free(tk);
 	xr_scheds_free(sc);
@@ -15550,7 +15590,7 @@ xr_tasks_file(const char *path, const struct stat *st, int codex,
 
 static int
 xr_tasks_claude(const char *cfg, const char *sid, const char *session,
-                const char *warn, int live)
+                const char *warn, int live, const char *cwd)
 {
 	char path[2048], home[1400], project[1200];
 	struct stat st;
@@ -15567,7 +15607,7 @@ xr_tasks_claude(const char *cfg, const char *sid, const char *session,
 	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
 	                     sizeof project) < 0)
 		return xr_tasks_none(session, sid, warn);
-	return xr_tasks_file(path, &st, 0, sid, session, warn, live);
+	return xr_tasks_file(path, &st, 0, sid, session, warn, live, cwd);
 }
 
 /* #321: a tasks_command's or memory_command's answer, printed as it
@@ -15605,11 +15645,141 @@ xr_tkc_row(const char *line, void *arg)
 			xr_put_str(k->o, k->res->title);
 		else
 			fputs("null", k->o);
-		fputs(",\"partial\":false}\n", k->o);
+		fputs(",\"partial\":false", k->o);
+		if (k->kind == XCMD_QUESTION)
+		{
+			char ac[1024];
+
+			if (dch_config_get("answer_command", ac, sizeof ac) > 0 &&
+			    ac[0])
+				fputs(",\"answer\":true", k->o);
+		}
+		fputs("}\n", k->o);
 	}
 	fputs(line, k->o);
 	fputc('\n', k->o);
 	return fflush(k->o) != 0 || ferror(k->o);
+}
+
+/* --answer (#692): its qid and checked text, set once by xray_main; and
+** --notify's session (#693) */
+static const char *xr_ans_qid, *xr_ans_text, *xr_ans_notify;
+
+/* --notify (#693), once the ruling is recorded: "<qid> answered: <ruling>"
+** (each LF and tab a space, runs of spaces one) to the session in this
+** socket dir: its Claude through Claude's native inbox, its Codex by one
+** --say, no retry. The "told" key into out. Best effort: nothing here
+** changes the answer's exit. */
+static void
+xr_tell(char *out, size_t cap)
+{
+	struct cmd_info ci;
+	struct crec r;
+	char path[1100], *t, *o;
+	const char *s, *via = NULL, *why = NULL;
+	size_t n = strlen(xr_ans_qid) + strlen(xr_ans_text) + 12;
+	long cx = 0;
+	int ag = 0;
+
+	if (!(t = malloc(n)))
+		why = "failed";
+	else
+	{
+		snprintf(t, n, "%s answered: %s", xr_ans_qid, xr_ans_text);
+		for (o = t, s = t; *s; s++)
+			if ((*s != ' ' && *s != '\n' && *s != '\t') || o[-1] != ' ')
+				*o++ = *s == '\n' || *s == '\t' ? ' ' : *s;
+		o[-(o[-1] == ' ')] = '\0';	/* the qid leads: never empty */
+		session_sock_path(xr_ans_notify, path, sizeof path);
+		if (cmd_query(path, &ci) != 0)
+			why = "no_session";
+		else
+		{
+			ag = ci.pid > 0 ? agent_front(ci.pid, &r, &cx) : 0;
+			cmd_info_free(&ci);
+		}
+	}
+	if (why)
+		;
+	else if (ag > 0)	/* Claude's own queue (OQ-214) */
+	{
+		via = "native";
+		ag = dch_bridge_notify(r.pid, r.sid, t);
+		why = ag == 0 ? NULL : ag == -1 ? "no_inbox" : "failed";
+	}
+	else if (ag < 0)
+	{
+		char *nm = (char *)(uintptr_t)xr_ans_notify;
+
+		via = "say";
+		say_quiet = 1;
+		(void)do_say_verb(&nm, 1, &t, 1, 1);
+		why = say_last == SAY_OK ? NULL : say_last < 0 ? "failed"
+		      : say_code[say_last];
+	}
+	else
+		why = "no_agent";
+	free(t);
+	snprintf(out, cap, ",\"told\":{\"session\":\"%s\"%s%s%s,\"ok\":%s%s%s%s}",
+	         xr_ans_notify, via ? ",\"via\":\"" : "", via ? via : "",
+	         via ? "\"" : "", why ? "false" : "true",
+	         why ? ",\"why\":\"" : "", why ? why : "", why ? "\"" : "");
+}
+
+/* answer_command with the qid as its last word and the text on its stdin,
+** the session as questions_command sees it: one result line, the exit
+** (0 answered; 5 not open or no such question, the command's 5 or 3, 4;
+** 3 refused, its 2, or failed; 1 no command). Its stdout is ignored. */
+static int
+xr_answer(struct xcmd_ctx *c, char *cmd, size_t cap)
+{
+	struct xcmd_result res;
+	const char *why = NULL, *detail = NULL;
+	char told[200] = "";
+	int set = dch_config_get("answer_command", cmd, cap), rc = 3;
+
+	if (set == 0 || (set > 0 && !cmd[0]))
+	{
+		fputs("{\"answered\":false,\"why\":\"no_command\"}\n", stdout);
+		return fflush(stdout) == 0 && !ferror(stdout) ? 1 : xr_out_exit(0);
+	}
+	c->ref = xr_ans_qid;	/* define_command's last word, its - guard */
+	c->input = xr_ans_text;
+	memset(&res, 0, sizeof res);
+	if (set < 0)
+		detail = "answer_command: not a command line (the config line is "
+		         "over 1023 bytes)";
+	else
+		(void)xcmd_rows(XCMD_ANSWER, c, NULL, NULL, &res);
+	if (detail)
+		why = "failed";
+	else if (res.stopped)
+		why = "failed", detail = "timeout";
+	else if (res.ran && res.code == 0)
+		rc = 0;
+	else if (res.ran && (res.code == 3 || res.code == 4 || res.code == 5))
+		why = res.code == 4 ? "no_question" : "not_open", rc = 5,
+		detail = res.err;
+	else if (res.ran && res.code == 2)	/* it rejected the qid or text */
+		why = "refused", detail = res.err;
+	else
+		why = "failed", detail = res.err[0] ? res.err : res.warn;
+	if (rc == 0 && xr_ans_notify)	/* before the line: --say forks */
+		xr_tell(told, sizeof told);
+	fputs(rc ? "{\"answered\":false" : "{\"answered\":true", stdout);
+	if (rc != 3)	/* failed names no id (the design's line) */
+	{
+		fputs(",\"id\":", stdout);
+		xr_put_str(stdout, xr_ans_qid);
+	}
+	if (why)
+	{
+		fprintf(stdout, ",\"why\":\"%s\",\"detail\":", why);
+		xr_put_str(stdout, detail);
+	}
+	fputs(told, stdout);
+	fputs("}\n", stdout);
+	return fflush(stdout) == 0 && !ferror(stdout) ? rc : xr_out_exit(0);
 }
 
 /* The user's tasks_command or memory_command (their own dch config only),
@@ -15632,9 +15802,15 @@ xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
 	/* a session cwd not known: HOME, never the querying process's (a
 	** dch serve ctl's is the peer's choice) */
 	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
-	                      agent, asid, NULL, NULL, NULL, hn, an };
+	                      agent, asid, NULL, NULL, NULL, hn, an, NULL };
 
 	warn[0] = '\0';
+	if (kind == XCMD_ANSWER)
+	{
+		xr_names(session, hn, an, sizeof hn);
+		*rc = xr_answer(&c, cmd, sizeof cmd);
+		return 1;
+	}
 	if ((set = dch_config_get(what, cmd, sizeof cmd)) < 0)
 		snprintf(warn, cap, "%s: not a command line (the config line is "
 		         "over 1023 bytes)", what);
@@ -15710,7 +15886,7 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 			return xr_qs_none(t->name, xc.tid, warn);
 		return xr_cx_lookup(xc.home, xc.tid, path, sizeof path, &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn,
-		                       sch ? 0 : -1)
+		                       sch ? 0 : -1, NULL)
 		       : xr_tasks_none(t->name, xc.tid, warn);
 	}
 	if (t->kind == XR_ENDED)
@@ -15724,7 +15900,8 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 		if (kind == XCMD_QUESTION)
 			return xr_qs_none(t->name, t->rec->sid, warn);
 		return t->rec->sid[0] ? xr_tasks_claude(t->rec->acfg, t->rec->sid,
-		                                        t->name, warn, sch ? 0 : -1)
+		                                        t->name, warn, sch ? 0 : -1,
+		                                        cwd)
 		       : xr_list_none(t->name, "", warn, sch);
 	}
 	if ((qc = cmd_query(t->sock, &ci)) == -4)
@@ -15747,7 +15924,7 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 			return xr_qs_none(t->name, c.sid, warn);
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn,
-		                                sch ? 1 : -1)
+		                                sch ? 1 : -1, cwd)
 		              : xr_tasks_none(t->name, c.sid, warn);
 	}
 	if (cx)
@@ -15762,7 +15939,7 @@ xr_list_q(const struct xr_target *t, enum xcmd_kind kind, int sch)
 		return cx > 0 && xr_cx_lookup(xc.home, xc.tid, path, sizeof path,
 		                              &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn,
-		                       sch ? 1 : -1)
+		                       sch ? 1 : -1, NULL)
 		       : xr_tasks_none(t->name, xc.tid, warn);
 	}
 	/* the ring's header for the session_id, as the other forms give it */
@@ -16755,10 +16932,10 @@ xf_blk_text(struct xf *f, int b)
 	/* live: the Claude followed now; one that left, or the session's end,
 	** prints its pending rows ended (#686) */
 	if (b == 2)
-		(void)xr_scheds_print(m, f->cl ? f->cl->sc : f->sc_gone,
-		                      f->t->name, f->cl || !f->sc_gone ? f->sid
-		                      : f->sid_gone, f->cl ? capped
-		                      : f->capped_gone, NULL, f->cl && !f->dead,
+		(void)xr_scheds_print_durable(m, f->cl ? f->cl->sc : f->sc_gone,
+		                      f->cwd, f->t->name, f->cl || !f->sc_gone
+		                      ? f->sid : f->sid_gone, f->cl ? capped
+		                      : f->capped_gone, f->cl && !f->dead,
 		                      (long long)time(NULL));
 	else if (b)
 	{
@@ -18099,8 +18276,9 @@ static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
-	const char *chapter = NULL, *search = NULL, *since = NULL;
-	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
+	const char *chapter = NULL, *search = NULL, *since = NULL, *qid = NULL;
+	const char *notify = NULL;
+	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0, qi = 0;
 	int requests = 0, tasks = 0, memory = 0, nogh = 0, questions = 0;
 	int schedules = 0;
 	struct hrec *r = NULL;
@@ -18146,7 +18324,8 @@ xray_main(int argc, char **argv)
 		                 : !strcmp(argv[k], "--budget-ms") ? &budget
 		                 : !strcmp(argv[k], "--chapter") ? &chapter
 		                 : !strcmp(argv[k], "--search") ? &search
-		                 : !strcmp(argv[k], "--since") ? &since : NULL;
+		                 : !strcmp(argv[k], "--since") ? &since
+		                 : !strcmp(argv[k], "--notify") ? &notify : NULL;
 
 		if (v && !*v && k + 1 < argc)
 			*v = argv[++k];	/* the next element, even "-x" (3.1) */
@@ -18170,6 +18349,19 @@ xray_main(int argc, char **argv)
 			questions = 1;
 		else if (!strcmp(argv[k], "--schedules") && !schedules)
 			schedules = 1;
+		else if (!strcmp(argv[k], "--answer") && !qid)
+		{
+			/* the qid, then "-": the text only ever on stdin, never in
+			** ps (#692) */
+			if (k + 2 >= argc || strcmp(argv[k + 2], "-"))
+			{
+				fputs("dch: bad usage: --answer <qid> - (the answer on "
+				      "stdin)\n", stderr);
+				return 2;
+			}
+			qid = argv[++k];
+			qi = ++k;
+		}
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
@@ -18183,7 +18375,8 @@ xray_main(int argc, char **argv)
 			           !strcmp(argv[k], "--tasks") ||
 			           !strcmp(argv[k], "--memory") ||
 			           !strcmp(argv[k], "--questions") ||
-			           !strcmp(argv[k], "--schedules")) ? " twice"
+			           !strcmp(argv[k], "--schedules") ||
+			           !strcmp(argv[k], "--answer")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -18267,6 +18460,31 @@ xray_main(int argc, char **argv)
 		          "only)");
 		return 2;
 	}
+	/* --notify (#693): --answer's, a plain session name */
+	if (notify && !qid)
+	{
+		fputs("dch: bad usage: --notify comes with --answer\n", stderr);
+		return 2;
+	}
+	if (notify && !xray_notify_ok(notify))
+	{
+		fputs("dch: " XRAY_NOTIFY_BAD "\n", stderr);
+		return 2;
+	}
+	xr_ans_notify = notify;
+	/* --answer (#692): one write, --json only */
+	if (qid && (follow || tasks || memory || questions || schedules || ref ||
+	            search || chapter || clear || since || scope || full ||
+	            budget || nogh))
+	{
+		fprintf(stderr, "dch: bad usage: --answer and %s\n",
+		        follow ? "--follow" : tasks ? "--tasks" : memory ? "--memory"
+		        : questions ? "--questions" : schedules ? "--schedules"
+		        : ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
+		        : clear ? "--clear" : since ? "--since" : scope ? "--scope"
+		        : full ? "--full" : budget ? "--budget-ms" : "--no-github");
+		return 2;
+	}
 	if (follow && (ref || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --follow and %s\n",
@@ -18290,7 +18508,7 @@ xray_main(int argc, char **argv)
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
 		    budget || search || tasks || memory || since ||
-		    nogh || questions || schedules)
+		    nogh || questions || schedules || qid)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -18319,6 +18537,45 @@ xray_main(int argc, char **argv)
 
 		unsetenv("DCH_XRAY_STDIN");
 		unsetenv("DCH_XRAY_STDIN_MS");
+		/* --answer (#692): the operator's, from a UI; a speed bump for an
+		** agent's shell (env -u gets past it), not a wall. Its text is
+		** read here for a host:name too, and sent in the request. */
+		if (qid && !json)
+		{
+			fputs("dch: bad usage: --json is required (the --xray view "
+			      "takes no flag)\n", stderr);
+			return 2;
+		}
+		if (qid && getenv("DCH_SESSION"))
+		{
+			fputs("dch: --answer is the operator's: not from inside a "
+			      "session\n", stderr);
+			return 2;
+		}
+		if (qid && !xray_qid_ok(qid))
+		{
+			fputs("dch: " XRAY_QID_BAD "\n", stderr);
+			return 2;
+		}
+		if (qid)
+		{
+			static char ab[4096 + 1];
+			size_t l;
+
+			if (isatty(STDIN_FILENO) ||
+			    !ctl_text_readn(STDIN_FILENO, ab, sizeof ab - 1, ms))
+				ab[0] = '\0';
+			/* one trailing "\n" (echo's, a heredoc's) */
+			if ((l = strlen(ab)) && ab[l - 1] == '\n')
+				ab[--l] = '\0';
+			if (!xray_answer_ok(ab))
+			{
+				fputs("dch: " XRAY_ANSWER_BAD "\n", stderr);
+				return 2;
+			}
+			xr_ans_qid = qid;
+			xr_ans_text = argv[qi] = ab;	/* the request's text */
+		}
 		if (v && !isatty(STDIN_FILENO) && !name_routes_remote(n) &&
 		    !(*v = ctl_text_read(STDIN_FILENO, tb, ms)))
 			*v = "";
@@ -18441,6 +18698,7 @@ xray_main(int argc, char **argv)
 		     : tasks ? xr_tasks_q(&t)
 		     : questions ? xr_list_q(&t, XCMD_QUESTION, 0)
 		     : schedules ? xr_list_q(&t, XCMD_TASK, 1)
+		     : qid ? xr_list_q(&t, XCMD_ANSWER, 0)
 		     : memory ? xr_memory(&t)
 		     : xr_json(&t, ref || search || since ? &q : NULL, 0);
 	hrec_free(r, nr);
@@ -19095,6 +19353,23 @@ main_run(int argc, char **argv)
 			opt_agents = 1;
 			i++;
 		}
+		else if (strcmp(a, "--codex-drop-provider") == 0)
+		{
+			cx_drop = 1;
+			i++;
+		}
+		else if (strcmp(a, "--codex-config") == 0)
+		{
+			i++;
+			if (i >= argc || !ctl_codex_cfg_ok(argv[i]) || cx_ncfg >= 16)
+			{
+				fprintf(stderr, "dch: --codex-config wants at most 16 "
+				        "K=V, K of [A-Za-z0-9_.-], at most 1024 bytes, "
+				        "no control characters\n");
+				return 2;
+			}
+			cx_cfg[cx_ncfg++] = argv[i++];
+		}
 		else if (strcmp(a, "--json") == 0)
 		{
 			/* --restart, --revive (#047); --say/--stop take it inline */
@@ -19339,6 +19614,13 @@ main_run(int argc, char **argv)
 	{
 		fprintf(stderr, "dch: --no-message only works with --revive\n");
 		return 1;
+	}
+	if ((cx_drop || cx_ncfg) && action != A_REVIVE &&
+	    !(action == A_RESTART && opt_agents))
+	{
+		fprintf(stderr, "dch: --codex-drop-provider and --codex-config only "
+		        "work with --revive and --restart --include-agents\n");
+		return 2;
 	}
 	if (opt_agents && action != A_RESTART)
 	{

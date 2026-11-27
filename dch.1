@@ -62,7 +62,10 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-restart
 .IR name \fR|\fP \fB\-\-all\fP
-.RB [ \-\-include\-agents ]
+.RB [ \-\-include\-agents
+.RB [ \-\-codex\-drop\-provider ]
+.RB [ \-\-codex\-config
+.IR K = V ]...]
 .RB [ \-f ]
 .RB [ \-\-json ]
 .br
@@ -75,6 +78,9 @@ dch \- detachable terminal sessions with a headless agent API
 .IR K = V ]...
 .RB [ \-\-unset
 .IR K ]...
+.RB [ \-\-codex\-drop\-provider ]
+.RB [ \-\-codex\-config
+.IR K = V ]...
 .RB [ \-\-json ]
 .br
 .BR "dch \-\-pin" | \-\-unpin
@@ -128,6 +134,15 @@ dch \- detachable terminal sessions with a headless agent API
 .B dch \-\-xray
 .I name
 .B \-\-questions \-\-json
+.br
+.B dch \-\-xray
+.I name
+.B \-\-answer
+.I qid
+.B \-
+.RB [ \-\-notify
+.IR session ]
+.B \-\-json
 .br
 .B dch \-\-xray
 .I name
@@ -3295,6 +3310,49 @@ default stay dch's. They are local only: with a remote name or
 the revive is refused, exit 2, and nothing is sent.
 A shell that is revived reads its own rc files again, so a Claude typed
 into it gets what they export.
+.B \-\-codex\-drop\-provider
+and
+.B \-\-codex\-config
+.IR K = V
+(here and with
+.BR "\-\-restart \-\-include\-agents" )
+change a Codex's
+.B codex resume
+argv only, every Codex
+.B \-\-all
+selects included. The first leaves out each recorded
+.BI \-c " K=V" ,
+.BI \-c K=V ,
+.BI \-\-config " K=V"
+and
+.BI \-\-config= K=V
+whose key (before the first
+.BR = ,
+whitespace trimmed, a quote around it dropped) is
+.B model_provider
+or starts with
+.BR model_providers. ;
+other
+.B \-c
+words stay. Each
+.B \-\-codex\-config
+(at most 16;
+.I K
+of
+.BR [A\-Za\-z0\-9_.\-]+ ,
+at most 1024 bytes, no control character, else exit 2 and nothing runs)
+is appended as
+.BI \-c " K=V"
+after the kept options, before the prompt and its
+.BR \-\- ,
+in order. A Claude or shell session ignores them; its
+.B \-\-json
+line carries
+.B codex_ignored
+with their count. The new session's record keeps the argv it ran, so a later
+revive without the flags keeps the drop and the appended words. Allowed over
+.BR "dch serve" ,
+checked there too.
 A revive under another name
 .RB ( \-\-as ,
 or
@@ -3890,7 +3948,7 @@ a session name that passes the attach name check and does not start with
 \-k \fIn\fP;  \-d \fIn\fP;  \-m \fIn\fP \fIalias\fP
 \-\-spawn \fIn\fP [\-\-size \fIC\fPx\fIR\fP] [\-\-] \fIcmd...\fP    (create, and cwd)
 \-\-history \-\-json
-\-\-revive \fIn\fP [\-\-as \fInew\fP] [\-\-no\-message] \-\-json    (create; never \-\-env or \-\-unset)
+\-\-revive \fIn\fP [\-\-as \fInew\fP] [\-\-no\-message] [\-\-codex\-drop\-provider] [\-\-codex\-config \fIK=V\fP]... \-\-json    (create; never \-\-env or \-\-unset)
 \-\-pin|\-\-unpin|\-\-forget \fIn\fP... \-\-json;  \-\-forget \-\-all \-\-json
 \-\-stop \fIn\fP... \-\-json
 \-\-say \fIn\fP \-\-json \-\- \fItext\fP
@@ -3899,6 +3957,7 @@ a session name that passes the attach name check and does not start with
 \-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
 \-\-xray \fIn\fP \-\-tasks \-\-json
 \-\-xray \fIn\fP \-\-questions \-\-json
+\-\-xray \fIn\fP \-\-answer \fIqid\fP \fItext\fP \-\-json
 \-\-xray \fIn\fP \-\-memory \-\-json
 \-\-xray \fIn\fP \-\-follow [\-\-tasks] [\-\-memory] \-\-json
 .fi
@@ -3945,6 +4004,7 @@ two of
 .BR \-\-tasks ,
 .BR \-\-memory ,
 .BR \-\-questions ,
+.BR \-\-answer ,
 .BR \-\-follow ,
 .B \-\-chapter
 and
@@ -4558,6 +4618,70 @@ goes with
 .B \-\-json
 only, not with
 .BR \-\-follow .
+.TP
+.B answer_command
+Records the operator's answer to an open question:
+.B dch \-\-xray
+.I n
+.B \-\-answer
+.I qid
+.B \- \-\-json
+(#692) runs it as
+.B questions_command
+runs (same session, environment, 5 s clock), the
+.I qid
+.RB ( [A\-Za\-z0\-9._\-] ,
+1 to 32, no leading
+.BR \- )
+its last word and the answer, read from dch's standard input (1 to 4000
+bytes of UTF\-8, no control character but LF and tab), on its stdin with a
+newline. Its exit: 0 answered (dch exit 0), 5 or 3 not open and 4 no such
+question (dch exit 5), 2 refused, any other or the clock failed (dch exit
+3); no command is
+.B why:no_command
+(exit 1). One JSON line says it. Refused from inside a session
+.RB ( DCH_SESSION
+set) and with any flag but
+.BR \-\-json .
+On
+.I host:name
+the host's command runs; the client sends the text.
+With
+.B \-\-notify
+.I session
+(#693; a plain name, 1 to 64 of
+.BR [A\-Za\-z0\-9._\-] ,
+no leading
+.BR \- ,
+only with
+.BR \-\-answer ),
+once the answer is recorded (exit 0 only) dch tells that live session of
+the same socket dir
+.BI \(lq qid " answered: " ruling \(rq
+(LF and tab as spaces, runs of spaces one): its Claude Code through
+Claude's native inbox (that Claude's own peer record, by pid and session
+id; no reply address, the sender
+.BR "operator (dch xray)" ),
+its Codex by one
+.B \-\-say
+with no retry.
+The line gains
+.BR "\(dqtold\(dq:{\(dqsession\(dq:" ...,
+.BR "\(dqvia\(dq:\(dqnative\(dq" | "\(dqsay\(dq" ,
+.BR "\(dqok\(dq:" true|false
+and a
+.B why
+when false
+.RB ( no_inbox ,
+.BR failed ,
+.BR \-\-say 's
+codes,
+.BR no_agent ,
+.BR no_session );
+the exit stays the answer's.
+On
+.I host:name
+the host tells its own session.
 .TP
 .B define_command
 A ref that no transcript defines, from your own command:

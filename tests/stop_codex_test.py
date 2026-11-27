@@ -274,6 +274,28 @@ def main():
               until(lambda: "Ask Codex" in run("--read", n).stdout), "")
         run("-k", n)
 
+        # 6b. (#696) --codex-drop-provider / --codex-config on the restart
+        n, d, e = sess("rcp", "idle", argv=(
+            "--no-daemon", "-c", "model_provider=old", "--config",
+            "model_providers.old.base_url=x", "-c", "foo=1"),
+            extra={"FAKE_CODEX_TID": T1, "FAKE_CODEX_SNAP_TID": T3})
+        r = run("--restart", n, "--include-agents", "-f", "--json",
+                "--codex-drop-provider", "--codex-config", "model_provider=p",
+                "--codex-config", "a.b=2")
+        j = final(r)
+        got = until(lambda: len(argvs(d)) > 1 and argvs(d)[1])
+        check("#696 restart: provider words dropped, foo kept, the "
+              "--codex-config words before the PROMPT",
+              r.returncode == 0 and j.get("result") == "ok" and
+              "codex_ignored" not in j and got and got[1:] == [
+                  "resume", T1, "-C", tmp, "--no-daemon", "-c", "foo=1",
+                  "-c", "model_provider=p", "-c", "a.b=2", RESUME],
+              (r.stdout, r.stderr, got))
+        r = run("--restart", n, "--codex-config", "a=1")
+        check("#696 without --include-agents: exit 2", r.returncode == 2,
+              (r.returncode, r.stderr))
+        run("-k", n)
+
         # 7. stale: its binary touched after it started restarts, no -f
         own = os.path.join(tmp, "own")
         os.mkdir(own)
