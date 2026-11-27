@@ -2966,6 +2966,10 @@ usage(void)
 	    "                                             set a session's picker\n"
 	    "                                             group by hand, or let\n"
 	    "                                             the patterns decide\n"
+	    "  dch --group-rename <old> <new> [--json]\n"
+	    "                                             rename a group in the\n"
+	    "                                             config and every manual\n"
+	    "                                             assignment\n"
 	    "  dch --forget <name>... [-f] [--json]       delete ended sessions'\n"
 	    "                                             records; never a live\n"
 	    "                                             one, a pinned one only\n"
@@ -14046,6 +14050,154 @@ do_group_set_verb(const char *name, const char *g, int json)
 	return *why ? 1 : 0;
 }
 
+/* #716: rewrite the config's `group` and `group_color` lines named old
+** (ignoring case) to nw, every other byte of the file as it was; a temp
+** file renamed over it, as config_set does. *gl: the `group` lines hit;
+** with none nothing is replaced. 0, or -1 with errno. */
+static int
+group_cfg_rename(const char *old, const char *nw, int *gl)
+{
+	char path[1024], tmp[1100], *rp, *cut, *line = NULL;
+	size_t lcap = 0, ol = strlen(old), nl;
+	int fd, ok, e = 0, mode = 0644, k;
+	ssize_t ll;
+	struct stat st;
+	FILE *in, *out;
+	static const char *const keys[2] = { "group", "group_color" };
+
+	*gl = 0;
+	if (!dch_config_path(path, sizeof path))
+		return errno = ENOENT, -1;
+	if ((rp = realpath(path, NULL)))
+		snprintf(path, sizeof path, "%s", rp);
+	free(rp);
+	if (!(in = fopen(path, "r")))
+		return errno == ENOENT ? 0 : -1;	/* no file: no group line */
+	if (stat(path, &st) == 0)
+		mode = st.st_mode & 07777;
+	snprintf(tmp, sizeof tmp, "%s.%ld.tmp", path, (long)getpid());
+	if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+	               0600)) < 0 || !(out = fdopen(fd, "w")))
+	{
+		e = errno;
+		fclose(in);
+		if (fd >= 0)
+			close(fd), unlink(tmp);
+		errno = e;
+		return -1;
+	}
+	fchmod(fd, (mode_t)mode);
+	while ((ll = getline(&line, &lcap, in)) > 0)
+	{
+		char *v = NULL;
+
+		if (!(cut = strdup(line)))
+			break;
+		for (k = 0; k < 2 && !(v = config_line(cut, keys[k])); k++)
+			;
+		/* the name: up to the value's first '=', trailing blanks off */
+		rp = v ? strchr(v, '=') : NULL;
+		for (nl = rp ? (size_t)(rp - v) : 0; nl && (v[nl - 1] == ' ' ||
+		     v[nl - 1] == '\t'); nl--)
+			;
+		if (rp && nl == ol && !strncasecmp(v, old, ol))
+		{
+			size_t off = (size_t)(v - cut);
+
+			fwrite(line, 1, off, out);
+			fputs(nw, out);
+			fwrite(line + off + nl, 1, (size_t)ll - off - nl, out);
+			*gl += k == 0;
+		}
+		else
+			fwrite(line, 1, (size_t)ll, out);
+		free(cut);
+	}
+	/* ll > 0 here: the strdup failed */
+	ok = !(ll > 0 || ferror(in));
+	free(line);
+	fclose(in);
+	if (!ok)
+		e = EIO;
+	else if (fflush(out) != 0 || fsync(fd) != 0)
+		ok = 0, e = errno;
+	if (fclose(out) != 0 && ok)
+		ok = 0, e = errno;
+	if (ok && *gl && rename(tmp, path) < 0)
+		ok = 0, e = errno;
+	if (!ok || !*gl)
+		unlink(tmp);
+	errno = e;
+	return ok ? 0 : -1;
+}
+
+/* `--group-rename <old> <new> [--json]` (#716): the config lines first (a
+** failure there leaves every assignment as it was), then each <canon>.group
+** whose value is old, ignoring case. A .group that fails to move leaves
+** the ones before it on the new name, which the config already has.
+** --json: {"old","new","moved","result","reason"}. 0, or 1 failed. */
+static int
+do_group_rename_verb(const char *old, const char *nw, int json)
+{
+	struct pkgrps gs;
+	char dir[1024], v[256], stem[1024];
+	const char *why = "", *what = "";
+	struct dirent *de;
+	int k, o, gl = 0, moved = 0;
+	size_t n = strlen(nw);
+	DIR *d;
+
+	pk_groups(&gs);
+	for (k = 0; k < gs.n; k++)
+		if (gs.g[k].mode == 1)
+			regfree(&gs.g[k].re);
+	o = pk_group_named(&gs, old);
+	if (!n || n > 32 || strpbrk(nw, "=\r\n") || !strcasecmp(nw, "Sessions") ||
+	    !strcasecmp(nw, "History"))
+		why = "bad_name", what = "not a usable group name";
+	else if (o < 0)
+		why = "no_group", what = "no such group in the config";
+	else if ((k = pk_group_named(&gs, nw)) >= 0 && k != o)
+		why = "exists", what = "the new name is already a group";
+	else if (group_cfg_rename(gs.g[o].name, nw, &gl) < 0)
+		why = "io_error", what = strerror(errno);
+	else if (!gl)	/* the built-in Sidekicks: no line to rename */
+		why = "no_group", what = "no such group in the config";
+	if (!*why && dch_history_dir(dir, sizeof dir, sock_dir, 0) == 0 &&
+	    (d = opendir(dir)))
+	{
+		while ((de = readdir(d)))
+		{
+			n = strlen(de->d_name);
+			if (n < 7 || strcmp(de->d_name + n - 6, ".group"))
+				continue;
+			snprintf(stem, sizeof stem, "%.*s", (int)n - 6, de->d_name);
+			if (group_manual_get(stem, v, sizeof v) < 0 ||
+			    strcasecmp(v, gs.g[o].name))
+				continue;
+			if (group_manual_put(stem, nw) < 0)
+				why = "io_error", what = strerror(errno);
+			else
+				moved++;
+		}
+		closedir(d);
+	}
+	if (json)
+	{
+		fputs("{\"old\":", stdout);
+		put_json_str(old);
+		fputs(",\"new\":", stdout);
+		put_json_str(nw);
+		printf(",\"moved\":%d,\"result\":\"%s\",\"reason\":\"%s\"}\n",
+		       moved, *why ? "failed" : "ok", why);
+	}
+	else if (*why)
+		printf("%s: failed — %s\n", old, what);
+	else
+		printf("%s: renamed to %s (%d moved)\n", old, nw, moved);
+	return *why ? 1 : 0;
+}
+
 /* The master pass's word on one session: rc is do_restart_verb's, or -1
 ** for one --all leaves alone (already current). Text says only a restart,
 ** as it always has (the failures are on stderr); --json says every one,
@@ -19365,7 +19517,7 @@ main_run(int argc, char **argv)
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
 	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP,
-	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW, A_PASSIVE, A_GROUPSET }
+	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW, A_PASSIVE, A_GROUPSET, A_GROUPRENAME }
 	    action = argc == 1 ? A_LIST : A_ATTACH;	/* bare dch is dch -l (#590) */
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
@@ -19581,6 +19733,30 @@ main_run(int argc, char **argv)
 			{
 				fprintf(stderr, "dch: usage: dch --group-set <name> "
 				        "<group>|--auto [--json]\n");
+				return 2;
+			}
+			snprintf(session_name, sizeof session_name, "%s", w[0]);
+			opt_group = w[1];
+			break;
+		}
+		else if (strcmp(a, "--group-rename") == 0)
+		{
+			/* <old> <new> [--json] (#716): the rest of the line */
+			const char *w[2] = { NULL, NULL };
+			int nw = 0;
+
+			action = A_GROUPRENAME;
+			for (i++; i < argc; i++)
+				if (strcmp(argv[i], "--json") == 0)
+					opt_json = 1;
+				else if (nw == 2)
+					nw = 3;
+				else
+					w[nw++] = argv[i];
+			if (nw != 2 || !w[0][0])
+			{
+				fprintf(stderr, "dch: usage: dch --group-rename <old> "
+				        "<new> [--json]\n");
 				return 2;
 			}
 			snprintf(session_name, sizeof session_name, "%s", w[0]);
@@ -20195,7 +20371,8 @@ main_run(int argc, char **argv)
 	int inner_argc = argc - i;
 	char **inner_argv = argv + i;
 
-	if (opt_group && action != A_SPAWN && action != A_GROUPSET)
+	if (opt_group && action != A_SPAWN && action != A_GROUPSET &&
+	    action != A_GROUPRENAME)
 	{
 		fprintf(stderr, "dch: --group only works with --spawn\n");
 		return 2;
@@ -20317,10 +20494,11 @@ main_run(int argc, char **argv)
 	}
 	if (opt_json && action != A_RESTART && action != A_REVIVE &&
 	    action != A_SAY && action != A_STOP && action != A_PIN &&
-	    action != A_UNPIN && action != A_FORGET && action != A_GROUPSET)
+	    action != A_UNPIN && action != A_FORGET && action != A_GROUPSET &&
+	    action != A_GROUPRENAME)
 	{
 		fprintf(stderr, "dch: --json only works with --restart, --revive, "
-		        "--say, --stop, --pin, --unpin, --forget, --group-set\n");
+		        "--say, --stop, --pin, --unpin, --forget, --group-set, --group-rename\n");
 		return 1;
 	}
 	/* clean (--forget --all) never removes a pin; a pin has no force */
@@ -21061,6 +21239,8 @@ main_run(int argc, char **argv)
 	case A_GROUPSET:
 		return do_group_set_verb(session_name, opt_gauto ? NULL : opt_group,
 		                         opt_json);
+	case A_GROUPRENAME:
+		return do_group_rename_verb(session_name, opt_group, opt_json);
 	case A_REVIVE:
 	case A_SPAWN:
 	{

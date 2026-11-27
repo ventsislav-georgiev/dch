@@ -845,6 +845,86 @@ def main():
               "spawned", r.returncode == 1 and "no_group" in r.stderr and
               not os.path.exists(os.path.join(sockdir, "sg-n.sock")) and
               lsrow("sg-n") is None, r.stderr)
+        # --- #716: --group-rename
+        raw = ("# keep\n\n  group =  API  =  gr-api  # tail\ngroup = QA = -qa\n"
+               "group_color = api = #112233\ngroup_color = QA = #445566\n"
+               "auto_allow = true\nno newline at the end = x")
+        setcfg(raw)
+        for n in ("rn-a", "rn-b", "rn-c"):
+            spawn(n, "sleep", "600")
+        until(lambda: rec("rn-a") and rec("rn-b") and rec("rn-c"))
+        gs("rn-a", "api")
+        gs("rn-b", "API")
+        gs("rn-c", "QA")
+        # #714's rows leave API files too (gpin, w-qa): moved counts them
+        left = len([f for f in os.listdir(os.path.dirname(path("rn-a", ".group")))
+                    if f.endswith(".group") and
+                    open(os.path.join(os.path.dirname(path("rn-a", ".group")), f)
+                         ).read().strip().lower() == "api" and
+                    not f.startswith("rn-")])
+        mv = 2 + left
+
+        def rn(*a):
+            r = run("--group-rename", *a, "--json")
+            return r.returncode, (ndjson(r.stdout) or [None])[0], r
+
+        for args in ([], ["API"], ["API", "Core", "x"], ["", "Core"]):
+            r = run("--group-rename", *args)
+            check("#716: usage: dch --group-rename %s exits 2" %
+                  " ".join(args), r.returncode == 2 and r.stdout == "" and
+                  "usage: dch --group-rename" in r.stderr)
+        for old, new, why in (("Nope", "Core", "no_group"),
+                              ("API", "QA", "exists"), ("API", "qa", "exists"),
+                              ("API", "", "bad_name"),
+                              ("API", "x" * 33, "bad_name"),
+                              ("API", "a=b", "bad_name"),
+                              ("API", "a\nb", "bad_name"),
+                              ("API", "sessions", "bad_name"),
+                              ("API", "History", "bad_name")):
+            rc, o, _ = rn(old, new)
+            check("#716: --group-rename %r %r: failed %s, exit 1, config "
+                  "untouched" % (old, new[:6], why),
+                  rc == 1 and o == dict(old=old, new=new, moved=0,
+                                        result="failed", reason=why) and
+                  open(cfg).read() == raw, o)
+        rc, o, _ = rn("api", "Core")
+        got = open(cfg).read()
+        check("#716: --group-rename api Core: moved 2 (+ the others), ok", rc == 0 and
+              o == dict(old="api", new="Core", moved=mv, result="ok",
+                        reason=""), o)
+        check("#716: the config's group and group_color lines renamed, the "
+              "rest of each line and every other line byte-identical",
+              got == raw.replace("  API  =", "  Core  =").replace(
+                  "group_color = api =", "group_color = Core ="), got)
+        a, b = lsrow("rn-a") or {}, lsrow("rn-b") or {}
+        check("#716: --ls-json: both moved sessions show Core in group and "
+              "group_manual", a.get("group") == b.get("group") ==
+              a.get("group_manual") == b.get("group_manual") == "Core",
+              (a, b))
+        c = lsrow("rn-c") or {}
+        check("#716: a session in another group is untouched",
+              c.get("group") == "QA" and c.get("group_manual") == "QA" and
+              open(path("rn-c", ".group")).read() == "QA\n")
+        rc, o, _ = rn("CORE", "core")
+        check("#716: a case-only rename is allowed: moved 2, spelling "
+              "changed", rc == 0 and o["moved"] == mv and
+              "group =  core  =" in open(cfg).read() and
+              open(path("rn-a", ".group")).read() == "core\n")
+        r = run("--group-rename", "core", "API")
+        check("#716: text: 'core: renamed to API (2 moved)', exit 0",
+              r.returncode == 0 and r.stdout == "core: renamed to API "
+              "(%d moved)\n" % mv, r.stdout)
+        r = run("--group-rename", "Nope", "X")
+        check("#716: text failure: '<old>: failed — …', exit 1",
+              r.returncode == 1 and r.stdout.startswith("Nope: failed — "))
+        for n in ("rn-a", "rn-b", "rn-c"):
+            run("-k", n)
+        os.unlink(cfg)
+        rc, o, _ = rn("Sidekicks", "X")
+        check("#716: no config file, rename Sidekicks: failed no_group, "
+              "exit 1", rc == 1 and o == dict(old="Sidekicks", new="X",
+              moved=0, result="failed", reason="no_group") and
+              not os.path.exists(cfg), o)
     except Exception:
         traceback.print_exc()
         fails[0] += 1
