@@ -8363,7 +8363,8 @@ t_scheds(void)
 
 /* #689: durable crons against <cwd>/.claude/scheduled_tasks.json */
 static char *
-sc_durable(const char *cwd, const char *body, char *warn, size_t cap)
+sc_durable(const char *cwd, const char *body, char *warn, size_t cap,
+           long long now)
 {
 	struct sc_feed f;
 	char p[PATH_MAX], *b = NULL;
@@ -8392,7 +8393,7 @@ sc_durable(const char *cwd, const char *body, char *warn, size_t cap)
 	xr_scheds_durable(f.s, cwd, warn, cap);
 	if ((m = open_memstream(&b, &bl)))
 	{
-		if (xr_scheds_print(m, f.s, "s", "id", 0, warn, 0, SC_T0) != 0)
+		if (xr_scheds_print(m, f.s, "s", "id", 0, warn, 0, now) != 0)
 			fails++;
 		fclose(m);
 	}
@@ -8415,7 +8416,7 @@ t_scheds_durable(void)
 	}
 	snprintf(p, sizeof p, "%s/.claude", d);
 	mkdir(p, 0700);
-	o = sc_durable(d, NULL, w, sizeof w);
+	o = sc_durable(d, NULL, w, sizeof w, SC_T0);
 	CHECK("durable: no file: the transcript's (pending, not live), no warn",
 	      sc_row(o, "dddd0001", "\"status\":\"pending\"",
 	             "\"durable\":true", NULL) &&
@@ -8424,7 +8425,7 @@ t_scheds_durable(void)
 	free(o);
 	o = sc_durable(d, "{\"tasks\":[{\"id\":\"dddd0001\",\"lastFiredAt\":"
 	               "1795767600000},{\"id\":\"ffff0009\"},7,{\"id\":3}]}",
-	               w, sizeof w);
+	               w, sizeof w, SC_T0);
 	CHECK("durable: listed: pending, its lastFiredAt, the past next "
 	      "cleared; not listed: ended; a file-only id: no row",
 	      sc_lines(o) == 2 &&
@@ -8433,13 +8434,13 @@ t_scheds_durable(void)
 	      sc_row(o, "dddd0002", "\"status\":\"ended\"", NULL) &&
 	      !strstr(o, "ffff0009") && !strstr(o, "\"warn\""));
 	free(o);
-	o = sc_durable(d, "{\"tasks\":{}}", w, sizeof w);
+	o = sc_durable(d, "{\"tasks\":{}}", w, sizeof w, SC_T0);
 	CHECK("durable: malformed (tasks no list): unchanged, the warn",
 	      sc_row(o, "dddd0002", "\"status\":\"pending\"", NULL) &&
 	      strstr(o, "\"warn\":\".claude/scheduled_tasks.json: not readable "
 	             "JSON"));
 	free(o);
-	o = sc_durable(d, "{\"tasks\":[", w, sizeof w);
+	o = sc_durable(d, "{\"tasks\":[", w, sizeof w, SC_T0);
 	CHECK("durable: malformed (cut short): unchanged, the warn",
 	      sc_row(o, "dddd0001", "\"status\":\"pending\"", NULL) && w[0]);
 	free(o);
@@ -8453,7 +8454,7 @@ t_scheds_durable(void)
 	unlink(p);
 	CHECK("durable: a symlink: refused, unchanged, no warn",
 	      symlink(q, p) == 0 &&
-	      (o = sc_durable(d, NULL, w, sizeof w)) &&
+	      (o = sc_durable(d, NULL, w, sizeof w, SC_T0)) &&
 	      sc_row(o, "dddd0001", "\"status\":\"pending\"", NULL) && !w[0]);
 	free(o);
 	unlink(p);
@@ -8464,13 +8465,27 @@ t_scheds_durable(void)
 		memcpy(big, "{\"tasks\":[]}", 12);
 		big[(1 << 20) + 63] = '\0';
 	}
-	o = sc_durable(d, big, w, sizeof w);
+	o = sc_durable(d, big, w, sizeof w, SC_T0);
 	CHECK("durable: over 1 MiB: refused, unchanged, no warn",
 	      big && sc_row(o, "dddd0002", "\"status\":\"pending\"", NULL) &&
 	      !w[0]);
 	free(o);
 	free(big);
-	o = sc_durable(d, "{\"tasks\":[]}", w, sizeof w);
+	o = sc_durable(d, "{\"tasks\":[{\"id\":\"dddd0001\",\"permanent\":"
+	               "true},{\"id\":\"dddd0002\",\"permanent\":true}]}", w,
+	               sizeof w, SC_T0 + 8 * 86400);
+	CHECK("durable: a permanent recurring cron 8 days on: pending, expires "
+	      "null",
+	      sc_row(o, "dddd0001", "\"status\":\"pending\"", "\"expires\":null",
+	             NULL) == 1 && strstr(o, "\"live\":false"));
+	free(o);
+	o = sc_durable(d, "{\"tasks\":[{\"id\":\"dddd0001\"}]}", w, sizeof w,
+	               SC_T0 + 8 * 86400);
+	CHECK("durable: listed without permanent, 8 days on: expired",
+	      sc_row(o, "dddd0001", "\"status\":\"expired\"",
+	             "\"expires\":\"2026-12-04T08:00:00Z\"", NULL));
+	free(o);
+	o = sc_durable(d, "{\"tasks\":[]}", w, sizeof w, SC_T0);
 	CHECK("durable: an empty list: both ended",
 	      sc_row(o, "dddd0001", "\"status\":\"ended\"", NULL) &&
 	      sc_row(o, "dddd0002", "\"status\":\"ended\"", NULL));

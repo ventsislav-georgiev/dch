@@ -463,6 +463,27 @@ def test_durable():
     ask_rows("a file over 1 MiB is refused: the transcript's answer, no "
              "warn", "pending", "pending")
     put(None)
+    # a durable recurring cron 8 days old: permanent in the file never ages
+    old = NOW - 8 * 86400
+    sid8 = "11111111-2222-4333-8444-5555555555da"
+    write(os.path.join(pdir, sid8 + ".jsonl"),
+          [ask(old, "old job", cwd),
+           use(old, "p1", "CronCreate", {"cron": "0 9 * * *", "prompt": "daily",
+                                         "recurring": True, "durable": True}),
+           res(old, "p1", {"id": "eeee0008", "humanSchedule": "x",
+                           "recurring": True, "durable": True})])
+    history("xs-dur8", sid8, cfg, cwd)
+    for perm, st, exp in ((True, "pending", None),
+                          (False, "expired", iso(old + WEEK))):
+        t8 = dict(task("eeee0008", recurring=True, createdAt=old * 1000),
+                  **({"permanent": True} if perm else {}))
+        put(json.dumps({"tasks": [t8]}))
+        rc, h, rows, done, err, out = scheds("xs-dur8")
+        check("durable: a recurring cron 8 days old, %s: %s, expires %s" %
+              ("permanent" if perm else "not permanent", st, exp),
+              rc == 0 and len(rows) == 1 and rows[0]["status"] == st and
+              rows[0]["expires"] == exp, out)
+    put(None)
 
 
 def main():

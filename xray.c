@@ -16551,6 +16551,7 @@ struct sch_row
 	char *cron, *human, *prompt, *reason;	/* NULL for none */
 	int kind, status, recurring, durable;
 	int unk;		/* known from a fire only: recurring unsure */
+	int perm;		/* the durable file's permanent: never ages out */
 	int hnext;		/* the next row of its hash chain, -1 */
 	long fires, noop;	/* noop -1: none */
 	long long created, next, last;	/* epoch seconds, -1 none */
@@ -17192,6 +17193,7 @@ sch_line(struct xr_claude *d, const struct json_parser *p)
 
 #define SCH_FILE_MAX (1L << 20)	/* Claude Code's own cap on the file */
 static const char *const A_LASTF[] = { "lastFiredAt", 0 };
+static const char *const A_PERM[] = { "permanent", 0 };
 
 void
 xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
@@ -17251,6 +17253,7 @@ xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
 		    r->status == SCS_ENDED)
 		{
 			r->status = SCS_PENDING;
+			r->perm = k_bool(&p, i, A_PERM);
 			if ((t = sch_time(&p, i, A_LASTF)) > r->last)
 			{
 				r->last = t;
@@ -17264,15 +17267,16 @@ xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
 	free(buf);
 }
 
-/* the status as of now: a recurring cron past its age is expired; a pending
-** session one is ended when its Claude is not live */
+/* the status as of now: a recurring cron past its age is expired (not a
+** permanent durable one); a pending session one is ended when its Claude
+** is not live */
 static int
 sch_status(const struct sch_row *r, int live, long long now, long long *exp)
 {
 	int st = r->status;
 
 	*exp = -1;
-	if (r->kind == SCK_CRON && r->recurring && r->created >= 0)
+	if (r->kind == SCK_CRON && r->recurring && r->created >= 0 && !r->perm)
 	{
 		*exp = r->created + SCH_MAXAGE;
 		if (st == SCS_PENDING && now >= *exp)
