@@ -13,6 +13,9 @@
     tab (its warn is no row), Memory the last tab
   - xv-sl, a live Claude: a CronCreate appended reaches the shown tab from
     the follow's schedules block, no --schedules child forked
+  - xv-sx, the fake Claude exits in its shell (MED-XA1): the shell's
+    blocks apply; its cron moves to Ended (no countdown, never "due"), the
+    durable one stays Pending, and the Tasks tab goes with its empty block
 
 Run:  python3 tests/xray_view_schedules_test.py      (uses ./dch)
 """
@@ -291,9 +294,83 @@ def test_live():
         dch("-k", "xv-sl")
 
 
+def test_shell_exit():
+    """the fake Claude leaves its shell: the follow's blocks after the
+    shell's snapshot replace the lists (QA 1.188.0 MED-XA1)"""
+    bindir, fdir = os.path.join(T, "sxbin"), os.path.join(T, "sxfake")
+    proj = os.path.realpath(os.path.join(T, "sxproj"))
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "fake_claude.py"), os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = {"PATH": bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+           "FAKE_CLAUDE_DIR": fdir}
+    xenv = dict(ENV, **env)
+    xenv.pop("DCH_RECORD_MS", None)
+    run = lambda *a: subprocess.run([DCH] + list(a), capture_output=True,
+                                    text=True, timeout=30, env=xenv)
+    run("--spawn", "xv-sx", "--size", "80x24", "--cwd", proj, "sh")
+    v = None
+    try:
+        until(lambda: "$" in run("--screen", "xv-sx").stdout, 5)
+        sd = os.path.join(HOME, ".claude", "sessions")
+        os.makedirs(sd, exist_ok=True)
+        had = set(os.listdir(sd))
+        run("--send", "xv-sx", "claude\r")
+        rec = until(lambda: [x for x in os.listdir(sd)
+                             if x.endswith(".json") and x not in had], 10)
+        sid = json.load(open(os.path.join(sd, rec[0])))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", "".join(
+            c if c.isascii() and c.isalnum() else "-" for c in proj))
+        os.makedirs(pdir, exist_ok=True)
+        t0 = iso(5)
+        with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+            for o in turn("one", t0, *(
+                    cron(t0, "c1", "soo00001", "soon cron", True,
+                         "*/10 * * * *", "every 10 minutes",
+                         int(time.time() * 1000) + 4000, False) +
+                    cron(t0, "c2", "dur00002", "durable cron", True,
+                         "0 * * * *", "every hour",
+                         int(time.time() * 1000) + 3000000, True) +
+                    made(t0, "t1", "1", "a task"))):
+                f.write(json.dumps(dict(o, cwd=proj) if "cwd" in o else o)
+                        + "\n")
+        until(lambda: (json.loads(run("--xray", "xv-sx", "--json").stdout or
+                                  "{}") or {}).get("corpus") == "claude", 10)
+        v = Pty([DCH, "--xray", "xv-sx"], rows=30, cols=110, env=env)
+        ok = tabbar(v, "Schedules 2", 15)
+        t = rows(v.out).get(2, "")
+        check("shell exit: while the Claude runs, Tasks 1 and Schedules 2",
+              ok and "Tasks 1" in t, t)
+        v.key(b"\033[Z", 0.8)
+        run("--send", "xv-sx", "/exit\r")
+        ok = tabbar(v, "Commands", 15)
+        v.pump(6.0)  # past the soon cron's next: a pending row reads "due"
+        t = rows(v.out).get(2, "")
+        r = tasks_rows(v)
+        line = lambda w: next((x for x in r if w in x), "")
+        check("shell exit: the left Claude's cron moves to Ended, no "
+              "countdown, never due",
+              ok and "Ended 1" in r and "soo00001" in line("soo00001") and
+              not re.search(r"next|due", line("soo00001")) and
+              "Schedules 1" in t, (t, r))
+        check("shell exit: the durable cron stays Pending with its next",
+              "Pending 1" in r and re.search(r"dur00002 .*next",
+                                             line("dur00002")), r)
+        check("shell exit: the Tasks tab follows its (empty) block: gone",
+              "Tasks" not in t, t)
+        v.key(b"q")
+        v.exit()
+    finally:
+        if v:
+            v.close()
+        run("-k", "xv-sx")
+
+
 def main():
     run_steps(fixture_sched, test_sched, test_none, test_codex_none,
-              test_live)
+              test_live, test_shell_exit)
 
 
 if __name__ == "__main__":
