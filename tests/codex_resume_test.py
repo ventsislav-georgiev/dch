@@ -16,7 +16,7 @@ Codex runs; HOME, the runtime and state dirs are temporary.
 
 Run:  python3 tests/codex_resume_test.py        (uses ./dch)
 """
-import json, os, shutil, signal, subprocess, sys, tempfile, time
+import json, os, re, shutil, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -119,7 +119,7 @@ def main():
     recdir = os.path.join(state, "dch", "sessions",
                           os.path.join(tmp, "dch-%d" % os.getuid())
                           .replace("/", "-"))
-    names, pids = [], []
+    names, pids, servers = [], [], []
 
     def dch(*a, extra=None):
         return subprocess.run([DCH] + list(a), capture_output=True,
@@ -338,6 +338,11 @@ def main():
                          (["--codex-config", "=1"], "an empty key"),
                          (["--codex-config", "nokey"], "no ="),
                          (["--codex-config", "a=b\x01c"], "a control char"),
+                         (["--codex-config", "a=b\u009bc"], "U+009B (C1)"),
+                         (["--codex-config", "a=b\u0085c"], "U+0085 (C1)"),
+                         (["--codex-config", "a=b\udcffc"], "invalid UTF-8"),
+                         (["--codex-config", "--help=1"], "a key with -"),
+                         (["--codex-config", "-C=/etc"], "a key with -C"),
                          (["--codex-config", "a=" + "x" * 1023],
                           "1025 bytes")):
             r = dch("--revive", "cx7", *bad)
@@ -375,7 +380,83 @@ def main():
         if got:
             os.kill(int(got[0]), signal.SIGKILL)
         ended("cx7")
+
+        # 10. (QA 1.189.0 MED-XB1, LOW-XB4/5) over dch serve: a URL (':') in
+        # --codex-config reaches the Codex; the refusals hold on the host too
+        sys.path.insert(0, HERE)
+        from serve_lib import fake_ts
+        from remote_client_test import OWNER, WHOIS
+        fk = os.path.join(tmp, "fk")
+        os.makedirs(fk)
+        fake_ts(fk)
+        for nm, obj in (("status.json", OWNER), ("whois.json", WHOIS)):
+            with open(os.path.join(fk, nm), "w") as f:
+                json.dump(obj, f)
+        with open(os.path.join(fk, "ip.txt"), "w") as f:
+            f.write("100.100.1.1\n")
+        os.symlink(DCH, os.path.join(fk, "dch"))
+        senv = dict(env, DCH_SERVE_TEST_LOOPBACK="1",
+                    PATH=fk + os.pathsep + env["PATH"])
+        cenv = {k: v for k, v in env.items() if k != "DCH_NO_REMOTE"}
+        slog = os.path.join(tmp, "serve.log")
+        with open(slog, "w") as lf:
+            sp = subprocess.Popen(["dch", "serve", "--bind", "127.0.0.1",
+                                   "--port", "0", "--allow-create"],
+                                  executable=DCH, env=senv, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=lf)
+        servers.append(sp)
+        port, end = None, time.time() + 30
+        while time.time() < end and port is None and sp.poll() is None:
+            m = re.search(r"listening on 127\.0\.0\.1:(\d+)", open(slog).read())
+            port = int(m.group(1)) if m else None
+            time.sleep(0.05)
+        check("dch serve listens", port is not None, open(slog).read()[-500:])
+        if port is not None:
+            with open(cenv["DCH_CONFIG"], "w") as f:
+                f.write("remote_hosts = srv=127.0.0.1:%d\n" % port)
+
+            def rdch(*a):
+                return subprocess.run([DCH] + list(a), capture_output=True,
+                                      text=True, timeout=90, cwd=proj,
+                                      env=cenv, stdin=subprocess.DEVNULL)
+            got = spawn("cx8", [fake, "-c", "foo=1"],
+                        {"CODEX_HOME": cxhome, "FAKE_CODEX_TID": T1,
+                         "FAKE_CODEX_SNAP": "1"})
+            until(lambda: ((rec("cx8") or {}).get("codex") or {})
+                  .get("thread_id"), 10)
+            if got:
+                os.kill(int(got[0]), signal.SIGKILL)
+            ended("cx8")
+            k0 = len(launches())
+            for c, why in (("a=b\u009bc", "U+009B"), ("a=b\u0085c", "U+0085"),
+                           ("a=b\udcffc", "invalid UTF-8"),
+                           ("--help=1", "a key with -"),
+                           ("-C=/etc", "a key with -C")):
+                r = rdch("--revive", "srv:cx8", "--json", "--no-message",
+                           "--codex-config", c)
+                check("remote --codex-config refuses %s: exit 2" % why,
+                      r.returncode == 2 and "--codex-config" in r.stderr,
+                      (r.returncode, r.stderr))
+            time.sleep(0.5)
+            check("remote refused: nothing revived", len(launches()) == k0,
+                  launches()[k0:])
+            url = 'model_providers.p.base_url="http://127.0.0.1:1/v1"'
+            k = len(launches())
+            r = rdch("--revive", "srv:cx8", "--json", "--no-message",
+                     "--codex-config", url)
+            got = until(lambda: len(launches()) > k and launches()[k])
+            if got:
+                pids.append(int(got[0]))
+            check("remote --codex-config with ':' revives; -c reaches the "
+                  "Codex's argv", r.returncode == 0 and got and
+                  got[-2:] == ["-c", url], (r.returncode, r.stdout, r.stderr,
+                                            got))
+            if got:
+                os.kill(int(got[0]), signal.SIGKILL)
+            ended("cx8")
     finally:
+        for sp in servers:
+            sp.terminate()
         for n in names:
             dch("-k", n)
         for p in pids:

@@ -3318,8 +3318,10 @@ take two flags for that, applied to a Codex's resume argv only (with
   starts with `model_providers.`. Other `-c` words stay.
 - `--codex-config K=V` (repeatable, at most 16) appends `-c K=V` after the
   kept options and before the PROMPT (and its `--`), in the order given.
-  `K` is `[A-Za-z0-9_.-]+`, the value at most 1024 bytes in all, no control
-  character; otherwise exit 2 and nothing runs.
+  `K` is `[A-Za-z0-9_.-]+` and does not start with `-`; the whole word is
+  at most 1024 bytes of valid UTF-8 with no control character (C0, DEL, C1,
+  bidi); otherwise exit 2 and nothing runs. The value may hold `:`, so a
+  provider URL goes over `--revive host:name` too.
 
 A Claude or shell session ignores them; its `--json` result line then
 carries `"codex_ignored": <count>` (the drop flag counts one, each

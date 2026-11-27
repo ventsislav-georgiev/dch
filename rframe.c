@@ -513,12 +513,15 @@ ctl_codex_cfg_ok(const char *s)
 {
 	size_t k = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	                     "0123456789_.-");
-	const unsigned char *p;
+	const unsigned char *p = (const unsigned char *)s;
+	unsigned cp;
+	int n;
 
-	if (!k || s[k] != '=' || strlen(s) > 1024)
+	/* a leading '-' would reach Codex as an option of its own */
+	if (!k || s[k] != '=' || s[0] == '-' || strlen(s) > 1024)
 		return 0;
-	for (p = (const unsigned char *)s; *p; p++)
-		if (*p < 0x20 || *p == 0x7f)
+	for (; *p; p += n)
+		if (!(n = utf8_at(p, &cp)) || cp_ctl(cp))
 			return 0;
 	return 1;
 }
@@ -939,7 +942,7 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
 				return ctl_no(why, cap, "--codex-config wants at most "
 				              "16 K=V, K of [A-Za-z0-9_.-], 1024 bytes, "
 				              "no control characters");
-			kind[i] = CK_VALUE;
+			kind[i] = CK_TEXT;	/* a URL has ':'; see serve.c's relay guard */
 		}
 		else if (!strcmp(a, "--as"))
 		{
