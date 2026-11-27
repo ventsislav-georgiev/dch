@@ -24,7 +24,7 @@ configs name hosts, so there is no discovery; PATH has no tailscale).
 Run:  python3 tests/colon_name_test.py            (uses ./dch)
 """
 import json, os, pty, re, select, shutil, signal, subprocess, sys, tempfile
-import time
+import termios, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -107,13 +107,26 @@ def new_attached(env, name):
     """`dch -n name /bin/sh` on a pty, detached once the session is up."""
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(DCH, [DCH, "-n", name, "/bin/sh"], env)
+        os.execve(DCH, [DCH, "-n", name, "/bin/sh"],
+                  dict(env, DCH_DOUBLE_TAP_MS="0"))
     up = wait_live(env, name, True)
     time.sleep(0.3)
+    # ^\ before raw mode raises SIGQUIT on the client: wait for ICANON off
+    for _ in range(100):
+        if not termios.tcgetattr(fd)[3] & termios.ICANON:
+            break
+        time.sleep(0.05)
     os.write(fd, b"\x1c")
     end = time.time() + 10
     st = None
+    resend = time.time() + 1
     while time.time() < end:
+        if time.time() >= resend:  # a slow client may not be in raw mode yet
+            resend = time.time() + 1
+            try:
+                os.write(fd, b"\x1c")
+            except OSError:
+                pass
         try:
             os.read(fd, 65536)
         except OSError:
