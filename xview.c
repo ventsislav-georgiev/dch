@@ -918,7 +918,10 @@ xv_snapshot(struct xv *v, const struct json_parser *p, int o)
 	{
 		xv_stop(&v->kid[XV_HK], XV_HK);	/* an answer in flight is the old one's */
 		xv_tl_free(&v->tq[2].tl);
+		xv_tl_free(&v->tq[2].tn);
+		v->tq[2].re = 0;
 		v->tq[2].at = 0;
+		v->tq[2].gen++;	/* xv_tvis' cached rows point into the freed list */
 	}
 	xv_sfree(osid);
 }

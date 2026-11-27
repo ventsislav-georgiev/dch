@@ -12390,15 +12390,16 @@ rv_agent(const struct hrec *r)
 	return r->sid[0] || r->launch ? "claude" : r->cx[0] ? "codex" : NULL;
 }
 
-/* --revive's final --json line without a record to revive (#182); ag the
-** record's agent, NULL when none was read. */
+/* --revive's final --json line (#182); ag the record's agent, NULL for a
+** plain shell or when none was read; rec: a record was read, so
+** codex_ignored is said even for a shell (#704). */
 static void
 rv_json_final(const char *name, const char *as, const char *res,
               const char *code, const char *detail, const char *sid,
-              int argv, const char *ag)
+              int argv, const char *ag, int rec)
 {
 	json_final_open(name, "as", as, res, code, detail, sid);
-	if (ag)		/* no record read: nothing was ignored (#701) */
+	if (rec)	/* no record read: nothing was ignored (#701) */
 		cx_ignored_json(ag);
 	/* "running" stays the last key (#182) */
 	fputs(",\"agent\":", stdout);
@@ -12425,7 +12426,7 @@ rv_say(const struct hrec *r, int json, const char *res, const char *code,
 	if (json)
 		rv_json_final(r->name, r->as, res, code, d,
 		              r->sid[0] ? r->sid : r->cx, r->mode == RV_ARGV ||
-		              r->mode == RV_CODEX, rv_agent(r));
+		              r->mode == RV_CODEX, rv_agent(r), 1);
 	else
 		printf("%s: %s\n", r->name, d);
 	fflush(stdout);
@@ -13044,7 +13045,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		fprintf(stderr, "dch: %s\n", d);
 		if (json)
 			rv_json_final(name, as ? as : name, "failed", *why == 'a'
-			              ? "ambiguous" : "no_history", d, "", 0, NULL);
+			              ? "ambiguous" : "no_history", d, "", 0, NULL, 0);
 		hrec_free(r, n);
 		return 1;
 	}
@@ -13217,7 +13218,8 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			rv_json_final(name, as ? as : name, "failed",
 			              seenlive ? "live" : "no_history", seenlive
 			              ? "session is live"
-			              : "no history for this session", "", 0, NULL);
+			              : "no history for this session", "", 0, NULL,
+			              0);
 		hrec_free(r, n);
 		free(held.v);
 		return all ? 0 : 1;

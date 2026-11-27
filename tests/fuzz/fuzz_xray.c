@@ -119,7 +119,7 @@ tasks_out(const struct xr_tasks *tk)
 
 	if (!(f = open_memstream(&buf, &bl)))
 		return;
-	if (xr_tasks_print(f, tk, "fuzz", "s", 0, NULL) != 0)
+	if (xr_tasks_print(f, tk, "fuzz", "s", 0, NULL, NULL) != 0)
 		abort();
 	fclose(f);
 	if (!bl || buf[bl - 1] != '\n' || memchr(buf, '\0', bl))
