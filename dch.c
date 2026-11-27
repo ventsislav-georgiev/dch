@@ -3006,6 +3006,9 @@ usage(void)
 	    "                                             end the session as\n"
 	    "                                             \"stopped\"; dch --revive\n"
 	    "                                             <name> wakes it resumed\n"
+	    "  dch --stop-shell <name> <id> [--json]      end one Claude Bash\n"
+	    "                                             tool shell (an --ls-json\n"
+	    "                                             shells id) and its tree\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"; --remote\n"
 	    "                   adds remote rows, each with a \"host\";\n"
 	    "                   --follow: again, one line, on each change\n"
@@ -7355,15 +7358,15 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 ** children inherit that fd, so the shallowest process per id (breadth
 ** first) is the shell. The kernel shows foreground and background shells
 ** alike (each a session leader with stdin /dev/null): owner, description
-** and "background" come from the transcript at `tp` (#482), NULL none. */
+** and "background" come from the transcript at `tp` (#482), NULL none.
+** claude_shells walks them into sh[64] (show: commands too), put_shells
+** prints them; --stop-shell signals one (#711). */
+struct shl { long pid, pgid; time_t t; char id[64], cmd[201], out[PATH_MAX]; };
+
 static int
-put_shells(long pid, const char *sid, const char *tp, int show)
+claude_shells(long pid, const char *sid, struct shl *sh, int show)
 {
-	struct { long pid; time_t t; char id[64], cmd[201]; } sh[64], x;
-	char agent[64], adesc[201], desc[201];
-	struct sub sv[256];
-	int own, nsv = -1;
-	time_t tmin;
+	struct shl x;
 	long tree[PROC_TREE_MAX];
 	char tail[128], path[PATH_MAX], **v;
 	const char *b;
@@ -7401,6 +7404,8 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 		if (j < ns || (x.t = proc_started(tree[i])) < 0)
 			continue;	/* a shell's child, or gone */
 		x.pid = tree[i];
+		x.pgid = (long)getpgid((pid_t)x.pid);
+		snprintf(x.out, sizeof x.out, "%s", path);
 		x.cmd[0] = '\0';
 		if (show && (v = proc_argv(x.pid)))	/* the count needs no argv */
 		{
@@ -7413,6 +7418,18 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 			sh[j] = sh[j - 1];
 		sh[j] = x;
 	}
+	return ns;
+}
+
+static int
+put_shells(long pid, const char *sid, const char *tp, int show)
+{
+	static struct shl sh[64];	/* 64 x PATH_MAX: off the stack */
+	char agent[64], adesc[201], desc[201];
+	struct sub sv[256];
+	int own, nsv = -1, ns = claude_shells(pid, sid, sh, show), i, j;
+	time_t tmin;
+
 	tmin = ns ? sh[ns - 1].t : 0;	/* newest first: the last is oldest */
 	if (!show)	/* the picker's SHELLS count: the background ones (#557) */
 	{
@@ -7451,6 +7468,9 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 		printf(",\"pid\":%ld,\"started\":%ld,\"command\":", sh[i].pid,
 		       (long)sh[i].t);
 		put_json_str(sh[i].cmd);
+		fputs(",\"output\":", stdout);
+		put_json_str(sh[i].out);
+		printf(",\"pgid\":%ld", sh[i].pgid);
 		/* every key left out when unknown: no result line, no false */
 		if (tp && (own = shell_owner(tp, sh[i].id, sh[i].t, tmin, sv, &nsv,
 		    agent, adesc, sizeof adesc, desc, sizeof desc)))
@@ -11034,6 +11054,99 @@ pk_shells(const char *name)
 		               ? NULL : tp, 0);
 	cmd_info_free(&ci);
 	return n;
+}
+
+/* `--stop-shell <session> <id> [--json]` (#711): SIGTERM the tree of the
+** shell --ls-json lists as <id> (the shell and every descendant, taken
+** before any signal), then SIGKILL what of it is left after 2 s. Each pid
+** is signalled only while its start time is the one first read (pid
+** reuse); the Claude and the session's program never. Local only. */
+static int
+stop_shell_main(int argc, char **argv)
+{
+	static struct shl sh[64];
+	struct cmd_info ci;
+	struct crec c;
+	char sp[1100];
+	long tree[PROC_TREE_MAX];
+	time_t ts[PROC_TREE_MAX];
+	const char *a[2] = {NULL, NULL}, *why = NULL;
+	int json = 0, na = 0, ns, n = 0, i, k, w, live, sig;
+
+	for (i = 0; i < argc; i++)
+		if (strcmp(argv[i], "--json") == 0)
+			json = 1;
+		else if (argv[i][0] == '-' || !argv[i][0] || na == 2)
+			na = 3;
+		else
+			a[na++] = argv[i];
+	if (na != 2)
+	{
+		fprintf(stderr, "dch: usage: dch --stop-shell <session> <id> "
+		        "[--json]\n");
+		return 2;
+	}
+	if (name_is_remote(a[0]))
+	{
+		fprintf(stderr, "dch: --stop-shell is local only\n");
+		return 2;
+	}
+	session_sock_path(a[0], sp, sizeof sp);
+	if ((k = cmd_query(sp, &ci)) != 0)
+		why = k == DCH_ST_UNSUP ? "old_master" : "no_session";
+	else
+	{
+		if (!xr_live_claude(&ci, &c))
+			why = "not_claude";
+		else
+		{
+			ns = claude_shells(c.pid, c.sid, sh, 0);
+			for (i = 0; i < ns && strcmp(sh[i].id, a[1]); i++)
+				;
+			if (i == ns)
+				why = "no_shell";
+			else
+			{
+				n = proc_tree(sh[i].pid, tree, PROC_TREE_MAX);
+				for (k = 0; k < n; k++)
+					ts[k] = tree[k] == c.pid || tree[k] == ci.pid
+					        ? -1 : proc_started(tree[k]);
+				if (ts[0] != sh[i].t)
+					why = "changed", n = 0;
+			}
+		}
+		cmd_info_free(&ci);
+	}
+	/* SIGTERM, up to 2 s for the tree to go, then SIGKILL the rest */
+	for (w = 0; n && w <= 40; w++)
+	{
+		sig = w == 0 ? SIGTERM : w == 40 ? SIGKILL : 0;
+		for (k = live = 0; k < n; k++)
+			if (ts[k] >= 0 && proc_started(tree[k]) == ts[k])
+			{
+				live = 1;
+				if (sig)
+					(void)kill((pid_t)tree[k], sig);
+			}
+		if (!live)
+			break;
+		if (w < 40)
+			usleep(50000);
+	}
+	if (json)
+	{
+		fputs("{\"name\":", stdout);
+		put_json_str(a[0]);
+		fputs(",\"id\":", stdout);
+		put_json_str(a[1]);
+		printf(",\"result\":\"%s\",\"reason\":\"%s\"}\n",
+		       why ? "failed" : "ok", why ? why : "");
+	}
+	else if (why)
+		printf("%s: failed — %s\n", a[0], why);
+	else
+		printf("%s: stopped %s\n", a[0], a[1]);
+	return why != NULL;
 }
 
 /* Every tab's rows afresh: the live sessions as --ls-json reads them, the
@@ -18836,6 +18949,8 @@ main_run(int argc, char **argv)
 	/* X-ray (#120): its own flag rules (spec 3.1), so first or never. */
 	if (argc >= 2 && strcmp(argv[1], "--xray") == 0)
 		return xray_main(argc - 2, argv + 2);
+	if (argc >= 2 && strcmp(argv[1], "--stop-shell") == 0)
+		return stop_shell_main(argc - 2, argv + 2);
 
 	/* A remote control verb (#114) is sent as typed, less --host, --hosts
 	** and --cwd (cskip): argv as it was, since --say and its kin pack it. */

@@ -31,7 +31,9 @@ left out for a shell named only by a malformed or unfinished line.
 file without "agent"; a subagent file older than the shell, or whose
 complete last line has no newline yet, not taken; FIFOs as a subagent file
 or meta skipped at once; 32 unnamed shells x 250 x 1.2 MB subagent files
-under 2 s (the per-call read budget).
+under 2 s (the per-call read budget). #711: each shell's "output" and
+"pgid"; --stop-shell ends a shell and its child, not the Claude or a
+sibling shell; no_shell, not_claude, no_session, --json, usage exit 2.
 
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
@@ -262,6 +264,22 @@ def main():
                                          capture_output=True).stdout)
             return int(pid)
 
+        def outp(key):
+            return os.path.join(tmp, "claude-%d" % os.getuid(), "-tmp-proj",
+                                sh_sid, "tasks", key + ".output")
+
+        def ox(key, pid):
+            return {"output": outp(key), "pgid": os.getpgid(pid)}
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return False
+            st = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                                capture_output=True, text=True).stdout
+            return not st.startswith("Z")
+
         def started(pid):
             return calendar.timegm(time.strptime(proc_start(pid),
                                                  "%a %b %d %H:%M:%S %Y"))
@@ -269,15 +287,17 @@ def main():
             # bash's quoting of ' in the eval argument ('\'')
             p1 = shell("bsh1one", "'sleep 120 ; echo '\\''hi'\\'''")
             want1 = {"id": "bsh1one", "pid": p1, "started": started(p1),
-                     "command": "sleep 120 ; echo 'hi'"}
+                     "command": "sleep 120 ; echo 'hi'",
+                     **ox("bsh1one", p1)}
             got = field(h, "shells")
-            check("one shell: its id, pid, start and command (%s)" % got,
+            check("one shell: its id, pid, start, command, output and pgid (%s)" % got,
                   got == [want1])
             time.sleep(1.1)	# a later start second: the order is by start
             # zsh's ('"'"')
             p2 = shell("bsh2two", "'sleep 120; echo '\"'\"'x y'\"'\"''")
             want2 = {"id": "bsh2two", "pid": p2, "started": started(p2),
-                     "command": "sleep 120; echo 'x y'"}
+                     "command": "sleep 120; echo 'x y'",
+                     **ox("bsh2two", p2)}
             got = field(h, "shells")
             check("two shells: newest first (%s)" % got, got == [want2, want1])
             shell("bsh3oth", "'sleep 120; true'",
@@ -377,22 +397,23 @@ def main():
                   "background (%s)" % got.get("bsh6main"),
                   got.get("bsh6main") == {
                       "id": "bsh6main", "pid": p6, "started": t6,
-                      "command": "sleep 120", "agent": None,
-                      "description": "Run the main build",
+                      "command": "sleep 120", **ox("bsh6main", p6),
+                      "agent": None, "description": "Run the main build",
                       "background": True})
             check("a subagent's shell: its agentId and description, the "
                   "call's description cut at 200 bytes between UTF-8 "
                   "scalars (%s)" % got.get("bsh7sub"),
                   got.get("bsh7sub") == {
                       "id": "bsh7sub", "pid": p7, "started": started(p7),
-                      "command": "sleep 120", "agent": "aSUB1",
+                      "command": "sleep 120", **ox("bsh7sub", p7),
+                      "agent": "aSUB1",
                       "agent_description": "Explore the tests",
                       "description": "d" * 199, "background": True})
             check("a shell in no complete line: no agent, description or "
                   "background (%s)" % got.get("bsh8none"),
                   got.get("bsh8none") == {
                       "id": "bsh8none", "pid": p8, "started": started(p8),
-                      "command": "sleep 120"})
+                      "command": "sleep 120", **ox("bsh8none", p8)})
             keys = []
             out = run("--ls-json").stdout
             for r in json.loads(out, object_pairs_hook=lambda kv: kv):
@@ -400,7 +421,7 @@ def main():
                     if dict(s).get("id") == "bsh7sub":
                         keys = [k for k, _ in s]
             check("keys in order after command (%s)" % keys, keys == [
-                "id", "pid", "started", "command", "agent",
+                "id", "pid", "started", "command", "output", "pgid", "agent",
                 "agent_description", "description", "background"])
 
             # --- #487: C1 controls, edge rows, FIFOs, a bounded cost ------
@@ -456,7 +477,7 @@ def main():
                 if r.get("name") == h:
                     got = {s["id"]: s for s in r.get("shells", [])}
             base = {s: {"id": s, "pid": p, "started": started(p),
-                        "command": "sleep 120"} for s, p in
+                        "command": "sleep 120", **ox(s, p)} for s, p in
                     (("bsh10side", p10), ("bsh11old", p11),
                      ("bsh12part", p12), ("bsh13fifo", p13),
                      ("bsh14meta", p14))}
@@ -466,7 +487,8 @@ def main():
                   "description (%s)" % got.get("bsh9c1"),
                   got.get("bsh9c1") == {
                       "id": "bsh9c1", "pid": p9, "started": t9,
-                      "command": "echo   x  y; sleep 120", "agent": None,
+                      "command": "echo   x  y; sleep 120",
+                      **ox("bsh9c1", p9), "agent": None,
                       "description": "c  d  e", "background": True})
             check("a sidechain line in the main file: no agent key (%s)"
                   % got.get("bsh10side"),
@@ -516,7 +538,8 @@ def main():
             check("result past 16 MB of subagent reads: id, pid, started, "
                   "command only (%s)" % got.get("bbud"),
                   got.get("bbud") == {"id": "bbud", "pid": pb, "started": tb,
-                                      "command": "sleep 120"})
+                                      "command": "sleep 120",
+                                      **ox("bbud", pb)})
             for nm in names:
                 os.unlink(os.path.join(sub, nm))
 
@@ -544,6 +567,42 @@ def main():
                   took < lim and got.get("bsh6main", {}).get("agent",
                                                            MISSING) is None
                   and len(got) >= 38)
+            # --- --stop-shell (#711): the shell's tree, nothing else -----
+            p20 = shell("bsh20stop", "'sleep 120; true'")
+            k20 = [int(k) for k in subprocess.run(
+                ["/usr/bin/pgrep", "-P", str(p20)], capture_output=True,
+                text=True).stdout.split()]
+            r = run("--stop-shell", h, "bsh20stop")
+            check("--stop-shell: exit 0, '<s>: stopped <id>' (%r)" % r.stdout,
+                  r.returncode == 0 and r.stdout == h + ": stopped bsh20stop\n")
+            check("--stop-shell: the shell and its sleep are gone, the Claude "
+                  "and a sibling shell live",
+                  k20 and until(lambda: not any(alive(q) for q in [p20] + k20),
+                               5) and alive(hp) and alive(p1) and
+                  "bsh20stop" not in {x.get("id") for x in
+                                     field(h, "shells") or []})
+            r = run("--stop-shell", h, "nosuch", "--json")
+            try:
+                j = json.loads(r.stdout)
+            except ValueError:
+                j = None
+            check("--stop-shell --json unknown id: one line, no_shell, exit 1 "
+                  "(%r)" % r.stdout, r.returncode == 1 and j == {
+                      "name": h, "id": "nosuch", "result": "failed",
+                      "reason": "no_shell"} and r.stdout.count("\n") == 1)
+            r = run("--stop-shell", h, "nosuch")
+            check("--stop-shell unknown id: '<s>: failed — no_shell'",
+                  r.returncode == 1 and r.stdout == h +
+                  ": failed — no_shell\n")
+            check("--stop-shell: no Claude, no session",
+                  json.loads(run("--stop-shell", b, "x", "--json").stdout
+                             or "{}").get("reason") == "not_claude" and
+                  json.loads(run("--stop-shell", "tt-nope", "x", "--json")
+                             .stdout or "{}").get("reason") == "no_session")
+            check("--stop-shell usage: exit 2 (missing id, extra arg, flag)",
+                  run("--stop-shell", h).returncode == 2 and
+                  run("--stop-shell", h, "a", "b").returncode == 2 and
+                  run("--stop-shell", h, "a", "-x").returncode == 2)
             os.unlink(os.path.join(sessdir, "%d.json" % hp))
             check("its record gone: no shells key", field(h, "shells") ==
                   MISSING)
