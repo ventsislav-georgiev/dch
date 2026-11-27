@@ -13114,9 +13114,9 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		{
 			rv_say(h, json, h->sid[0] ? "failed" : "ok",
 			       h->sid[0] ? "launch_unknown" : "", "revived as %s in "
-			       "%s%s%s%s%s", h->as, h->cwd, h->sid[0] ? "; claude "
-			       : "", h->sid[0] ? h->aname : "", h->sid[0]
-			       ? " NOT resumed (its launch "
+			       "%s%s%s%s%s%s", h->as, h->cwd, h->sid[0] ? "; claude"
+			       : "", h->sid[0] && h->aname[0] ? " " : "", h->sid[0]
+			       ? h->aname : "", h->sid[0] ? " NOT resumed (its launch "
 			       "command is unknown): claude --resume " : "", h->sid);
 			bad += h->sid[0] != 0;
 		}

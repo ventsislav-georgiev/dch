@@ -1184,6 +1184,8 @@ def main(part):
             renv = dict(os.environ, XDG_RUNTIME_DIR=rt8, DCH_AGENT_STEP_MS="4000",
                         DCH_AGENT_LAND_MS="1500")
 
+            dets = []
+
             def rfinal(n, launch=True, argv=None, **ctl):
                 sid = "18218218-0000-4000-8000-%012d" % len(names)
                 ag = dict(kind="claude", session_id=sid, name="", cwd=proj)
@@ -1197,6 +1199,7 @@ def main(part):
                 names.append((n, renv))
                 f = [o for o in ndjson(r.stdout) or [] if "result" in o]
                 o = f[0] if len(f) == 1 else {}
+                dets.append(o.get("detail") or "")
                 return (o.get("result"), o.get("reason"), o.get("running"),
                         list(o)[-1:] == ["running"])
 
@@ -1210,6 +1213,10 @@ def main(part):
                     ("rrf", dict(argv=[sh_, "-c", "exit 0"]),
                      ("failed", "relaunch_failed", False, True))):
                 got = rfinal(n, **kw)
+                if n == "rlu":
+                    check("launch_unknown detail has no double space (#678): "
+                          "%r" % dets[-1], "  " not in dets[-1]
+                          and "claude NOT resumed" in dets[-1])
                 check("--revive --json %s: running %s, the last key [%r]"
                       % (want[1], want[2], got), got == want)
             for n, kw, why in (
