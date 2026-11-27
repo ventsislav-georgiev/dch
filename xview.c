@@ -916,6 +916,7 @@ xv_snapshot(struct xv *v, const struct json_parser *p, int o)
 	** another Claude's, drops the old answer; the next prompt one asks again */
 	if (v->poll && (!xv_rtab(v) || (osid && strcmp(osid, v->sid))))
 	{
+		xv_stop(&v->kid[XV_HK], XV_HK);	/* an answer in flight is the old one's */
 		xv_tl_free(&v->tq[2].tl);
 		v->tq[2].at = 0;
 	}
