@@ -1427,8 +1427,8 @@ standard input is a request, as NDJSON:
   taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`, `--no-github`),
   `--search` (with `--scope`; `["--search","push retry","--scope","project",
   "--json"]`, one answer per request, the bytes `dch --xray <n> --search
-  ... --json` writes on the host), `--since` (#516), `--chapter` and
-  `--clear`. A request
+  ... --json` writes on the host), `--since` (#516), `--chapter`,
+  `--clear`, `--tasks`, `--memory`, `--schedules` and `--questions`. A request
   without `--json` is refused, so there is no text answer here. dch checks them by its own rules first; any
   other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
   value is answered `{"req":N,"stderr":"dch: ..."}` and
@@ -2491,7 +2491,7 @@ the host's dch does not know --tasks` (exit 1).
 
 `--schedules` takes no other flag but `--json` (`dch: bad usage:
 --schedules and --ref`, also `--search`, `--chapter`, `--clear`, `--tasks`,
-`--memory`), and is not in `--requests`. `--follow` carries it (see
+`--memory`), and is a `--requests` request. `--follow` carries it (see
 **Schedules in the stream** below; a dch before #686 exits 2 there). A
 transcript that is gone
 says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that host's
@@ -2540,7 +2540,7 @@ per file (`"cut":true` after `body` when it was cut), then
   Nothing is written.
 
 `--memory` goes with no other flag but `--json` (`dch: bad usage: --memory
-and --tasks`) and not in `--requests`; `--follow` carries it, with or
+and --tasks`) and is a `--requests` request; `--follow` carries it, with or
 without `--tasks` (see below). On `host:name` it runs on that host;
 a host whose dch predates it says `dch: <host>: the host's dch does not know
 --memory` (exit 1).
@@ -2655,7 +2655,7 @@ questions_command = ~/bin/my-questions
 `--questions` goes with no other flag but `--json` (`dch: bad usage:
 --questions and --tasks`, also with `--memory`, `--ref`, `--search`,
 `--chapter`, `--clear` and `--follow`: the stream carries no questions
-block, so poll it), and not in `--requests`. On `host:name` it runs on
+block, so poll it), and is a `--requests` request. On `host:name` it runs on
 that host's `dch serve`, with the host's config and command.
 
 ##### Answering (`answer_command`)
