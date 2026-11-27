@@ -436,6 +436,7 @@ dch --xray <n> --tasks --json                   # the session's task list (TaskC
 dch --xray <n> --schedules --json               # its crons, /loop wake-up and Codex heartbeats, JSON lines
 dch --xray <n> --questions --json               # open questions from your questions_command, JSON lines
 dch --xray <n> --answer <qid> - --json          # answer one, the text on stdin, through your answer_command
+dch --xray <n> --answer <qid> - --notify <s> --json  # ...then tell session <s> the ruling
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -2689,6 +2690,29 @@ printf 'Yes, ship it.' | dch --xray api --answer OQ-7 - --json
   the host's `dch serve` checks the qid and text again and runs the
   host's `answer_command` (no opt-in). A host whose dch does not know it:
   `dch: <host>: the host's dch does not know --answer`, exit 1.
+- **Telling the session (`--notify <session>`, #693).** Once the answer is
+  recorded (exit 0 only; any other result sends nothing and has no
+  `told`), dch tells one live session in the same socket dir as `<n>`:
+  `--answer OQ-7 - --notify api-main --json`. The text is
+  `OQ-7 answered: <ruling>`, each LF and tab a space and runs of spaces
+  one. A Claude Code session gets it through Claude's native inbox (the
+  peer record of that very Claude, found by its pid and session id, never
+  by name; see [Native Claude and Codex
+  messages](#native-claude-and-codex-messages)): Claude queues it into a
+  running turn. The frame names no reply address (dch has no inbox) and
+  its sender is `operator (dch xray)`. A Codex session gets one `--say`,
+  no retry. The result line gains
+  `"told":{"session":"api-main","via":"native"|"say","ok":true}`, or
+  `"ok":false` with a `why`: `no_inbox` (that Claude publishes no peer
+  record) or `failed` (the frame was not written); `--say`'s `prompt`,
+  `draft`, `no_screen`, `not_foreground`, …; `no_agent` (a shell, no
+  agent) and `no_session`. Claude sends no receipt, so `ok` means the
+  frame was written. The exit stays the answer's: telling is best effort.
+  The session is a plain name (1 to 64 of `A-Z a-z 0-9 . _ -`, not
+  starting with `-`: `dch: bad notify: …`, exit 2); `--notify` without
+  `--answer` is `dch: bad usage: --notify comes with --answer`. On
+  `host:name` the flag goes with the request and the host tells its own
+  session (it alone reaches that Claude's socket).
 
 #### Your own definitions (`define_command`)
 
@@ -3959,7 +3983,7 @@ for a local session named that way.
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |
 | `--xray` | `--xray <n> --questions --json` | 60 s |
-| `--xray` | `--xray <n> --answer <qid> <text> --json` (the client's `-` read and put in its place; the host's `answer_command` gets it on stdin, its ctl child's argv a `-`) | 60 s |
+| `--xray` | `--xray <n> --answer <qid> <text> [--notify <session>] --json` (the client's `-` read and put in its place; the host's `answer_command` gets it on stdin, its ctl child's argv a `-`; `--notify`'s session checked as the client does) | 60 s |
 | `--xray` | `--xray <n> --memory --json` | 60 s |
 
 Refused, before anything runs: an `argv` of fewer than 2 elements; a verb

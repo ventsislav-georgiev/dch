@@ -2024,6 +2024,46 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
   return 0;
 }
 
+/* `--xray --answer --notify` (#693): one native message into the Claude at
+   pid running session sid, from dch, which is no peer. The token is the
+   target inbox's own, as for every sender (outgoing above). Claude 2.1.x
+   takes a user frame with no "from" (its origin is then "unknown", and no
+   receipt is tried) and a wrapper with from-name alone, so the frame names
+   no reply address and borrows no session's identity. 0 written (Claude
+   sends no receipt for an accepted message), -1 no live peer record for
+   that Claude, -2 the write failed. */
+int dch_bridge_notify(long pid, const char *sid, const char *text) {
+  struct peer p[128], *hit = NULL;
+  char wrapped[MESSAGE_MAX + 200], q[(MESSAGE_MAX + 200) * 6 + 3], msgid[37],
+      qsess[800], frame[FRAME_MAX + 1];
+  int n = scan_peers(p, 128, 0), fd;
+  for (int i = 0; i < n; i++)
+    if (p[i].pid == pid && !strcmp(p[i].session_id, sid) &&
+        peer_live(&p[i]))
+      hit = &p[i];
+  if (!hit)
+    return -1;
+  if (snprintf(wrapped, sizeof wrapped,
+               "<cross-session-message from-name=\"operator (dch xray)\">\n%s"
+               "\n</cross-session-message>",
+               text) >= (int)sizeof wrapped ||
+      make_uuid(msgid) < 0 ||
+      dch_json_quote(q, sizeof q, wrapped) == SIZE_MAX ||
+      dch_json_quote(qsess, sizeof qsess, hit->session_id) == SIZE_MAX)
+    return -2;
+  n = snprintf(frame, sizeof frame,
+               "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\""
+               ":%s},\"msg_id\":\"%s\",\"session_id\":%s,\"priority\":"
+               "\"next\"}",
+               q, msgid, qsess);
+  if (n < 0 || n >= (int)sizeof frame ||
+      (fd = connect_unix(hit->socket, 10000)) < 0)
+    return -2;
+  n = send_frames(fd, hit->token, frame);
+  close(fd);
+  return n < 0 ? -2 : 0;
+}
+
 /* Record readers for the agent-aware restart in dch.c, which joins Claude
    session records to dch sessions the same way the peer scan does. */
 int dch_json_string(const char *json, const char *key, char *out, size_t cap) {

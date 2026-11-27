@@ -122,6 +122,9 @@ int xray_search_ok(const char *s);
 #define XRAY_ANSWER_MAX 4000	/* --answer's text, bytes (#692) */
 int xray_qid_ok(const char *s);
 int xray_answer_ok(const char *s);
+int xray_notify_ok(const char *s);
+#define XRAY_NOTIFY_BAD "bad notify: 1 to 64 of A-Z a-z 0-9 . _ -, not " \
+                        "starting with -"
 #define XRAY_QID_BAD "bad qid: 1 to 32 of A-Z a-z 0-9 . _ -, not starting " \
                      "with -"
 #define XRAY_ANSWER_BAD "bad answer: 1 to 4000 bytes of UTF-8, no control " \

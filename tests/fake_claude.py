@@ -28,6 +28,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     into it, as Claude Code's paste detection does),
                     exit_ms (/exit takes that long to quit), die_ms
                     (a kill or exit leaves the process that long),
+                    peer (fields merged into its session record, as a
+                    native-messaging Claude publishes),
                     dialog_on_kill (the first Ctrl-U raises a known
                     prompt over the draft instead of killing a row),
                     type_on_kill (text a human types after each Ctrl-U
@@ -127,6 +129,7 @@ def set_status(s):
            "startedAt": stamp, "procStart": PROC_START, "version": VERSION,
            "kind": "interactive", "entrypoint": "cli", "status": s,
            "updatedAt": stamp, "statusUpdatedAt": stamp}
+    rec.update(ctl().get("peer") or {})   # a native peer's record fields
     tmp = REC + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.write(fd, json.dumps(rec).encode())

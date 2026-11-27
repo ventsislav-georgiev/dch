@@ -133,7 +133,10 @@ dch \- detachable terminal sessions with a headless agent API
 .I name
 .B \-\-answer
 .I qid
-.B \- \-\-json
+.B \-
+.RB [ \-\-notify
+.IR session ]
+.B \-\-json
 .br
 .B dch \-\-xray
 .I name
@@ -4594,6 +4597,42 @@ set) and with any flag but
 On
 .I host:name
 the host's command runs; the client sends the text.
+With
+.B \-\-notify
+.I session
+(#693; a plain name, 1 to 64 of
+.BR [A\-Za\-z0\-9._\-] ,
+no leading
+.BR \- ,
+only with
+.BR \-\-answer ),
+once the answer is recorded (exit 0 only) dch tells that live session of
+the same socket dir
+.BI \(lq qid " answered: " ruling \(rq
+(LF and tab as spaces, runs of spaces one): its Claude Code through
+Claude's native inbox (that Claude's own peer record, by pid and session
+id; no reply address, the sender
+.BR "operator (dch xray)" ),
+its Codex by one
+.B \-\-say
+with no retry.
+The line gains
+.BR "\(dqtold\(dq:{\(dqsession\(dq:" ...,
+.BR "\(dqvia\(dq:\(dqnative\(dq" | "\(dqsay\(dq" ,
+.BR "\(dqok\(dq:" true|false
+and a
+.B why
+when false
+.RB ( no_inbox ,
+.BR failed ,
+.BR \-\-say 's
+codes,
+.BR no_agent ,
+.BR no_session );
+the exit stays the answer's.
+On
+.I host:name
+the host tells its own session.
 .TP
 .B define_command
 A ref that no transcript defines, from your own command:

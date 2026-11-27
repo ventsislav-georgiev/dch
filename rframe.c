@@ -614,6 +614,17 @@ xray_qid_ok(const char *s)
 	return n >= 1 && n <= 32 && !s[n] && s[0] != '-';
 }
 
+/* --notify's session (#693): the asker rule, 1 to 64 of [A-Za-z0-9._-],
+** never a leading '-'. */
+int
+xray_notify_ok(const char *s)
+{
+	size_t n = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	                     "0123456789._-");
+
+	return n >= 1 && n <= 64 && !s[n] && s[0] != '-';
+}
+
 /* --answer's text (#692): 1 to XRAY_ANSWER_MAX bytes of UTF-8, no C0, DEL
 ** or C1 but LF and tab: the operator's ruling, several lines allowed. */
 int
@@ -695,7 +706,8 @@ xray_since(const char *s, long long now)
 ** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
 ** (#322), --questions (#652), --schedules (#685), --since <time> (#516),
 ** --answer <qid> <text> (#692: the client's "-" read and put in its place;
-** qid CK_VALUE, the text CK_TEXT, both checked here) and --clear, but
+** qid CK_VALUE, the text CK_TEXT, both checked here; with it --notify
+** <session>, CK_VALUE, #693) and --clear, but
 ** --follow takes --tasks,
 ** --memory (#446) and --schedules (#686);
 ** --scope with --ref or --search (#501), --full
@@ -714,13 +726,13 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	                                   "--scope", "--budget-ms", "--search",
 	                                   "--tasks", "--memory", "--since",
 	                                   "--no-github", "--questions",
-	                                   "--schedules", "--answer" };
+	                                   "--schedules", "--answer", "--notify" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
 	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256,
 	       X_TASKS = 512, X_MEMORY = 1024, X_SINCE = 2048,
 	       X_NOGH = 4096, X_QUESTIONS = 8192, X_SCHEDULES = 16384,
-	       X_ANSWER = 32768 };
-	const char *val[12] = { NULL }, *qid = NULL, *text = NULL;
+	       X_ANSWER = 32768, X_NOTIFY = 65536 };
+	const char *val[12] = { NULL }, *qid = NULL, *text = NULL, *tell = NULL;
 	unsigned seen = 0, k, one;
 	int i;
 
@@ -732,9 +744,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 16 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 17 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 16)
+		if (k == 17)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -761,6 +773,13 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 			kind[i] = CK_VALUE;
 			text = argv[++i];
 			kind[i] = CK_TEXT;
+		}
+		else if (k == 16)
+		{
+			if (++i >= argc)
+				return ctl_no(why, cap, "--notify needs a value");
+			tell = argv[i];
+			kind[i] = CK_VALUE;
 		}
 	}
 	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
@@ -804,6 +823,10 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 		return ctl_no(why, cap, XRAY_QID_BAD);
 	if (text && !xray_answer_ok(text))
 		return ctl_no(why, cap, XRAY_ANSWER_BAD);
+	if (tell && !qid)
+		return ctl_no(why, cap, "--notify comes with --answer");
+	if (tell && !xray_notify_ok(tell))
+		return ctl_no(why, cap, XRAY_NOTIFY_BAD);
 	return seen & X_FOLLOW ? CTL_FOREVER | CTL_NOCAP : 0;
 }
 

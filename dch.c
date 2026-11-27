@@ -9787,6 +9787,9 @@ static const char *const say_why[] = {
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
 
+/* --answer --notify (#693): the last outcome, and no line printed */
+static int say_last = -1, say_quiet;
+
 static void
 say_print(const char *name, int c, int json)
 {
@@ -9795,6 +9798,9 @@ say_print(const char *name, int c, int json)
 	size_t cap = strlen(name) * 6 + 3;
 	char *q;
 
+	say_last = c;
+	if (say_quiet)
+		return;
 	if (!json)
 		printf(c == SAY_OK ? "%s: %s\n" : "%s: %s — %s\n", name, res,
 		       say_why[c]);
@@ -15627,8 +15633,70 @@ xr_tkc_row(const char *line, void *arg)
 	return fflush(k->o) != 0 || ferror(k->o);
 }
 
-/* --answer (#692): its qid and checked text, set once by xray_main */
-static const char *xr_ans_qid, *xr_ans_text;
+/* --answer (#692): its qid and checked text, set once by xray_main; and
+** --notify's session (#693) */
+static const char *xr_ans_qid, *xr_ans_text, *xr_ans_notify;
+
+/* --notify (#693), once the ruling is recorded: "<qid> answered: <ruling>"
+** (each LF and tab a space, runs of spaces one) to the session in this
+** socket dir: its Claude through Claude's native inbox, its Codex by one
+** --say, no retry. The "told" key into out. Best effort: nothing here
+** changes the answer's exit. */
+static void
+xr_tell(char *out, size_t cap)
+{
+	struct cmd_info ci;
+	struct crec r;
+	char path[1100], *t, *o;
+	const char *s, *via = NULL, *why = NULL;
+	size_t n = strlen(xr_ans_qid) + strlen(xr_ans_text) + 12;
+	long cx = 0;
+	int ag = 0;
+
+	if (!(t = malloc(n)))
+		why = "failed";
+	else
+	{
+		snprintf(t, n, "%s answered: %s", xr_ans_qid, xr_ans_text);
+		for (o = t, s = t; *s; s++)
+			if ((*s != ' ' && *s != '\n' && *s != '\t') || o[-1] != ' ')
+				*o++ = *s == '\n' || *s == '\t' ? ' ' : *s;
+		o[-(o[-1] == ' ')] = '\0';	/* the qid leads: never empty */
+		session_sock_path(xr_ans_notify, path, sizeof path);
+		if (cmd_query(path, &ci) != 0)
+			why = "no_session";
+		else
+		{
+			ag = ci.pid > 0 ? agent_front(ci.pid, &r, &cx) : 0;
+			cmd_info_free(&ci);
+		}
+	}
+	if (why)
+		;
+	else if (ag > 0)	/* Claude's own queue (OQ-214) */
+	{
+		via = "native";
+		ag = dch_bridge_notify(r.pid, r.sid, t);
+		why = ag == 0 ? NULL : ag == -1 ? "no_inbox" : "failed";
+	}
+	else if (ag < 0)
+	{
+		char *nm = (char *)(uintptr_t)xr_ans_notify;
+
+		via = "say";
+		say_quiet = 1;
+		(void)do_say_verb(&nm, 1, &t, 1, 1);
+		why = say_last == SAY_OK ? NULL : say_last < 0 ? "failed"
+		      : say_code[say_last];
+	}
+	else
+		why = "no_agent";
+	free(t);
+	snprintf(out, cap, ",\"told\":{\"session\":\"%s\"%s%s%s,\"ok\":%s%s%s%s}",
+	         xr_ans_notify, via ? ",\"via\":\"" : "", via ? via : "",
+	         via ? "\"" : "", why ? "false" : "true",
+	         why ? ",\"why\":\"" : "", why ? why : "", why ? "\"" : "");
+}
 
 /* answer_command with the qid as its last word and the text on its stdin,
 ** the session as questions_command sees it: one result line, the exit
@@ -15639,6 +15707,7 @@ xr_answer(struct xcmd_ctx *c, char *cmd, size_t cap)
 {
 	struct xcmd_result res;
 	const char *why = NULL, *detail = NULL;
+	char told[200] = "";
 	int set = dch_config_get("answer_command", cmd, cap), rc = 3;
 
 	if (set == 0 || (set > 0 && !cmd[0]))
@@ -15667,6 +15736,8 @@ xr_answer(struct xcmd_ctx *c, char *cmd, size_t cap)
 		why = "refused", detail = res.err;
 	else
 		why = "failed", detail = res.err[0] ? res.err : res.warn;
+	if (rc == 0 && xr_ans_notify)	/* before the line: --say forks */
+		xr_tell(told, sizeof told);
 	fputs(rc ? "{\"answered\":false" : "{\"answered\":true", stdout);
 	if (rc != 3)	/* failed names no id (the design's line) */
 	{
@@ -15678,7 +15749,8 @@ xr_answer(struct xcmd_ctx *c, char *cmd, size_t cap)
 		fprintf(stdout, ",\"why\":\"%s\",\"detail\":", why);
 		xr_put_str(stdout, detail);
 	}
-	fputs("}\n", stdout);	/* #693's "told" goes before this */
+	fputs(told, stdout);
+	fputs("}\n", stdout);
 	return fflush(stdout) == 0 && !ferror(stdout) ? rc : xr_out_exit(0);
 }
 
@@ -18176,6 +18248,7 @@ xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL, *search = NULL, *since = NULL, *qid = NULL;
+	const char *notify = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0, qi = 0;
 	int requests = 0, tasks = 0, memory = 0, nogh = 0, questions = 0;
 	int schedules = 0;
@@ -18222,7 +18295,8 @@ xray_main(int argc, char **argv)
 		                 : !strcmp(argv[k], "--budget-ms") ? &budget
 		                 : !strcmp(argv[k], "--chapter") ? &chapter
 		                 : !strcmp(argv[k], "--search") ? &search
-		                 : !strcmp(argv[k], "--since") ? &since : NULL;
+		                 : !strcmp(argv[k], "--since") ? &since
+		                 : !strcmp(argv[k], "--notify") ? &notify : NULL;
 
 		if (v && !*v && k + 1 < argc)
 			*v = argv[++k];	/* the next element, even "-x" (3.1) */
@@ -18357,6 +18431,18 @@ xray_main(int argc, char **argv)
 		          "only)");
 		return 2;
 	}
+	/* --notify (#693): --answer's, a plain session name */
+	if (notify && !qid)
+	{
+		fputs("dch: bad usage: --notify comes with --answer\n", stderr);
+		return 2;
+	}
+	if (notify && !xray_notify_ok(notify))
+	{
+		fputs("dch: " XRAY_NOTIFY_BAD "\n", stderr);
+		return 2;
+	}
+	xr_ans_notify = notify;
 	/* --answer (#692): one write, --json only */
 	if (qid && (follow || tasks || memory || questions || schedules || ref ||
 	            search || chapter || clear || since || scope || full ||
