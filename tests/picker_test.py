@@ -726,14 +726,14 @@ def groups():
 
     # a bad line is skipped, the later ones still count
     setcfg("group = %s = gr-api\ngroup = Long = (gr-api|%s)\n"
-           "group = = gr-api\ngroup = NoRe =\ngroup = gr-api\n"
+           "group = = gr-api\ngroup = gr-api\n"
            "group = E\x1b[31m = gr-api\n"
            "group = Empty = ^no-such-session$\ngroup = QA = -qa\n"
            % ("N" * 33, "x" * 250))
     s = wait_screen("pk13", lambda s: tabs(s) == ["Sessions", "QA",
                                                   "History"])
     check("#544: bad group lines (a name over 32 bytes, a regex over 255, "
-          "no name, no regex, no second =, a control character in the name) are skipped, the next applies",
+          "no name, no second =, a control character in the name) are skipped, the next applies",
           tabs(s) == ["Sessions", "QA", "History"], s.split("\n")[0])
     s = to_tab("pk13", "QA")
     check("#544: ... and the skipped lines' sessions go to the next match",
@@ -772,6 +772,39 @@ def groups():
           "own tabs (a prefix is not a repeat)",
           tabs(s) == ["Sessions", "Dog", "Do", "Dogs", "History"],
           s.split("\n")[0])
+
+    # #721: an empty (or blank) regex is a manual-only group: it matches no
+    # session by itself, --group-set places one, colour and rename work
+    def grp(n):
+        return {r["name"]: r.get("group") for r in
+                json.loads(dch("--ls-json").stdout)}.get(n)
+
+    for blank in ("", "   \t"):
+        setcfg("group = Man =%s\ngroup_color = Man = #112233\n" % blank)
+        r = dch("--group-set", "gr-web", "Man")
+        s = wait_screen("pk13", lambda s: "Man" in tabs(s))
+        check("#721: group = Man =%r: --group-set resolves it, Man tab "
+              "holds only gr-web" % blank, r.returncode == 0 and
+              grp("gr-web") == "Man" and grp("gr-api-qa") in (None, "") and
+              tabs(s) == ["Sessions", "Man", "History"], r.stderr,
+              s.split("\n")[0])
+        s = to_tab("pk13", "Man")
+        check("#721: ... an empty pattern captures no other session",
+              rows(s) == ["gr-web"], s)
+        dch("--group-set", "gr-web", "--auto")
+        s = wait_screen("pk13", lambda s: "Man" not in tabs(s))
+        check("#721: ... --auto empties it: no Man tab",
+              tabs(s) == ["Sessions", "History"], s.split("\n")[0])
+    setcfg("group = Man =\ngroup_color = Man = #112233\n")
+    dch("--group-set", "gr-web", "Man")
+    r = dch("--group-rename", "Man", "Hand")
+    with open(ENV["DCH_CONFIG"]) as f:
+        cfg = f.read()
+    check("#721: --group-rename renames the empty-pattern line, colour "
+          "line and the session's group", r.returncode == 0 and
+          cfg == "group = Hand =\ngroup_color = Hand = #112233\n" and
+          grp("gr-web") == "Hand", r.stdout, r.stderr, cfg)
+    dch("--group-set", "gr-web", "--auto")
 
     # a regex every name matches is plain text: it takes no session (#569)
     setcfg("group = All = .*\n")
@@ -826,7 +859,7 @@ def groups():
           "gr-api-qa" in rows(s), s)
 
     # no group line: sidekick_pattern, default -qa, is Sidekicks
-    setcfg("group = NoRe =\npicker_sort = name\n")
+    setcfg("group = NoEq\npicker_sort = name\n")
     s = wait_screen("pk13", lambda s: "Sidekicks" in tabs(s))
     check("#544: no valid group line: the default -qa makes Sidekicks",
           tabs(s) == ["Sessions", "Sidekicks", "History"],

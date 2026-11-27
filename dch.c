@@ -11218,7 +11218,8 @@ group_name_bad(const char *v, size_t nl)
 }
 
 /* A `group = <name> = <regex>` line's value: split at its first '=', both
-** trimmed; an empty name or regex, or one over its cap, is skipped. */
+** trimmed; an empty name, or a name or regex over its cap, is skipped. An
+** empty regex makes a manual-only group (#721): no pattern, only --group-set. */
 static void
 pk_group(void *arg, const char *v)
 {
@@ -11233,7 +11234,7 @@ pk_group(void *arg, const char *v)
 		;
 	for (r = eq + 1; *r == ' ' || *r == '\t'; r++)
 		;
-	if (!nl || nl >= sizeof gs->g->name || !*r ||
+	if (!nl || nl >= sizeof gs->g->name ||
 	    strlen(r) >= sizeof gs->g->pat)
 		return;
 	/* an unusable name, and a name an earlier group has */
@@ -11362,7 +11363,7 @@ pk_rebig(const char *p)
 
 /* The groups: the config's group lines, else sidekick_pattern (default
 ** "-qa"; empty: none) as one named Sidekicks; each pattern compiled,
-** one pk_rebig finds too big kept as text. */
+** one pk_rebig finds too big kept as text; an empty one is manual-only. */
 static void
 pk_groups(struct pkgrps *gs)
 {
@@ -11383,6 +11384,8 @@ pk_groups(struct pkgrps *gs)
 	for (k = 0; k < gs->n; k++)
 	{
 		g = &gs->g[k];
+		if (!*g->pat)
+			continue;	/* mode 0: manual only, nothing compiled */
 		g->mode = !pk_rebig(g->pat) && regcomp(&g->re, g->pat,
 		          REG_EXTENDED | REG_ICASE | REG_NOSUB) == 0 ? 1 : 2;
 		/* a regex every name matches splits nothing: text, as an
@@ -11402,7 +11405,7 @@ pk_ingroup(const struct pkgrp *g, const char *s)
 	const char *pat = g->pat;
 	size_t n = strlen(pat), k;
 
-	if (!s)
+	if (!s || !g->mode)
 		return 0;
 	if (g->mode == 1)
 		return regexec(&g->re, s, 0, NULL, 0) == 0;
