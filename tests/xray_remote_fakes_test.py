@@ -1302,6 +1302,51 @@ def test_schedules_187_exit():
         h.close()
 
 
+def test_schedules_187_tab_switch():
+    """#705: the view on the Schedules tab when the snapshot turns into a
+    shell's, or a new Claude's, stays up (it read the freed list), and the
+    departed cron is not shown"""
+    def sched(i):
+        return (json.dumps({"schema": 1, "block": "schedules",
+                            "session": "fk", "live": False}) + "\n" +
+                json.dumps({"schedule": {
+                    "id": i, "kind": "cron", "status": "pending",
+                    "cron": "*/10 * * * *", "human": "every 10 minutes",
+                    "prompt": "check CI", "recurring": True}}) + "\n" +
+                json.dumps({"done": True, "count": 1})).encode() + b"\n"
+    shell = SNAP.replace(b'"claude"', b'"none"').replace(
+        b"0000000000000001", b"")
+    new = SNAP.replace(b"0000000000000001", b"0000000000000002")
+    for tag, snap in (("shell", shell), ("new sid", new)):
+        h = Flaky()
+        h.v187 = True
+        h.schedules = [sched("aaaa0001"), sched("bbbb0002")]
+        hosts("q=127.0.0.1:%d" % h.port)
+        v = Pty([DCH, "--xray", "q:fk"])
+        try:
+            ok = tabbar(v, "Schedules 1")
+            for _ in range(12):
+                if "[Schedules" in screen_rows(v).get(2, ""):
+                    break
+                v.key(b"\033[Z", 0.5)
+            on = "[Schedules" in screen_rows(v).get(2, "")
+            h.fconn.sendall(frame(0x31, snap))
+            v.pump(1.5)
+            alive = v.reap() is None
+            body = " | ".join(screen_rows(v).get(k, "") for k in range(3, 9))
+            check("Schedules tab open, 1.187.0 host, claude -> %s: the view "
+                  "lives, the departed cron is not shown" % tag,
+                  ok and on and alive and "aaaa0001" not in body,
+                  (v.rc, body, v.out[-200:]))
+            if alive:
+                v.key(b"q", 0)
+                check("Schedules tab open, claude -> %s: q exits 0" % tag,
+                      v.exit() == 0, v.out[-80:])
+        finally:
+            v.close()
+            h.close()
+
+
 def main(port, part="a"):
     if part == "b":
         test_stop()
@@ -1319,6 +1364,7 @@ def main(port, part="a"):
     test_memory_fake()
     test_schedules_187()
     test_schedules_187_exit()
+    test_schedules_187_tab_switch()
 
 
 if __name__ == "__main__":
