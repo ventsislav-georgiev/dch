@@ -34,6 +34,10 @@ or meta skipped at once; 32 unnamed shells x 250 x 1.2 MB subagent files
 under 2 s (the per-call read budget). #711: each shell's "output" and
 "pgid"; --stop-shell ends a shell and its child, not the Claude or a
 sibling shell; no_shell, not_claude, no_session, --json, usage exit 2.
+#712 "subagents": running, done (tool_result), failed (is_error), a
+background agent done or killed by its <task-notification>; one ended
+before the 10-minute window and one with no meta left out; "row" off a
+fake agent panel (a cut description; two matching rows null); key order.
 
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
@@ -616,6 +620,135 @@ def main():
                         os.kill(q, signal.SIGKILL)
                     except OSError:
                         pass
+
+        # --- "subagents" (#712): from <sid>/subagents/ and the main ------
+        # transcript; "row" off a fake agent panel on the session's screen
+        sa = "tt-sa"
+        sap = spawn(sa, "/bin/sh", "-c",
+                    "printf '\\342\\217\\272 main\\n\\342\\227\\257 Explore  "
+                    "Read the docs\\n\\342\\227\\257 general-purpose  Fix the "
+                    "flaky te\\342\\200\\246\\n\\342\\227\\257 Explore  Twin\\n"
+                    "\\342\\227\\257 Explore  Twin\\n'; exec /bin/sleep 120")
+        sa_sid = "71271271-2712-7127-1271-271271271271"
+        now = int(time.time())
+
+        def iso2(t):
+            return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+        def jl2(o):
+            return json.dumps(o, separators=(",", ":")) + "\n"
+
+        def tres(tu, t, err=False, bg=False):
+            c = {"tool_use_id": tu, "type": "tool_result",
+                 "content": [{"type": "text", "text": "ok"}]}
+            if err:
+                c["is_error"] = True
+            return jl2({"type": "user", "timestamp": iso2(t),
+                        "message": {"role": "user", "content": [c]},
+                        "toolUseResult": {"status": "async_launched",
+                                          "isAsync": True} if bg
+                        else {"status": "completed"}})
+
+        def note(aid, tu, t, status):
+            return jl2({"type": "queue-operation", "operation": "enqueue",
+                        "timestamp": iso2(t), "sessionId": sa_sid,
+                        "content": "<task-notification>\n<task-id>%s"
+                        "</task-id>\n<tool-use-id>%s</tool-use-id>\n"
+                        "<status>%s</status>\n<summary>s</summary>\n"
+                        "</task-notification>" % (aid, tu, status)})
+
+        satp = transcript(sa_sid)
+        sad = os.path.join(os.path.dirname(satp), sa_sid, "subagents")
+        os.makedirs(sad)
+
+        def agent(aid, typ, desc, start, mt, meta=True):
+            if meta:
+                with open(os.path.join(sad, "agent-%s.meta.json" % aid),
+                          "w") as f:
+                    json.dump({"agentType": typ, "description": desc,
+                               "isBuiltIn": True, "spawnDepth": 1,
+                               "toolUseId": "toolu_" + aid}, f)
+            p = os.path.join(sad, "agent-%s.jsonl" % aid)
+            with open(p, "w") as f:
+                f.write(jl2({"type": "user", "isSidechain": True,
+                             "agentId": aid, "timestamp": iso2(start)})
+                        if start else "{}\n")
+            os.utime(p, (mt, mt))
+
+        agent("aRUN", "Explore", "Read the docs", now - 60, now)
+        agent("aDONE", "general-purpose", "Fix the flaky tests", now - 120,
+              now - 40)
+        agent("aERR", "Explore", "Break it", None, now - 40)
+        agent("aBG", "Explore", "Background job", now - 200, now - 25)
+        agent("aKILL", "Explore", "Killed job", now - 210, now - 25)
+        agent("aTW1", "Explore", "Twin", now - 300, now)
+        agent("aTW2", "Explore", "Twin", now - 310, now)
+        agent("aOLD", "Explore", "Read the docs", now - 4000, now - 3600)
+        agent("aNOMETA", "Explore", "x", now - 50, now, meta=False)
+        with open(satp, "w") as f:
+            f.write(tres("toolu_aOLD", now - 3590))
+            f.write(tres("toolu_aBG", now - 200, bg=True))
+            f.write(tres("toolu_aKILL", now - 210, bg=True))
+            f.write(tres("toolu_aDONE", now - 30))
+            f.write(tres("toolu_aERR", now - 30, err=True))
+            f.write(note("aBG", "toolu_aBG", now - 20, "completed"))
+            f.write(note("aKILL", "toolu_aKILL", now - 20, "killed"))
+        record(sap, sa_sid)
+        lite = run("--read", sa).returncode == 3
+        until(lambda: lite or field(sa, "agents") == 4)
+        got = field(sa, "subagents")
+        ids = [s.get("id") for s in got] if isinstance(got, list) else got
+        check("subagents: running ones and those ended in 10 min, newest "
+              "first; one older, one with no meta left out (%s)" % ids,
+              ids == ["aERR", "aRUN", "aDONE", "aBG", "aKILL", "aTW1",
+                      "aTW2"])
+        g = {s["id"]: s for s in got} if isinstance(got, list) else {}
+
+        def want(aid, typ, desc, start, state, row):
+            return {"id": aid, "type": typ, "description": desc,
+                    "started": start, "state": state,
+                    "row": None if lite else row}
+        check("running: no result yet, its panel row (%s)" % g.get("aRUN"),
+              g.get("aRUN") == want("aRUN", "Explore", "Read the docs",
+                                    now - 60, "running", 0))
+        check("done: its tool_result; row by a cut description (%s)"
+              % g.get("aDONE"),
+              g.get("aDONE") == want("aDONE", "general-purpose",
+                                     "Fix the flaky tests", now - 120,
+                                     "done", 1))
+        fs = g.get("aERR", {}).get("started")
+        check("failed: is_error; no first-line timestamp: started from the "
+              "file (%s)" % g.get("aERR"),
+              isinstance(fs, int) and abs(fs - now) < 60 and
+              dict(g.get("aERR", {}), started=0) ==
+              want("aERR", "Explore", "Break it", 0, "failed", None))
+        check("background: done by its <task-notification>, the launch "
+              "result no end (%s)" % g.get("aBG"),
+              g.get("aBG") == want("aBG", "Explore", "Background job",
+                                   now - 200, "done", None))
+        check("background killed: failed (%s)" % g.get("aKILL"),
+              g.get("aKILL") == want("aKILL", "Explore", "Killed job",
+                                     now - 210, "failed", None))
+        check("two panel rows match: row null (%s)" % g.get("aTW1"),
+              g.get("aTW1", {}).get("row", 0) is None and
+              g.get("aTW2", {}).get("row", 0) is None)
+        keys = []
+        for r in json.loads(run("--ls-json").stdout,
+                            object_pairs_hook=lambda kv: kv):
+            if dict(r).get("name") == sa:
+                rk = [k for k, _ in r]
+                sub = dict(r).get("subagents") or [[]]
+                keys = rk[rk.index("shells"):rk.index("shells") + 2] + \
+                    [k for k, _ in sub[0]]
+        check("keys: subagents right after shells; id, type, description, "
+              "started, state, row (%s)" % keys,
+              keys == ["shells", "subagents", "id", "type", "description",
+                       "started", "state", "row"])
+        check("a non-Claude row: no subagents key",
+              field(b, "subagents") == MISSING)
+        os.unlink(os.path.join(sessdir, "%d.json" % sap))
+        check("its record gone: no subagents key",
+              field(sa, "subagents") == MISSING)
 
         # --- two Claudes under one session --------------------------------
         c = "tt-two"
