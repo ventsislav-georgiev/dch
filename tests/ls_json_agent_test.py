@@ -155,6 +155,19 @@ def main():
         check("a Codex behind 70 sibling jobs: --stop sees it (agent codex)",
               '"agent":"codex"' in r.stdout, r.stdout)
 
+        # #682: a Codex behind 520 jobs (macOS lists children newest first)
+        up2 = os.path.join(tmp, "many2.up")
+        m2 = spawn("many2", "sh", "-c", "codex </dev/tty & sleep 1; "
+                   "i=0; while [ $i -lt 520 ]; do sleep 60 & "
+                   "i=$((i+1)); done; : > %s; wait" % up2,
+                   extra={"FAKE_CODEX_TUI": ""})
+        check("the 520 jobs run", until(lambda: os.path.exists(up2)))
+        check("a Codex behind 520 sibling jobs: codex (--ls-json)",
+              rows().get(m2, {}).get("agent") == "codex", rows().get(m2))
+        r = run("--stop", m2, "--json")
+        check("a Codex behind 520 sibling jobs: --stop sees it (agent codex)",
+              '"agent":"codex"' in r.stdout, r.stdout)
+
         rs = rows()
         bad = [n for n in names
                if n in rs and list(rs[n])[-2:] != ["agent", "cwd"]]
