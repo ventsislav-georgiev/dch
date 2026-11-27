@@ -45,7 +45,7 @@ offsets or a same-ms same-type tie give null; key order.
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
 import calendar
-import json, os, shutil, signal, stat, subprocess, sys, tempfile, time
+import json, shlex, os, shutil, signal, stat, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -244,19 +244,21 @@ def main():
                    "        if f.endswith('.json') and f not in seen:\n"
                    "            seen.add(f); j=json.load(open(c+'/'+f))\n"
                    "            p=sp.Popen(j['argv'],stdout=open(j['out'],'ab'),"
-                   "stdin=sp.DEVNULL,stderr=sp.DEVNULL)\n"
+                   "stdin=sp.DEVNULL,stderr=sp.DEVNULL,"
+                   "start_new_session=bool(j.get('new')))\n"
                    "            open(c+'/'+f[:-5]+'.pid','w').write(str(p.pid))\n"
                    "    time.sleep(0.05)\n", ctl)
         sh_sid = "48148148-1481-4814-8148-148148148148"
         record(hp, sh_sid)
         shpids = []
 
-        def shell(key, cmd, sid=sh_sid, out=None):
+        def shell(key, cmd, sid=sh_sid, out=None, new=False):
             d = os.path.join(tmp, "claude-%d" % os.getuid(), "-tmp-proj", sid,
                              "tasks")
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(ctl, key + ".tmp"), "w") as f:
                 json.dump({"out": out or os.path.join(d, key + ".output"),
+                           "new": new,
                            "argv": ["/bin/sh", "-c", "true && eval " + cmd +
                                     " < /dev/null && pwd -P >| /dev/null"]},
                           f)
@@ -610,6 +612,43 @@ def main():
                   run("--stop-shell", h).returncode == 2 and
                   run("--stop-shell", h, "a", "b").returncode == 2 and
                   run("--stop-shell", h, "a", "-x").returncode == 2)
+            check("--stop-shell usage: -x a and 4 positionals are exit 2 (#718)",
+                  run("--stop-shell", h, "-x", "a").returncode == 2 and
+                  run("--stop-shell", h, "a", "b", "c", "d").returncode == 2)
+            # run inside the shell it stops: not signalled itself, prints (#718)
+            ff = os.path.join(tmp, "self.json")
+            ps = shell("bsh21self", shlex.quote(
+                "trap '' TERM; (trap '' TERM; sleep 120.0718) & sleep 1; "
+                "%s --stop-shell %s bsh21self --json > %s; sleep 120.0718"
+                % (shlex.quote(DCH), h, shlex.quote(ff))))
+            kk = [int(k) for k in subprocess.run(
+                ["/usr/bin/pgrep", "-P", str(ps)], capture_output=True,
+                text=True).stdout.split()]
+            until(lambda: os.path.exists(ff) and os.path.getsize(ff), 10)
+            try:
+                j = json.load(open(ff))
+            except (OSError, ValueError):
+                j = None
+            check("--stop-shell run inside the shell it stops still prints "
+                  "its result (%r)" % j, j == {
+                      "name": h, "id": "bsh21self", "result": "ok",
+                      "reason": ""})
+            check("  ... and that shell is gone", until(
+                lambda: not any(alive(q) for q in [ps] + kk), 5))
+            # a TERM-ignoring shell that keeps starting sleeps: none left (#718)
+            pl = shell("bsh22loop", shlex.quote(
+                "trap '' TERM; while :; do sleep 100.0718 & sleep 0.2; done"),
+                       new=True)
+            pg = os.getpgid(pl)
+            r = run("--stop-shell", h, "bsh22loop", "--json")
+            left = subprocess.run(["/usr/bin/pgrep", "-g", str(pg)],
+                                  capture_output=True, text=True).stdout.split()
+            left = [q for q in left if alive(int(q))]
+            for q in left:
+                os.kill(int(q), 9)
+            check("--stop-shell: nothing the shell started meanwhile "
+                  "survives, ok (%r, left %r)" % (r.stdout, left),
+                  '"result":"ok"' in r.stdout and not left)
             os.unlink(os.path.join(sessdir, "%d.json" % hp))
             check("its record gone: no shells key", field(h, "shells") ==
                   MISSING)

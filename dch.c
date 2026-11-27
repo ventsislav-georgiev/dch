@@ -11506,6 +11506,37 @@ pk_shells(const char *name)
 	return n;
 }
 
+/* 1 when pid is still the process first read at start time t: a zombie
+** (dead, not yet reaped by its parent) is gone. */
+static int
+ss_alive(long pid, time_t t)
+{
+	if (proc_started(pid) != t)
+		return 0;
+#ifdef __APPLE__
+	{
+		struct kinfo_proc kp;
+		size_t len = sizeof kp;
+		int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+
+		return sysctl(mib, 4, &kp, &len, NULL, 0) == 0 && len &&
+		       kp.kp_proc.p_stat != SZOMB;
+	}
+#else
+	{
+		char p[64], b[512], *rp;
+		FILE *f;
+
+		snprintf(p, sizeof p, "/proc/%ld/stat", pid);
+		if (!(f = fopen(p, "r")))
+			return 0;
+		rp = fgets(b, sizeof b, f) ? strrchr(b, ')') : NULL;
+		fclose(f);
+		return rp && rp[1] == ' ' && rp[2] != 'Z';
+	}
+#endif
+}
+
 /* `--stop-shell <session> <id> [--json]` (#711): SIGTERM the tree of the
 ** shell --ls-json lists as <id> (the shell and every descendant, taken
 ** before any signal), then SIGKILL what of it is left after 2 s. Each pid
@@ -11521,12 +11552,13 @@ stop_shell_main(int argc, char **argv)
 	long tree[PROC_TREE_MAX];
 	time_t ts[PROC_TREE_MAX];
 	const char *a[2] = {NULL, NULL}, *why = NULL;
-	int json = 0, na = 0, ns, n = 0, i, k, w, live, sig;
+	long pg = 0;
+	int json = 0, na = 0, ns, n = 0, i, k, w, live = 0, sig;
 
 	for (i = 0; i < argc; i++)
 		if (strcmp(argv[i], "--json") == 0)
 			json = 1;
-		else if (argv[i][0] == '-' || !argv[i][0] || na == 2)
+		else if (argv[i][0] == '-' || !argv[i][0] || na >= 2)
 			na = 3;
 		else
 			a[na++] = argv[i];
@@ -11559,9 +11591,11 @@ stop_shell_main(int argc, char **argv)
 			{
 				n = proc_tree(sh[i].pid, tree, PROC_TREE_MAX);
 				for (k = 0; k < n; k++)
-					ts[k] = tree[k] == c.pid || tree[k] == ci.pid
+					ts[k] = tree[k] == c.pid || tree[k] == ci.pid ||
+					        tree[k] == (long)getpid()
 					        ? -1 : proc_started(tree[k]);
-				if (ts[0] != sh[i].t)
+				pg = sh[i].pgid == sh[i].pid ? sh[i].pgid : 0;
+				if (n < 1 || ts[0] != sh[i].t)
 					why = "changed", n = 0;
 			}
 		}
@@ -11572,17 +11606,33 @@ stop_shell_main(int argc, char **argv)
 	{
 		sig = w == 0 ? SIGTERM : w == 40 ? SIGKILL : 0;
 		for (k = live = 0; k < n; k++)
-			if (ts[k] >= 0 && proc_started(tree[k]) == ts[k])
+			if (ts[k] >= 0 && ss_alive(tree[k], ts[k]))
 			{
 				live = 1;
 				if (sig)
 					(void)kill((pid_t)tree[k], sig);
 			}
+		/* the shell leads its group: what it started since the walk is
+		** in it. Not the Claude's, the program's or our own group. */
+		if (sig && live && pg > 1 && pg != getpgid((pid_t)c.pid) &&
+		    pg != getpgid((pid_t)ci.pid) && pg != getpgrp())
+			(void)kill((pid_t)-pg, sig);
 		if (!live)
 			break;
 		if (w < 40)
 			usleep(50000);
 	}
+	/* SIGKILL is not instant: up to 1 s for the collected pids to go */
+	for (w = 0; n && !why && w < 20; w++)
+	{
+		for (k = live = 0; k < n; k++)
+			live |= ts[k] >= 0 && ss_alive(tree[k], ts[k]);
+		if (!live)
+			break;
+		usleep(50000);
+	}
+	if (n && !why && live)
+		why = "survived";
 	if (json)
 	{
 		fputs("{\"name\":", stdout);
