@@ -629,7 +629,7 @@ error (`--history` and `--agent-list` take their own).
 | `cwd_gone` | revive | The recorded cwd no longer exists. |
 | `live_sid` | revive | A live Claude already runs on the record's Claude id (`session_id`): in a live session (`detail` names it), or outside any (`claude pid N`). `--all`: `skipped`; by name, with or without `--as`: `failed`. |
 | `dup_sid` | revive | `--all`, `skipped`: a newer record with the same Claude id is revived in this run (`detail` names the skipped record file). |
-| `not_utf8` | revive | The recorded command, cwd or Claude launch had bytes that are not UTF-8, stored as U+FFFD: it would run something else. `--history` still lists it; the detail gives `claude --resume <id>`. |
+| `not_utf8` | revive | The recorded command, cwd or Claude launch had bytes that are not UTF-8, stored as U+FFFD: it would run something else. `--history` still lists it; the detail gives `claude --resume <id>` (`codex resume <id>` for a Codex record). |
 | `not_started` | revive | The session did not start (the program cannot be executed: the reason is on stderr). |
 | `launch_unknown` | revive | Revived, but its Claude was not resumed: the launch command is unknown. |
 
@@ -642,6 +642,13 @@ an error before detection such as `old_master`, `respawn_pending`,
 left out. `--restart`'s `self` skip carries the agent, as its detection runs
 first. Plain
 `--restart` and every other verb are unchanged.
+
+`--revive --json` final lines (by name, `--as`, `--all`; ok, failed and skipped)
+carry the same key, the record's agent, just before the closing `"running"`:
+`"codex"` for a Codex record (a thread id, no Claude id), `"claude"` for a Claude
+one, `null` for a plain shell record or an error before a record is read
+(`no_history`, `ambiguous`). Always present. `session_id` is the Codex thread
+id on a Codex line: pick the resume command from `agent`.
 
 A typical agent loop:
 

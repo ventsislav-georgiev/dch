@@ -12299,13 +12299,29 @@ rv_running(const char *as, int argv)
 	return on;
 }
 
-/* --revive's final --json line without a record to revive (#182). */
+/* The record's agent for --revive's "agent" key: a Codex record has a
+** thread id and no Claude id, a Claude one a session id or launch; NULL
+** for a plain shell (#676). */
+static const char *
+rv_agent(const struct hrec *r)
+{
+	return r->sid[0] || r->launch ? "claude" : r->cx[0] ? "codex" : NULL;
+}
+
+/* --revive's final --json line without a record to revive (#182); ag the
+** record's agent, NULL when none was read. */
 static void
 rv_json_final(const char *name, const char *as, const char *res,
               const char *code, const char *detail, const char *sid,
-              int argv)
+              int argv, const char *ag)
 {
 	json_final_open(name, "as", as, res, code, detail, sid);
+	/* "running" stays the last key (#182) */
+	fputs(",\"agent\":", stdout);
+	if (ag)
+		printf("\"%s\"", ag);
+	else
+		fputs("null", stdout);
 	printf(",\"running\":%s}\n", rv_running(as, argv) ? "true" : "false");
 	fflush(stdout);
 }
@@ -12325,7 +12341,7 @@ rv_say(const struct hrec *r, int json, const char *res, const char *code,
 	if (json)
 		rv_json_final(r->name, r->as, res, code, d,
 		              r->sid[0] ? r->sid : r->cx, r->mode == RV_ARGV ||
-		              r->mode == RV_CODEX);
+		              r->mode == RV_CODEX, rv_agent(r));
 	else
 		printf("%s: %s\n", r->name, d);
 	fflush(stdout);
@@ -12383,7 +12399,8 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json,
 		rv_say(r, json, "failed", "not_utf8", "NOT revived — its %s had "
 		       "bytes that are not UTF-8, recorded as U+FFFD: it would run "
 		       "something else%s%s", lossy, r->sid[0] ? "; resume by "
-		       "hand: claude --resume " : "", r->sid);
+		       "hand: claude --resume " : r->cx[0] ? "; resume by hand: "
+		       "codex resume " : "", r->sid[0] ? r->sid : r->cx);
 		return -1;
 	}
 	if (chdir(r->cwd) < 0)
@@ -12941,7 +12958,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		fprintf(stderr, "dch: %s\n", d);
 		if (json)
 			rv_json_final(name, as ? as : name, "failed", *why == 'a'
-			              ? "ambiguous" : "no_history", d, "", 0);
+			              ? "ambiguous" : "no_history", d, "", 0, NULL);
 		hrec_free(r, n);
 		return 1;
 	}
@@ -13114,7 +13131,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			rv_json_final(name, as ? as : name, "failed",
 			              seenlive ? "live" : "no_history", seenlive
 			              ? "session is live"
-			              : "no history for this session", "", 0);
+			              : "no history for this session", "", 0, NULL);
 		hrec_free(r, n);
 		free(held.v);
 		return all ? 0 : 1;

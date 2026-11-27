@@ -128,7 +128,7 @@ def main():
 
     def launches():
         try:
-            lines = open(log).read().splitlines()
+            lines = open(log, errors="replace").read().splitlines()
         except OSError:
             return []
         return [l.split(SEP) for l in lines]
@@ -230,6 +230,9 @@ def main():
         check("--json: ok with the thread as session_id", fin and
               fin[-1]["result"] == "ok" and fin[-1]["session_id"] == T2,
               r.stdout)
+        check("#676 --json: a Codex record says \"agent\":\"codex\", "
+              "running last", fin and fin[-1].get("agent") == "codex" and
+              list(fin[-1])[-1] == "running", r.stdout)
         if got:
             os.kill(int(got[0]), signal.SIGKILL)
         ended("cx2")
@@ -280,6 +283,32 @@ def main():
         r5 = until(lambda: (rec("cx5") or {}).get("end") and rec("cx5"), 15)
         check("a shell printing `codex resume <id>`: no codex object",
               r5 and "codex" not in r5, r5)
+
+        # 8. (#676) --revive --json says the agent; a not_utf8 Codex
+        # record names `codex resume <id>`, not claude
+        r = dch("--revive", "nosuch676", "--json")
+        fin = [json.loads(l) for l in r.stdout.splitlines() if '"result"' in l]
+        check("#676 no_history: \"agent\":null", fin and
+              fin[-1].get("reason") == "no_history" and
+              "agent" in fin[-1] and fin[-1]["agent"] is None, r.stdout)
+        got = spawn("cx6", [fake, "x\udcffy"],
+                    {"CODEX_HOME": cxhome, "FAKE_CODEX_TID": T1,
+                     "FAKE_CODEX_SNAP": "1"})
+        until(lambda: ((rec("cx6") or {}).get("codex") or {})
+              .get("thread_id"), 10)
+        if got:
+            os.kill(int(got[0]), signal.SIGKILL)
+        ended("cx6")
+        r = dch("--revive", "cx6", "--json")
+        fin = [json.loads(l) for l in r.stdout.splitlines() if '"result"' in l]
+        check("#676 not_utf8 Codex record: agent codex, detail says "
+              "`codex resume <id>`", fin and fin[-1].get("reason") ==
+              "not_utf8" and fin[-1]["agent"] == "codex" and
+              fin[-1]["detail"].endswith("codex resume " + T1) and
+              "claude" not in fin[-1]["detail"], r.stdout)
+        r = dch("--revive", "cx6")
+        check("#676 not_utf8 Codex record, text: same hint",
+              ("codex resume " + T1) in r.stdout, r.stdout)
     finally:
         for n in names:
             dch("-k", n)
