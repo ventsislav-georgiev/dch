@@ -873,12 +873,17 @@ def main():
             check("#716: usage: dch --group-rename %s exits 2" %
                   " ".join(args), r.returncode == 2 and r.stdout == "" and
                   "usage: dch --group-rename" in r.stderr)
+        ga, gb = (open(path(n, ".group")).read() for n in ("rn-a", "rn-b"))
         for old, new, why in (("Nope", "Core", "no_group"),
                               ("API", "QA", "exists"), ("API", "qa", "exists"),
                               ("API", "", "bad_name"),
                               ("API", "x" * 33, "bad_name"),
                               ("API", "a=b", "bad_name"),
                               ("API", "a\nb", "bad_name"),
+                              ("API", "Core\tX", "bad_name"),
+                              ("API", "Co\x1bre", "bad_name"),
+                              ("API", " Core", "bad_name"),
+                              ("API", "Core ", "bad_name"),
                               ("API", "sessions", "bad_name"),
                               ("API", "History", "bad_name")):
             rc, o, _ = rn(old, new)
@@ -886,7 +891,9 @@ def main():
                   "untouched" % (old, new[:6], why),
                   rc == 1 and o == dict(old=old, new=new, moved=0,
                                         result="failed", reason=why) and
-                  open(cfg).read() == raw, o)
+                  open(cfg).read() == raw and
+                  open(path("rn-a", ".group")).read() == ga and
+                  open(path("rn-b", ".group")).read() == gb, o)
         rc, o, _ = rn("api", "Core")
         got = open(cfg).read()
         check("#716: --group-rename api Core: moved 2 (+ the others), ok", rc == 0 and
@@ -917,6 +924,22 @@ def main():
         r = run("--group-rename", "Nope", "X")
         check("#716: text failure: '<old>: failed — …', exit 1",
               r.returncode == 1 and r.stdout.startswith("Nope: failed — "))
+        # --- #720: a live DCH_NO_HISTORY session keeps its .group ---
+        names.append("nh1")
+        subprocess.run([DCH, "--spawn", "nh1", "sleep", "600"],
+                       capture_output=True, check=True,
+                       env=dict(os.environ, DCH_NO_HISTORY="1"))
+        rc, o, _ = gs("nh1", "API")
+        spawn("nh2", "sleep", "600")
+        w = lsrow("nh1") or {}
+        check("#720: a no-history live session keeps its .group through "
+              "the next prune", rc == 0 and w.get("group") == "API" and
+              w.get("group_manual") == "API" and
+              os.path.exists(path("nh1", ".group")), (rc, w))
+        run("-k", "nh1")
+        spawn("nh3", "sleep", "600")
+        check("#720: once it is gone, a later prune drops its .group",
+              not os.path.exists(path("nh1", ".group")))
         for n in ("rn-a", "rn-b", "rn-c"):
             run("-k", n)
         os.unlink(cfg)
