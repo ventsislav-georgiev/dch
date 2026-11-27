@@ -140,7 +140,7 @@ every name, or one whose repeats multiply past 1024 copies of an atom
 (`a+++++++++++`, `(x{0,99}){0,99}`), is matched as plain text. A live
 session goes to the group set for it by hand (`dch --group-set`, `dch --spawn
 --group`; while the config still has that group), else to the first group whose regex matches its name, alias or harness title (the Claude or Codex
-name the row shows), else to Sessions. A line with an empty name or regex, or
+name the row shows), else to Sessions. An empty regex (`group = <name> =`) makes a manual-only group: a tab and a colour like any other, but no session matches it, only `dch --group-set` places one in it. A line with an empty name, or
 one over its cap, a name of Sessions or History or one an earlier
 group has (either, any case), is skipped and the others still apply; at most 8 groups,
 the lines after the 8th ignored. With no valid group line, `sidekick_pattern`
@@ -321,7 +321,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.198.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.199.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
