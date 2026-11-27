@@ -4109,7 +4109,7 @@ xv_row_sched(const struct xv *v, const struct xv_task *t, int on)
 	static const char *const mk[2][3] = { { "o ", "x ", "- " },
 		{ "\xe2\x97\x8b ", "\xe2\x9c\x93 ", "\xe2\x9c\x97 " } };
 	long long now = (long long)time(NULL);
-	char x[300], w[40], d[16];
+	char x[300], w[40], d[24];
 	int xw;
 
 	w[0] = '\0';
