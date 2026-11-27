@@ -635,6 +635,23 @@ def main():
                       "reason": ""})
             check("  ... and that shell is gone", until(
                 lambda: not any(alive(q) for q in [ps] + kk), 5))
+            # a shell with its own fd 1 moved for the while (bash's `{ …; } >
+            # f`, dash's `cmd > f`): only its earlier child shows the
+            # .output, yet the shell is listed and stopped (#718)
+            pm = shell("bsh21moved", shlex.quote(
+                "sleep 120.0718 & { sleep 120.0718; } > /dev/null"))
+            km = [int(k) for k in subprocess.run(
+                ["/usr/bin/pgrep", "-P", str(pm)], capture_output=True,
+                text=True).stdout.split()]
+            check("a shell running '{ ...; } > f' is listed as itself, not "
+                  "its child (#718)", until(lambda: [
+                      x.get("pid") for x in field(h, "shells") or []
+                      if x.get("id") == "bsh21moved"] == [pm], 5))
+            r = run("--stop-shell", h, "bsh21moved", "--json")
+            check("  ... and --stop-shell ends it and its children (%r)"
+                  % r.stdout, json.loads(r.stdout or "{}").get("result") ==
+                  "ok" and until(lambda: not any(alive(q)
+                                                 for q in [pm] + km), 5))
             # a TERM-ignoring shell that keeps starting sleeps: none left (#718)
             pl = shell("bsh22loop", shlex.quote(
                 "trap '' TERM; while :; do sleep 100.0718 & sleep 0.2; done"),

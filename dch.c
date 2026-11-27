@@ -7430,8 +7430,8 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 /* ,"shells" (#481): the Bash tool shells of the Claude at `pid` whose
 ** session is `sid`, newest first. Claude Code runs each with fd 1 on
 ** <tmp>/claude-<uid>/<project>/<sid>/tasks/<id>.output; the shell's own
-** children inherit that fd, so the shallowest process per id (breadth
-** first) is the shell. The kernel shows foreground and background shells
+** children inherit that fd, so the Claude's child above the shallowest
+** process per id (breadth first) is the shell. The kernel shows foreground and background shells
 ** alike (each a session leader with stdin /dev/null): owner, description
 ** and "background" come from the transcript at `tp` (#482), NULL none.
 ** claude_shells walks them into sh[64] (show: commands too), put_shells
@@ -7442,7 +7442,7 @@ static int
 claude_shells(long pid, const char *sid, struct shl *sh, int show)
 {
 	struct shl x;
-	long tree[PROC_TREE_MAX];
+	long tree[PROC_TREE_MAX], pp;
 	char tail[128], path[PATH_MAX], **v;
 	const char *b;
 	int n = proc_tree(pid, tree, PROC_TREE_MAX), ns = 0, i, j;
@@ -7474,11 +7474,16 @@ claude_shells(long pid, const char *sid, struct shl *sh, int show)
 			continue;
 		snprintf(x.id, sizeof x.id, "%.*s",
 		         (int)(pl - (size_t)(b - path) - 7), b);
+		/* the shell is the Claude's child: one running `cmd > f` has fd 1
+		** on f for the while (dash moves it before the fork, bash for
+		** `{ ...; } > f`), and only a child started before shows (#718) */
+		x.pid = tree[i];
+		for (j = 0; j < n && (pp = proc_ppid(x.pid)) > 1 && pp != pid; j++)
+			x.pid = pp;
 		for (j = 0; j < ns && strcmp(sh[j].id, x.id); j++)
 			;
-		if (j < ns || (x.t = proc_started(tree[i])) < 0)
+		if (j < ns || (x.t = proc_started(x.pid)) < 0)
 			continue;	/* a shell's child, or gone */
-		x.pid = tree[i];
 		x.pgid = (long)getpgid((pid_t)x.pid);
 		snprintf(x.out, sizeof x.out, "%s", path);
 		x.cmd[0] = '\0';
