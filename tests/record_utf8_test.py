@@ -123,7 +123,8 @@ def main():
               r.returncode == 1 and any(
                   e.get("result") == "failed" and
                   e.get("reason") == "not_utf8" and
-                  e.get("session_id") == sid for e in o))
+                  e.get("session_id") == sid and
+                  e.get("agent") == "claude" for e in o))
         check("...and the record is still there", listed("bad", sid))
 
         # --- an older master's raw bytes in argv and cwd -----------------------

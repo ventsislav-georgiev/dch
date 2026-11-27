@@ -963,7 +963,7 @@ def main(part):
                       {"name": "nosuch", "as": "nosuch", "result": "failed",
                        "reason": "no_history", "detail":
                        "no history for this session", "session_id": "",
-                       "running": False}])
+                       "agent": None, "running": False}])
             r = run("--revive", "jplain", "--as", "jnew", "--json", env=jenv)
             names.append(("jnew", jenv))
             check("--revive <n> --as <new> --json: starting, then ok with \"as\"",
@@ -971,7 +971,7 @@ def main(part):
                       {"name": "jplain", "phase": "starting"},
                       {"name": "jplain", "as": "jnew", "result": "ok",
                        "reason": "", "detail": "revived as jnew in %s" % proj,
-                       "session_id": "", "running": False}])
+                       "session_id": "", "agent": None, "running": False}])
             r = run("--revive", "--all", "--json", env=jenv, timeout=120)
             names.extend([("jbad", jenv), ("jcl", jenv)])
             print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
@@ -996,6 +996,11 @@ def main(part):
                   fin["jcl"]["result"] == "ok" and
                   fin["jcl"]["reason"] == ("no_screen" if lite else "") and
                   ("resume message sent" in fin["jcl"]["detail"]) != lite)
+            check("#676 \"agent\": claude for the Claude record, null for "
+                  "the plain program that never started",
+                  fin.get("jcl", {}).get("agent") == "claude" and
+                  "agent" in fin.get("jbad", {}) and
+                  fin["jbad"]["agent"] is None)
             check("...\"running\" (#182), the last key: true for the agent, "
                   "false for the program that never started",
                   all(list(fin.get(n, {}))[-1:] == ["running"] for n in fin) and
@@ -1054,7 +1059,8 @@ def main(part):
                       {"name": "nmcl", "phase": "starting"},
                       {"name": "nmcl", "as": "nmcl2", "result": "ok",
                        "reason": "", "detail": nm_detail("nmcl2", nids["nmcl"]),
-                       "session_id": nids["nmcl"], "running": True}])
+                       "session_id": nids["nmcl"], "agent": "claude",
+                       "running": True}])
             check("...its record has the agent at once (#056)",
                   ((rec("nmcl2", recdir5) or {}).get("agent") or {})
                   .get("session_id") == nids["nmcl"])
