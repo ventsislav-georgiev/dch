@@ -17215,7 +17215,7 @@ xr_scheds_durable(struct xr_scheds *s, const char *cwd, char *warn, size_t cap)
 	    (fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
 		return;
 	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-	    st.st_size <= SCH_FILE_MAX && (buf = malloc((size_t)st.st_size + 1)))
+	    st.st_size <= SCH_FILE_MAX && (buf = calloc(1, (size_t)st.st_size + 1)))
 		while (n < (size_t)st.st_size &&
 		       (got = read(fd, buf + n, (size_t)st.st_size - n)) > 0)
 			n += (size_t)got;
