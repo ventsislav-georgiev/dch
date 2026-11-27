@@ -218,6 +218,27 @@ main(void)
 	      "claude --name x --model opus");
 	check("empty", "", "");
 
+	/* #701: --codex-config K=V replaces the recorded -c K; last one wins */
+	{
+		char *in[] = { "codex", "-c", "foo=1", "-cbar=1", "--config=foo=2",
+		               "-c", "model_provider=p", NULL };
+		char *cfg[] = { "foo=3", " foo =4", "bar=5" }, *out[32];
+		int n = dch_codex_resume(in, 7, 0, "ID", "/d", NULL, out, 1, cfg, 3);
+		char got[256] = "";
+		int k;
+
+		for (k = 0; k < n; k++)
+			snprintf(got + strlen(got), sizeof got - strlen(got), "%s ",
+			         out[k]);
+		if (strcmp(got, "codex resume ID -C /d -c  foo =4 -c bar=5 "))
+		{
+			printf("  FAIL codex_resume replace: %s\n", got);
+			fails++;
+		}
+		else
+			printf("  ok   codex_resume replaces by key\n");
+	}
+
 	printf("%s\n", fails ? "FAIL" : "ok");
 	return fails != 0;
 }

@@ -381,6 +381,45 @@ def main():
             os.kill(int(got[0]), signal.SIGKILL)
         ended("cx7")
 
+        # 9b. (#701) a --codex-config K=V replaces a recorded -c of the key
+        got = spawn("cx9", [fake, "-c", "foo=1", "--config=bar=1"],
+                    {"CODEX_HOME": cxhome, "FAKE_CODEX_TID": T1,
+                     "FAKE_CODEX_SNAP": "1"})
+        until(lambda: ((rec("cx9") or {}).get("codex") or {})
+              .get("thread_id"), 10)
+        if got:
+            os.kill(int(got[0]), signal.SIGKILL)
+        ended("cx9")
+        base = [fake, "--no-daemon", "resume", T1, "-C", proj]
+        for step, flags, want in (
+                ("replaces the recorded key, not appends",
+                 ["--codex-config", "foo=2"],
+                 ["--config=bar=1", "-c", "foo=2"]),
+                ("a second revive with it again: still one",
+                 ["--codex-config", "foo=2"],
+                 ["--config=bar=1", "-c", "foo=2"]),
+                ("the same key twice in a call: the last wins",
+                 ["--codex-config", "foo=3", "--codex-config", "foo=4"],
+                 ["--config=bar=1", "-c", "foo=4"])):
+            r, got = revive("cx9", "--no-message", *flags)
+            check("#701 %s" % step, got and got[2:] == base + want, got)
+            if got:
+                os.kill(int(got[0]), signal.SIGKILL)
+            ended("cx9")
+        for words in (["--stop", "cx9"], ["--forget", "cx9"],
+                      ["--say", "cx9", "--"]):
+            for fl in (["--codex-config", "a=1"], ["--codex-drop-provider"]):
+                w = words[:2] + fl + words[2:]
+                if words[0] == "--say":
+                    w += ["hi"]
+                r = dch(*w)
+                check("#701 %s with %s: exit 2" % (words[0], fl[0]),
+                      r.returncode == 2 and "--codex-" in r.stderr,
+                      (r.returncode, r.stderr))
+        r = dch("--revive", "nosuch", "--json", "--codex-config", "a=1")
+        check("#701 no_history failure: no codex_ignored", '"no_history"' in
+              r.stdout and "codex_ignored" not in r.stdout, r.stdout)
+
         # 10. (QA 1.189.0 MED-XB1, LOW-XB4/5) over dch serve: a URL (':') in
         # --codex-config reaches the Codex; the refusals hold on the host too
         sys.path.insert(0, HERE)
@@ -437,6 +476,10 @@ def main():
                 check("remote --codex-config refuses %s: exit 2" % why,
                       r.returncode == 2 and "--codex-config" in r.stderr,
                       (r.returncode, r.stderr))
+            r = rdch("--spawn", "srv:zz", "--codex-config", "a=1", "true")
+            check("#701 remote --spawn with --codex-config: exit 2, local",
+                  r.returncode == 2 and "only work with" in r.stderr,
+                  (r.returncode, r.stderr))
             time.sleep(0.5)
             check("remote refused: nothing revived", len(launches()) == k0,
                   launches()[k0:])

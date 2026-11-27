@@ -3326,9 +3326,15 @@ take two flags for that, applied to a Codex's resume argv only (with
   at most 1024 bytes of valid UTF-8 with no control character (C0, DEL, C1,
   bidi); otherwise exit 2 and nothing runs. The value may hold `:`, so a
   provider URL goes over `--revive host:name` too.
+  A `-c K=V` already in the argv with the same key (in any of the four forms
+  above) is replaced, not repeated, so a second revive with the same flag
+  keeps one; the same key twice in one call keeps the last. There is no flag
+  to remove a non-provider `-c`: replace it with a new value.
+- `--stop`, `--say` and `--forget` with either flag are a usage error,
+  exit 2, before anything is sent (a remote `--spawn host:name` too).
 
 A Claude or shell session ignores them; its `--json` result line then
-carries `"codex_ignored": <count>` (the drop flag counts one, each
+(not one that failed with no record to read, `no_history`) carries `"codex_ignored": <count>` (the drop flag counts one, each
 `--codex-config` one). The revived session runs, and its new record keeps,
 the argv as changed, so a later `--revive` without the flags resumes with the
 words dropped and the `--codex-config` ones still there. A `--restart
