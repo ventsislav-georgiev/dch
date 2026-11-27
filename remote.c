@@ -516,6 +516,9 @@ rows_from(const struct json_parser *jp, int arr, const char *host,
 			r->alias[0] = '\0';
 		if (jstr(jp, i, "cwd", r->cwd, sizeof r->cwd) != 1)
 			r->cwd[0] = '\0';
+		if (jstr(jp, i, "agent", r->agent, sizeof r->agent) != 1 ||
+		    (strcmp(r->agent, "claude") && strcmp(r->agent, "codex")))
+			r->agent[0] = '\0';
 		if (jstr(jp, i, "state", r->state, sizeof r->state) != 1 ||
 		    (strcmp(r->state, "working") && strcmp(r->state, "idle") &&
 		     strcmp(r->state, "blocked") && strcmp(r->state, "done")))
@@ -4553,7 +4556,8 @@ rows_same(const struct rlist *a, const struct rlist *b)
 		if (strcmp(a->v[i].name, b->v[i].name) ||
 		    strcmp(a->v[i].alias, b->v[i].alias) ||
 		    strcmp(a->v[i].state, b->v[i].state) ||
-		    strcmp(a->v[i].cwd, b->v[i].cwd))
+		    strcmp(a->v[i].cwd, b->v[i].cwd) ||
+		    strcmp(a->v[i].agent, b->v[i].agent))
 			return 0;
 	return a->n == b->n;
 }

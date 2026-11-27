@@ -227,11 +227,12 @@ def main():
         row = next((x for x in json.loads(r.stdout) if x["name"] == "loc1"),
                    {})
         keys = list(row)
-        check("--ls-json: cwd last, the live record's dir, every other key "
-              "in its old place",
-              row.get("cwd") == cwd and keys[-1] == "cwd"
+        check("--ls-json: cwd last, agent (null) just before it, the live "
+              "record's dir, every other key in its old place",
+              row.get("cwd") == cwd and keys[-2:] == ["agent", "cwd"]
+              and row["agent"] is None
               and keys[:len(LS_KEYS)] == LS_KEYS
-              and set(keys[len(LS_KEYS):-1]) <= {"cols", "rows", "clients",
+              and set(keys[len(LS_KEYS):-2]) <= {"cols", "rows", "clients",
                                                   "passive_clients"},
               r.stdout)
         r = dch(slow, "--ls-json", "--remote", *H)
