@@ -419,6 +419,13 @@ def main():
         r = dch("--revive", "nosuch", "--json", "--codex-config", "a=1")
         check("#701 no_history failure: no codex_ignored", '"no_history"' in
               r.stdout and "codex_ignored" not in r.stdout, r.stdout)
+        names.append("sh704")
+        dch("--spawn", "sh704", "--size", "100x30", "sh", "-c", "sleep 0.5")
+        ended("sh704")
+        r = dch("--revive", "sh704", "--json", "--codex-drop-provider",
+                "--codex-config", "a=1")
+        check("#704 shell record: codex_ignored 2 in --json",
+              '"codex_ignored":2' in r.stdout, r.stdout)
 
         # 10. (QA 1.189.0 MED-XB1, LOW-XB4/5) over dch serve: a URL (':') in
         # --codex-config reaches the Codex; the refusals hold on the host too
