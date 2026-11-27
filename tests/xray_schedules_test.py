@@ -483,6 +483,33 @@ def test_durable():
               ("permanent" if perm else "not permanent", st, exp),
               rc == 0 and len(rows) == 1 and rows[0]["status"] == st and
               rows[0]["expires"] == exp, out)
+    put(json.dumps({"tasks": []}))
+    rc, h, rows, done, err, out = scheds("xs-dur8")
+    check("durable: XB3 a recurring cron 8 days old the file does not list "
+          "is expired", rc == 0 and len(rows) == 1 and
+          rows[0]["status"] == "expired" and
+          rows[0]["expires"] == iso(old + WEEK), out)
+    for first, st in ((True, "expired"), (False, "pending")):
+        ta = dict(task("eeee0008", recurring=True, createdAt=old * 1000),
+                  permanent=first)
+        tb = dict(ta, permanent=not first)
+        put(json.dumps({"tasks": [ta, tb]}))
+        rc, h, rows, done, err, out = scheds("xs-dur8")
+        check("durable: XB12 a repeated id, the last entry wins (first "
+              "permanent=%s): %s" % (first, st),
+              rc == 0 and len(rows) == 1 and rows[0]["status"] == st, out)
+    put(json.dumps({"tasks": [task("dddd0001", recurring=True, lastFiredAt=(
+        NOW + 365 * 86400) * 1000), task("dddd0002")]}))
+    ask_rows("XB10 a lastFiredAt a year ahead is ignored", "pending",
+             "pending", last=None)
+    put(json.dumps({"tasks": []}))
+    real = cdir + "_real"
+    os.rename(cdir, real)
+    os.symlink(real, cdir)
+    ask_rows("XB11 a symlinked .claude is refused: the transcript's answer, "
+             "no warn", "pending", "pending")
+    os.unlink(cdir)
+    os.rename(real, cdir)
     put(None)
 
 
