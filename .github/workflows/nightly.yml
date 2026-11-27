@@ -42,7 +42,7 @@ jobs:
       - name: Fuzz
         run: CC=clang FUZZ_ARTIFACTS=$PWD/fuzz-artifacts scripts/fuzz.sh 60
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: failure()
+        if: ${{ !success() }}  # #709: also on cancel/timeout, else the slow input is lost
         with:
           name: fuzz-artifacts
           path: fuzz-artifacts

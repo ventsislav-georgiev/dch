@@ -74,7 +74,8 @@ for t in $targets; do
 	mkdir -p "corpus/$t"
 	cp "$src/tests/fuzz/corpus/$t"/* "corpus/$t/" 2>/dev/null || :
 	echo "fuzz_$t: ${secs}s"
-	"./fuzz_$t" -max_total_time="$secs" -artifact_prefix="$art/$t-" \
+	# #709: per-unit cap so one slow input fails fast with an artifact instead of eating the job
+	"./fuzz_$t" -max_total_time="$secs" -timeout=25 -artifact_prefix="$art/$t-" \
 		-print_final_stats=1 "corpus/$t" 2>"$t.log" || {
 		tail -n 40 "$t.log"
 		echo "fuzz_$t FAILED: input in $art/" >&2
