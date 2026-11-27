@@ -311,7 +311,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.187.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.188.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -425,7 +425,7 @@ dch --xray <n>                                  # the X-ray view: prompts, refs 
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
-dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
+dch --xray <n> --follow --tasks --memory --schedules --json # that stream with the task, memory and schedule blocks and their deltas
 dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] [--no-github] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
 dch --xray <n> --search <text> --scope all --json  # the same over every session with a corpus, hits grouped by session (project: <n>'s project only; no --json: text)
@@ -1045,8 +1045,9 @@ open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
 The view has four tabs, three for a shell session (no Responses), a
-fifth, Tasks, when the session keeps a task list, and a sixth, Memory, when
-it has memories or instruction files:
+fifth, Tasks, when the session keeps a task list, a sixth, Memory, when
+it has memories or instruction files, and a seventh, Schedules, when it has
+crons, a /loop wake-up or Codex heartbeats:
 - **Prompts** (**Commands** for a shell session): one row per thing you
   typed, a prompt to Claude or Codex, a command to a shell, newest first.
   It opens on the newest, at the top. A new prompt shows on top as you
@@ -1233,6 +1234,24 @@ it has memories or instruction files:
   it (on a host that refuses that stream: read again every 30 seconds
   while the tab shows). A shell session, no memory and a host older
   than this dch have no Memory tab; dch-lite has both tabs.
+- **Schedules** (the last tab, only when `--schedules` lists something; a
+  Codex with no heartbeat has none): the session's crons,
+  its /loop wake-up and Codex heartbeats, under faint group lines, each
+  counted: Pending, Fired, then Ended (deleted, expired and ended rows,
+  faint). Each row is a mark, the id, the prompt, and at the right the
+  schedule (`every 10 minutes`), when (`next 4m`, counted down on the
+  clock; `due` once that time has passed in a running session with no
+  fire seen; `fired 2m ago`; an ended row's status), its fires (`×14`)
+  and its no-op streak (`noop 6`). The tab's count is the pending rows.
+  `Enter` reads the row's prompt, and `q` comes back to it; `c` opens a
+  card with the prompt in full, the whole cron, schedule, next, created,
+  expires, last fired, fires and reason, where `Enter` reads the prompt
+  too. `/` filters on the id, prompt, schedule, reason and cron; `o` works
+  as on Prompts. The list comes in the same stream as Tasks; a cron
+  created or deleted, a fire and the session's end show as the stream
+  sends them (on a host whose stream refuses it: one `--schedules` query
+  of its own, once the prompts are in). A shell session, no schedule and
+  a host whose dch knows no `--schedules` have no Schedules tab.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file, URL or term,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
@@ -1276,19 +1295,20 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks, Memory; a narrow window drops the counts, then shows the current tab and the whole neighbours that fit, `‹` `›` where more are) | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks, Memory, Schedules; a narrow window drops the counts, then shows the current tab and the whole neighbours that fit, `‹` `›` where more are) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt (a header's turn; another session of this project: in its reader); Memory: the prompt that wrote or loaded it |
+| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card; Schedules: the row's) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt (a header's turn; another session of this project: in its reader); Memory: the prompt that wrote or loaded it; Schedules: the row's |
 | `/` | filter; Search: type the text to search; Prompts, Responses: a bare number (`/5` `Enter`) selects that prompt, so `Enter` reads it | reader: find in its text (case folded, the matches stand out); `Enter` goes to the first match below the top line |
 | `n` `N` | | reader, after `/`: the next / previous match |
 | `r` | Responses: the refs in the selected item's lines, the lowest first | reader: the refs in the lines shown, the lowest first ("no refs in view" when none); `j` `k` move, `Enter` opens the card, `q` there comes back to the reader at the same line, `q` or `Esc` closes the list |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
+| `c` | Schedules: open the row's card | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
 | `a` | Prompts, Responses: hide / show the messages from other agent sessions (Refs: show / hide files, commits, URLs) | |
-| `o` | Prompts, Responses, Search, Tasks, Memory: attach to the session (in the chord: back to it) | card, reader: the same |
+| `o` | Prompts, Responses, Search, Tasks, Memory, Schedules: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back; reader, after `/`: clear the find |
@@ -2461,9 +2481,9 @@ the host's dch does not know --tasks` (exit 1).
 
 `--schedules` takes no other flag but `--json` (`dch: bad usage:
 --schedules and --ref`, also `--search`, `--chapter`, `--clear`, `--tasks`,
-`--memory`), and is not in `--requests`. `--follow` does not carry it yet:
-`--follow --schedules` exits 2 (`dch: bad usage: --schedules and --follow
-…`), which a client can use as its version probe. A transcript that is gone
+`--memory`), and is not in `--requests`. `--follow` carries it (see
+**Schedules in the stream** below; a dch before #686 exits 2 there). A
+transcript that is gone
 says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that host's
 `dch serve`.
 
@@ -2800,6 +2820,29 @@ which a client can use as its version probe.
   first answer, as at the start; the answer replaces it when it lands,
   whole when its header differs, else as row deltas. One still running
   when the follow ends, or is signalled, is stopped with it.
+
+**Schedules in the stream.** `--schedules` joins the same stream (#686),
+alone or with `--tasks` and `--memory`. A dch before this exits 2 with
+`dch: bad usage: --schedules and --follow …`, which a client can use as
+its version probe.
+- After every snapshot, after the tasks and memory blocks: the
+  `--schedules` lines, the block whole, in the one-shot shape
+  (`"block":"schedules"`). Then, in the same batches, the rows that move,
+  by the tasks rules above: `{"schedule":{…}}` a new or changed row,
+  `{"schedule":{"id":…,"gone":true}}` one that left (only past the 5000
+  cap), its `done` line when it changes, and the whole block again when
+  its header changes or its rows' order does. Its rows come from the
+  follow's own read of the transcript; it has no command and no timer.
+- The session's Claude (or Codex) leaving: the master wakes the follow,
+  which sends `reset` `rotated` and the shell's snapshot, then this block
+  again, whole: the agent's rows with `"live":false`, its pending crons and
+  wake-up `ended` (as the one-shot after the agent exits). The session
+  ending sends the block once more the same way, as the stream's last
+  lines, before exit 0. A Claude started again gets its own live block
+  after its snapshot.
+- Time sends nothing: a recurring cron passing its 7 days (`expired`), a
+  `next` that passes. A client counts down from `next` and turns a row
+  expired at `expires` itself; a later batch's block agrees.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
@@ -3865,7 +3908,7 @@ for a local session named that way.
 | `--stop` | `--stop <n>... --json` | 660 s |
 | `--say` | `--say <n> --json -- <text>` | 660 s |
 | `--xray` | `--xray <n> --json [--clear \| --chapter <anchor>]` | 60 s |
-| `--xray` | `--xray <n> --json --follow [--tasks] [--memory]` (no cap either) | none |
+| `--xray` | `--xray <n> --json --follow [--tasks] [--memory] [--schedules]` (no cap either) | none |
 | `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] [--no-github] --json` | 60 s |
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |

@@ -5,14 +5,15 @@
 ** #290; none for a shell), Refs (the refs on the session's screen now
 ** first, #294), Search (where a word or phrase was said, #291) and Tasks
 ** (the session's task list, #320: only when it has one), Memory (its
-** memories and instruction files, #323: the same); a ref's card, a task's
-** or memory's card; a chapter's reader. Drawn with the picker's renderer,
+** memories and instruction files, #323: the same), Schedules (its crons,
+** /loop wake-up and Codex heartbeats, #687: the same); a ref's card, a
+** task's, memory's or schedule's card; a chapter's reader. Drawn with the picker's renderer,
 ** on the terminal its host (dch.c) made raw and put on the alternate
 ** screen.
 **
 ** Every answer is the engine's own --json: dch.c's xv_spawn forks this
 ** process and runs xray_main in the child with --follow, --ref, --chapter
-** --search, --tasks or --memory and --json, stdout into a pipe, and the
+** --search, --tasks, --memory or --schedules and --json, stdout into a pipe, and the
 ** view reads the NDJSON with json.c.
 ** No second parser of any corpus, no exec, nothing written to disk. The
 ** index lives as --follow's does (spec 3.1): a snapshot, then deltas, for as
@@ -39,13 +40,15 @@
 
 enum { XV_LIST, XV_CARD, XV_READ, XV_TCARD };
 /* the tabs as drawn and cycled: 0 Prompts, 2 Responses (#290), 1 Refs (the
-** chord's xv_tab), 3 Search (#291), 4 Tasks (#320), 5 Memory (#323) */
-static const int xv_ord[] = { 0, 2, 1, 3, 4, 5 };
+** chord's xv_tab), 3 Search (#291), 4 Tasks (#320), 5 Memory (#323), 6
+** Schedules (#687) */
+static const int xv_ord[] = { 0, 2, 1, 3, 4, 5, 6 };
 #define XV_NTAB  ((int)(sizeof xv_ord / sizeof *xv_ord))
 #define XV_ALINES 8	/* a response's lines on Responses; the reader has all */
 /* follow, card, reader, a remote screen (#188), a search (#291), the task
-** list (#320), the memory list (#323: XV_TK + 1, as tq[1] is tq[0] + 1) */
-enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_QK, XV_TK, XV_MK, XV_NKIDS };
+** list (#320), the memory list (#323: XV_TK + 1, as tq[1] is tq[0] + 1),
+** the schedules (#687: XV_TK + 2) */
+enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_QK, XV_TK, XV_MK, XV_HK, XV_NKIDS };
 #define XV_TASKS   50000	/* the task or memory rows kept (XR_TASKS) */
 #define XV_TLINE   (64u << 10)	/* a --tasks or --memory line past it is
 				** dropped */
@@ -148,6 +151,12 @@ struct xv_task		/* a --tasks row (#320), a --memory row (#323) */
 				** instructions; seq: the answer's order */
 	int ses, cut;		/* ses: 1 this session wrote it, 2 loaded it;
 				** cut: 1 the engine cut the text, 2 not kept */
+	/* a --schedules row's (#687): title is its prompt, label its human
+	** schedule, note its reason; st 0 pending, 1 fired, 2 the rest
+	** (stw says which); times epoch s, -1 none */
+	char *cron, *kind, *stw;
+	long long next, lastf, expires, fires, noop;
+	int recur;
 };
 
 /* One --tasks answer: its rows, their order (grouped, Done newest first),
@@ -162,7 +171,7 @@ struct xv_tl
 	size_t bytes;			/* a memory list's text kept */
 };
 
-/* A list's query: Tasks' (tq[0]) or Memory's (tq[1]). The list shown, a
+/* A list's query: Tasks' (tq[0]), Memory's (tq[1]) or Schedules' (tq[2]). The list shown, a
 ** re-read's until its end (re: the answer goes there); the order is made
 ** again (sort) at most every 100 ms while rows stream; no: never asked
 ** again; ci: the card's row; sel: the selected row's id */
@@ -269,15 +278,17 @@ struct xv
 	** edits it), the match line n and N go on from (-1 none) */
 	char rq[256];
 	int rcur;
-	/* Tasks (#320), Memory (#323): vis holds their rows while vtab is 4
-	** or 5 and the list's gen (tvgen) and tvf say they are current */
-	struct xv_tq tq[2];
+	/* Tasks (#320), Memory (#323), Schedules (#687): vis holds their rows
+	** while vtab is 4, 5 or 6 and the list's gen (tvgen) and tvf say they are current */
+	struct xv_tq tq[3];
 	int tvgen, vtab, mtop;	/* mtop: a memory card's text scrolled */
 	char tvf[256];		/* the filter vis was made with */
 	int tg[4];		/* vis's first row of each st, -1 none */
-	/* the follow carries Tasks and Memory (#448): blk, the block it is
-	** sending (0 tasks, 1 memory, -1 none); poll, a host that refused
-	** that follow (an older dch): the lists' own children instead */
+	/* the follow carries Tasks, Memory (#448) and Schedules (#687): blk,
+	** the block it is sending (0 tasks, 1 memory, 2 schedules, -1 none);
+	** poll, a host that refused that follow (an older dch): 1 the follow
+	** with Tasks and Memory, Schedules one own query; 2 the follow alone,
+	** the lists' own children */
 	int blk, poll;
 };
 
@@ -909,7 +920,7 @@ xv_fline(struct xv *v, const struct json_parser *p)
 {
 	int o, k, j;
 
-	/* Tasks' and Memory's cue to re-read (#320, #323) */
+	/* Tasks', Memory's and Schedules' cue to re-read (#320, #323, #687) */
 	v->tq[0].fol = v->tq[1].fol = 1;
 	if ((o = xv_obj(p, 0, "snapshot", JSON_OBJECT)) >= 0)
 		xv_snapshot(v, p, o);
@@ -1444,6 +1455,9 @@ xv_task_free(struct xv_task *t)
 	xv_sfree(t->path);
 	xv_sfree(t->scope);
 	xv_sfree(t->body);
+	xv_sfree(t->cron);
+	xv_sfree(t->kind);
+	xv_sfree(t->stw);
 }
 
 static void
@@ -1505,24 +1519,54 @@ xv_ids(const struct json_parser *p, int o)
 	return b[0] && (s = strdup(b)) ? s : xv_none;
 }
 
-/* Row o of list l (a memory's when mem), its text counted in l->bytes;
-** t->seq unset */
+/* "2026-11-14T07:09:40Z" field k of o to epoch seconds; -1 none */
+static long long
+xv_isof(const struct json_parser *p, int o, const char *k)
+{
+	char *s = xv_str(p, o, k);
+	long long t = s[0] ? xv_iso(s) : -1;
+
+	xv_sfree(s);
+	return t;
+}
+
+/* Row o of list l (i: 0 a task's, 1 a memory's, 2 a schedule's), its text
+** counted in l->bytes; t->seq unset */
 static void
-xv_trow(struct xv_tl *l, const struct json_parser *p, int o, int mem,
+xv_trow(struct xv_tl *l, const struct json_parser *p, int o, int i,
         struct xv_task *t0)
 {
 	struct xv_task t;
 	char *s;
+	int mem = i == 1;
 
 	t.id = xv_str(p, o, "id");
-	t.title = xv_str(p, o, "title");
-	t.note = xv_str(p, o, "note");
+	t.title = xv_str(p, o, i == 2 ? "prompt" : "title");
+	t.note = xv_str(p, o, i == 2 ? "reason" : "note");
 	t.chapter = xv_str(p, o, "chapter");
-	t.label = xv_str(p, o, mem ? "kind" : "label");
+	t.label = xv_str(p, o, mem ? "kind" : i == 2 ? "human" : "label");
 	t.active = t.created = t.url = t.group = t.blocked = xv_none;
 	t.path = t.scope = t.body = xv_none;
-	t.ses = t.cut = 0;
-	if (mem)
+	t.cron = t.kind = t.stw = xv_none;
+	t.next = t.lastf = t.expires = -1;
+	t.fires = t.noop = 0;
+	t.ses = t.cut = t.recur = 0;
+	if (i == 2)
+	{
+		t.created = xv_str(p, o, "created");
+		t.cron = xv_str(p, o, "cron");
+		t.kind = xv_str(p, o, "kind");
+		t.stw = xv_str(p, o, "status");
+		t.next = xv_isof(p, o, "next");
+		t.lastf = xv_isof(p, o, "last_fired");
+		t.expires = xv_isof(p, o, "expires");
+		t.fires = xv_num(p, o, "fires", 0);
+		t.noop = xv_num(p, o, "noop_streak", 0);
+		t.recur = xv_bool(p, o, "recurring");
+		t.st = !strcmp(t.stw, "pending") ? 0 : !strcmp(t.stw, "fired")
+		       ? 1 : 2;
+	}
+	else if (mem)
 	{
 		t.path = xv_str(p, o, "path");
 		t.scope = xv_str(p, o, "scope");
@@ -1552,25 +1596,24 @@ xv_trow(struct xv_tl *l, const struct json_parser *p, int o, int mem,
 		       : !strcmp(s, "dropped") ? 3 : 1;
 		xv_sfree(s);
 	}
-	s = xv_str(p, o, "updated");
-	t.updated = s[0] ? xv_iso(s) : -1;
-	xv_sfree(s);
+	t.updated = xv_isof(p, o, "updated");
 	*t0 = t;
 }
 
-/* One --tasks (tq[0]) or --memory (tq[1]) line: the header, a row, the
-** end (its warn too, #321). Rows past XV_TASKS are counted as dropped; a
-** memory's text past XV_MBODY in all is not kept. */
+/* One --tasks (tq[0]), --memory (tq[1]) or --schedules (tq[2]) line: the
+** header, a row, the end (its warn too, #321). Rows past XV_TASKS are
+** counted as dropped; a memory's text past XV_MBODY in all is not kept. */
 static void
 xv_lline(struct xv *v, struct xv_tq *q, const struct json_parser *p)
 {
+	static const char *const key[3] = { "task", "memory", "schedule" };
 	struct xv_tl *l = q->re ? &q->tn : &q->tl;
-	int mem = q == &v->tq[1];
+	int i = (int)(q - v->tq);
 	struct xv_task t;
 	char *s;
 	int o;
 
-	if ((o = xv_obj(p, 0, mem ? "memory" : "task", JSON_OBJECT)) < 0)
+	if ((o = xv_obj(p, 0, key[i], JSON_OBJECT)) < 0)
 	{
 		if (xv_num(p, 0, "schema", -1) >= 0)
 		{
@@ -1601,7 +1644,7 @@ xv_lline(struct xv *v, struct xv_tq *q, const struct json_parser *p)
 	}
 	if (xv_grow(&l->t, &l->a, l->n, sizeof t) < 0)
 		return;
-	xv_trow(l, p, o, mem, &t);
+	xv_trow(l, p, o, i, &t);
 	t.seq = l->hi++;
 	l->t[l->n++] = t;
 	l->nst[t.st]++;
@@ -1619,6 +1662,12 @@ static void
 xv_mline(struct xv *v, const struct json_parser *p)
 {
 	xv_lline(v, &v->tq[1], p);
+}
+
+static void
+xv_hline(struct xv *v, const struct json_parser *p)
+{
+	xv_lline(v, &v->tq[2], p);
 }
 
 static const struct xv_task *xv_sort_tk;
@@ -1663,7 +1712,7 @@ xv_tord(struct xv_tl *l, int mem)
 	return 0;
 }
 
-/* Tasks (i 0) or Memory (1) is a tab: its list has a row */
+/* Tasks (i 0), Memory (1) or Schedules (2) is a tab: its list has a row */
 static int
 xv_ttab(const struct xv *v, int i)
 {
@@ -1674,7 +1723,7 @@ xv_ttab(const struct xv *v, int i)
 static int
 xv_tbusy(const struct xv *v, int i)
 {
-	return v->poll ? v->kid[XV_TK + i].pid > 0
+	return v->poll >= (i == 2 ? 1 : 2) ? v->kid[XV_TK + i].pid > 0
 	               : v->blk == i && v->kid[XV_FK].pid > 0;
 }
 
@@ -1691,7 +1740,8 @@ xv_tbeg(struct xv *v, int i)
 }
 
 /* `--tasks --json` (i 0) or `--memory --json` (1) in XV_TK + i, for a host
-** whose follow carries neither */
+** whose follow carries neither; `--schedules --json` (2) once, for a host
+** whose follow carries no schedules (#687) */
 static void
 xv_tasks(struct xv *v, int i)
 {
@@ -1704,17 +1754,18 @@ xv_tasks(struct xv *v, int i)
 	q->at = now_ms();
 	q->fol = 0;
 	av[0] = v->n;
-	av[1] = i ? "--memory" : "--tasks";
+	av[1] = i == 2 ? "--schedules" : i ? "--memory" : "--tasks";
 	av[2] = "--json";
 	av[3] = NULL;
-	if (xv_start(v, XV_TK + i, av, 3, i ? xv_mline : xv_tline) == 0)
+	if (xv_start(v, XV_TK + i, av, 3, i == 2 ? xv_hline : i ? xv_mline
+	             : xv_tline) == 0)
 		v->kid[XV_TK + i].lmax = XV_TLINE;
 }
 
 /* List i's answer ended (rc, err: its child's; the follow's block 0, "").
-** A dch or host that knows no --tasks or --memory (a usage refusal, an
-** older host's): never asked again, and no tab; any other failure keeps
-** what is shown. A later whole answer replaces the list; a card (or the
+** A dch or host that knows no --tasks, --memory or --schedules (a usage
+** refusal, an older host's): never asked again, and no tab; any other
+** failure keeps what is shown. A later whole answer replaces the list; a card (or the
 ** reader opened from it) stays on its row, or goes when the row has. */
 static void
 xv_tend(struct xv *v, int i, int rc, const char *err)
@@ -1802,7 +1853,7 @@ xv_tdelta(struct xv *v, int i, const struct json_parser *p, int o)
 			l->hi++;
 		}
 		xv_trow(l, p, o, i, &t);
-		t.seq = i ? --l->lo : seq;
+		t.seq = i == 1 ? --l->lo : seq;
 		l->t[k] = t;
 		l->nst[t.st]++;
 	}
@@ -1820,11 +1871,16 @@ static int
 xv_tfline(struct xv *v, const struct json_parser *p)
 {
 	int o = -1, i, end = 0;
+	char *b;
 
 	if (xv_num(p, 0, "schema", -1) >= 0)
 	{
-		/* a tasks header says its session; a memory one never */
-		i = v->blk = dch_json_field(p, 0, "session") >= 0 ? 0 : 1;
+		/* a tasks header says its session; a memory one never; a
+		** schedules one its block (#686) */
+		b = xv_str(p, 0, "block");
+		i = v->blk = !strcmp(b, "schedules") ? 2
+		             : dch_json_field(p, 0, "session") >= 0 ? 0 : 1;
+		xv_sfree(b);
 		if (xv_rtab(v))
 			xv_tbeg(v, i);
 	}
@@ -1838,6 +1894,8 @@ xv_tfline(struct xv *v, const struct json_parser *p)
 		i = 0;
 	else if ((o = xv_obj(p, 0, "memory", JSON_OBJECT)) >= 0)
 		i = 1;
+	else if ((o = xv_obj(p, 0, "schedule", JSON_OBJECT)) >= 0)
+		i = 2;
 	else
 		return 0;
 	/* a shell session's view has neither tab (asked only of prompts) */
@@ -1888,7 +1946,7 @@ xv_tvis(struct xv *v)
 		if (f[0] && !xv_has(t->id, f) && !xv_has(t->title, f) &&
 		    !xv_has(t->active, f) && !xv_has(t->note, f) &&
 		    !xv_has(t->label, f) && !xv_has(t->path, f) &&
-		    !xv_has(t->body, f))
+		    !xv_has(t->body, f) && !xv_has(t->cron, f))
 			continue;
 		if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
 			break;
@@ -3901,6 +3959,9 @@ static const char *const xv_tgrp[4] = { "In progress", "Pending", "Done",
 	"Dropped" };
 static const char *const xv_mgrp[3] = { "This session", "Memories",
 	"Instructions" };
+static const char *const xv_hgrp[3] = { "Pending", "Fired", "Ended" };
+
+static int xv_live(const struct xv *v);
 
 /* A task's label says more than its status (a ledger's PARKED) */
 static int
@@ -4031,6 +4092,77 @@ xv_row_mem(const struct xv *v, const struct xv_task *t, int on)
 		pk_pad(pk_w);
 }
 
+/* s seconds, short: 45s, 4m, 3h, 2d */
+static void
+xv_dur(long long s, char *b, size_t n)
+{
+	if (s < 60)
+		snprintf(b, n, "%llds", s < 0 ? 0 : s);
+	else if (s < 3600)
+		snprintf(b, n, "%lldm", s / 60);
+	else if (s < 86400)
+		snprintf(b, n, "%lldh", s / 3600);
+	else
+		snprintf(b, n, "%lldd", s / 86400);
+}
+
+/* A schedule's row (#687): its mark, id and prompt; at the right its
+** human schedule, when (next 4m counted down from the clock at each frame,
+** due once next has passed in a live session, fired 2m ago; an ended
+** one's status), its fires and its no-op streak */
+static void
+xv_row_sched(const struct xv *v, const struct xv_task *t, int on)
+{
+	static const char *const mk[2][3] = { { "o ", "x ", "- " },
+		{ "\xe2\x97\x8b ", "\xe2\x9c\x93 ", "\xe2\x9c\x97 " } };
+	long long now = (long long)time(NULL);
+	char x[300], w[40], d[24];
+	int xw;
+
+	w[0] = '\0';
+	if (t->st == 2)
+		snprintf(w, sizeof w, "%s", t->stw);
+	else if (t->st == 0 && t->next > now)
+	{
+		xv_dur(t->next - now, d, sizeof d);
+		snprintf(w, sizeof w, "next %s", d);
+	}
+	else if (t->st == 0 && t->next >= 0 && xv_live(v))
+		snprintf(w, sizeof w, "due");
+	else if (t->lastf >= 0)
+	{
+		xv_dur(now - t->lastf, d, sizeof d);
+		snprintf(w, sizeof w, "fired %s ago", d);
+	}
+	snprintf(x, sizeof x, "%s%s%s", t->label, t->label[0] && w[0] ? "  "
+	         : "", w);
+	if (t->fires > 0)
+		snprintf(x + strlen(x), sizeof x - strlen(x), "%s%s%lld",
+		         x[0] ? "  " : "", pk_utf ? "\xc3\x97" : "x", t->fires);
+	if (t->noop > 0)
+		snprintf(x + strlen(x), sizeof x - strlen(x), "%snoop %lld",
+		         x[0] ? "  " : "", t->noop);
+	xv_lead(on);
+	pk_set(t->st == 0 ? pk_p(PK_ACC) : "2");
+	pk_txt(mk[pk_utf][t->st]);
+	pk_set("2");
+	pk_fit(t->id, 8);
+	pk_txt(" ");
+	xw = pk_cps(x);
+	if (xw > (pk_w - pk_col) / 2)
+		xw = (pk_w - pk_col) / 2;
+	pk_set(t->st == 2 ? "2" : "");
+	pk_fit(t->title, pk_w - pk_col - (xw ? xw + 2 : 0) - 1);
+	pk_set("2");
+	if (xw)
+	{
+		pk_txt("  ");
+		pk_fit(x, xw);
+	}
+	if (on)
+		pk_pad(pk_w);
+}
+
 /* Tasks, Memory: a faint title line when a task list has a name (a memory
 ** list's names its group), the rows under their group lines (the window
 ** only: nothing drawn or measured off it), faint lines under them for a
@@ -4040,7 +4172,8 @@ xv_draw_tasks(struct xv *v, int win)
 {
 	const struct xv_tl *l = &v->tq[v->tab - 4].tl;
 	int *sel = &v->sel[v->tab], *top = &v->top[v->tab], n, ng = 0, g, k, i;
-	int nf = 0, mem = v->tab == 5;
+	int nf = 0, mem = v->tab == 5, sch = v->tab == 6;
+	const char *what = mem ? "memories" : sch ? "schedules" : "tasks";
 	char b[300], f[3][300];
 
 	xv_vis(v);
@@ -4059,13 +4192,14 @@ xv_draw_tasks(struct xv *v, int win)
 	if (l->partial)
 		snprintf(f[nf++], sizeof *f, "  the history was too long to read "
 		         "whole; %s may be missing", mem ? "what this session "
-		         "wrote or loaded" : "older tasks");
+		         "wrote or loaded" : sch ? "older schedules"
+		         : "older tasks");
 	if (l->dropped)
 		snprintf(f[nf++], sizeof *f, "  the %d %s are shown", l->n,
 		         mem ? "first" : "newest");
-	else if (!l->done && !xv_tbusy(v, mem))
+	else if (!l->done && !xv_tbusy(v, v->tab - 4))
 		snprintf(f[nf++], sizeof *f, "  the list stopped early; the %s "
-		         "shown stand", mem ? "memories" : "tasks");
+		         "shown stand", what);
 	while (nf && win - nf < 1)
 		nf--;
 	win -= nf;
@@ -4096,13 +4230,16 @@ xv_draw_tasks(struct xv *v, int win)
 					break;
 				}
 			pk_set("2");
-			snprintf(b, sizeof b, "  %s %d", !mem ? xv_tgrp[-1 - i]
+			snprintf(b, sizeof b, "  %s %d", sch ? xv_hgrp[-1 - i]
+			         : !mem ? xv_tgrp[-1 - i]
 			         : i == -2 && l->title && l->title[0] ? l->title
 			         : xv_mgrp[-1 - i], e - v->tg[-1 - i]);
 			pk_txt(b);
 		}
 		else if (k < n + ng && mem)
 			xv_row_mem(v, &l->t[v->vis[i]], i == *sel);
+		else if (k < n + ng && sch)
+			xv_row_sched(v, &l->t[v->vis[i]], i == *sel);
 		else if (k < n + ng)
 			xv_row_task(&l->t[v->vis[i]], i == *sel);
 		else if (k == 0)
@@ -4246,6 +4383,32 @@ xv_draw_tcard(struct xv *v, int win)
 	}
 	if (t && v->tab == 5)
 		rows = xv_draw_mcard(v, t, win, rows);
+	else if (t && v->tab == 6)
+	{
+		/* a schedule's (#687): the whole cron and its times */
+		char nx[40], ex[40], lf[40], fi[60];
+
+		snprintf(st, sizeof st, "%s  %s%s", t->stw, t->kind,
+		         t->recur ? ", recurring" : "");
+		xv_when(xv_iso(t->created), c, sizeof c);
+		xv_when(t->next, nx, sizeof nx);
+		xv_when(t->expires, ex, sizeof ex);
+		xv_when(t->lastf, lf, sizeof lf);
+		snprintf(fi, sizeof fi, t->noop > 0 ? "%lld (the last %lld no-op)"
+		         : "%lld", t->fires, t->noop);
+		(void)xv_tfield("Id", t->id, &rows, win);
+		(void)xv_tfield("Status", st, &rows, win);
+		(void)xv_tfield("Cron", t->cron, &rows, win);
+		(void)xv_tfield("Schedule", t->label, &rows, win);
+		(void)xv_tfield("Next", nx, &rows, win);
+		(void)xv_tfield("Created", c, &rows, win);
+		(void)xv_tfield("Expires", ex, &rows, win);
+		(void)xv_tfield("Last fired", lf, &rows, win);
+		(void)xv_tfield("Fires", fi, &rows, win);
+		(void)xv_tfield("Reason", t->note, &rows, win);
+		(void)xv_tfield("Turn", t->chapter[0] ? "enter reads it"
+		                : "none to read", &rows, win);
+	}
 	else if (t)
 	{
 		snprintf(st, sizeof st, "%s%s%s", xv_tgrp[t->st],
@@ -4355,7 +4518,7 @@ static void
 xv_draw(struct xv *v, int force)
 {
 	const char *tabn[XV_NTAB] = { "Prompts", "Refs", "Responses",
-		"Search", "Tasks", "Memory" };
+		"Search", "Tasks", "Memory", "Schedules" };
 	static const char spin[] = "\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9"
 		"\xe2\xa0\xb8\xe2\xa0\xbc\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7"
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
@@ -4416,9 +4579,10 @@ xv_draw(struct xv *v, int force)
 	{
 		const struct xv_tq *q = &v->tq[v->tab - 4];
 
-		/* a memory's: its text scrolls, Enter reads its turn */
-		if (v->tab == 5 && q->ci < q->tl.n && q->tl.t[q->ci].ses &&
-		    q->tl.t[q->ci].chapter[0])
+		/* a memory's: its text scrolls, Enter reads its turn; a
+		** schedule's: its turn */
+		if (q->ci < q->tl.n && q->tl.t[q->ci].chapter[0] &&
+		    (v->tab == 6 || (v->tab == 5 && q->tl.t[q->ci].ses)))
 			XV_K(0, ret, "read");
 		if (xv_live(v))
 			XV_K(0, "o", "open session");
@@ -4445,13 +4609,16 @@ xv_draw(struct xv *v, int force)
 		XV_K(3, "q", "quit");
 	else
 	{
-		/* Tasks: a task with no turn opens its card; Memory: a card */
+		/* Tasks, Schedules: a row with no turn opens its card (c too
+		** on Schedules, #687); Memory: a card */
 		ent = v->tab == 1 || v->tab == 5 ? "card" : "read";
-		if (v->tab == 4 && (xv_vis(v), v->sel[4] >= 0) &&
-		    v->sel[4] < v->nvis &&
-		    !v->tq[0].tl.t[v->vis[v->sel[4]]].chapter[0])
+		if ((v->tab == 4 || v->tab == 6) && (xv_vis(v), v->sel[v->tab] >= 0)
+		    && v->sel[v->tab] < v->nvis &&
+		    !v->tq[v->tab - 4].tl.t[v->vis[v->sel[v->tab]]].chapter[0])
 			ent = "details";
 		XV_K(0, ret, ent);
+		if (v->tab == 6 && v->nvis)
+			XV_K(0, "c", "card");
 		if (v->tab != 1 && xv_live(v))
 			XV_K(0, "o", "open session");
 		if (v->tab == 2)
@@ -4542,7 +4709,8 @@ xv_draw(struct xv *v, int force)
 		const struct xv_tq *q = &v->tq[v->tab - 4];
 
 		pk_set(pk_p(PK_ACCB));
-		pk_txt(v->tab == 5 ? "Memory " : "Task ");
+		pk_txt(v->tab == 6 ? "Schedule " : v->tab == 5 ? "Memory "
+		       : "Task ");
 		pk_txt(q->ci < q->tl.n ? q->tl.t[q->ci].id : "");
 	}
 	else if (v->mode == XV_READ)
@@ -4602,6 +4770,7 @@ xv_draw(struct xv *v, int force)
 		/* Tasks: the open ones, in progress and pending (#320) */
 		cnt[4] = v->tq[0].tl.nst[0] + v->tq[0].tl.nst[1];
 		cnt[5] = v->tq[1].tl.n;	/* Memory: every row (#323) */
+		cnt[6] = v->tq[2].tl.nst[0];	/* Schedules: pending (#687) */
 		for (k = n = 0; k < XV_NTAB; k++)
 			if ((xv_ord[k] != 2 || xv_rtab(v)) &&
 			    (xv_ord[k] < 4 || xv_ttab(v, xv_ord[k] - 4)))
@@ -4852,7 +5021,7 @@ xv_filt(struct xv *v, int c)
 	if (!rd && v->tab != 3)	/* Search's hits stay until it runs */
 	{
 		memset(v->sel, 0, sizeof v->sel);
-		for (k = 0; k < 2; k++)
+		for (k = 0; k < 3; k++)
 		{
 			free(v->tq[k].sel);
 			v->tq[k].sel = NULL;
@@ -5216,6 +5385,10 @@ xv_key(struct xv *v, int c)
 			xv_back(v);
 			return 0;
 		}
+		/* a schedule's (#687): Enter reads its turn */
+		if (v->tab == 6 && t && t->chapter[0] &&
+		    (c == '\r' || c == '\n'))
+			xv_read(v, t->chapter, NULL);
 		if (v->tab != 5 || !t)
 			return 0;
 		/* a memory's (#323): its text scrolls (xv_draw_mcard clamps);
@@ -5321,7 +5494,7 @@ xv_key(struct xv *v, int c)
 		if (v->tab == 1)
 			xv_screen_load(v);
 		/* a running session's list, re-read (the follow's is current) */
-		if (v->poll && v->tab == 4 && xv_live(v))
+		if (v->poll > 1 && v->tab == 4 && xv_live(v))
 			xv_tasks(v, 0);
 		return 0;
 	}
@@ -5388,6 +5561,14 @@ xv_key(struct xv *v, int c)
 	sel = &v->sel[v->tab];
 	xv_vis(v);
 	n = v->nvis;
+	/* Schedules (#687): Enter reads a row's turn, so c opens its card */
+	if (v->tab == 6 && c == 'c' && *sel >= 0 && *sel < n)
+	{
+		v->tq[2].ci = v->vis[*sel];
+		v->back = v->mode;
+		v->mode = XV_TCARD;
+		return 0;
+	}
 	switch (c)
 	{
 	case 'j': case PK_DOWN: (*sel)++; break;
@@ -5433,6 +5614,9 @@ xv_key(struct xv *v, int c)
 			/* the turn that last changed it, at its title if said */
 			xv_read(v, v->tq[0].tl.t[k].chapter,
 			        v->tq[0].tl.t[k].title);
+		else if (v->tab == 6 && v->tq[2].tl.t[k].chapter[0])
+			/* a schedule's last turn (#687) */
+			xv_read(v, v->tq[2].tl.t[k].chapter, NULL);
 		else if (v->tab >= 4)
 		{
 			/* a task with no turn, a memory (#323): its card */
@@ -5486,7 +5670,7 @@ xv_free(struct xv *v)
 	xv_sr_free(v);
 	xv_hits_free(v);
 	free(v->hit);
-	for (k = 0; k < 2; k++)
+	for (k = 0; k < 3; k++)
 	{
 		xv_tl_free(&v->tq[k].tl);
 		xv_tl_free(&v->tq[k].tn);
@@ -5585,20 +5769,20 @@ xv_drop_keys(int fd, int any)
 	}
 }
 
-/* The view's follow (#448): its lines carry Tasks and Memory, but for a
-** host that refused that (v->poll). 0, -1 with the status said. */
+/* The view's follow (#448): its lines carry Tasks, Memory and Schedules
+** (#687), but for a host that refused that (v->poll: then without
+** Schedules, then alone). 0, -1 with the status said. */
 static int
 xv_follow(struct xv *v)
 {
-	char *av[] = { v->n, "--follow", "--tasks", "--memory", "--json",
-	               NULL };
+	char *av[] = { v->n, "--follow", "--tasks", "--memory", "--schedules",
+	               "--json", NULL };
+	static const int na[] = { 6, 5, 3 };	/* by v->poll */
+	int n = na[v->poll];
 
-	if (v->poll)
-	{
-		av[2] = "--json";
-		av[3] = NULL;
-	}
-	return xv_start(v, XV_FK, av, v->poll ? 3 : 5, xv_fline);
+	av[n - 1] = "--json";
+	av[n] = NULL;
+	return xv_start(v, XV_FK, av, n, xv_fline);
 }
 
 int
@@ -5671,7 +5855,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		** again after --follow has said something, at most every
 		** XV_TEVERY while shown (a whole transcript read each time),
 		** else less often */
-		if (v->poll && xv_rtab(v) && !v->tq[0].no &&
+		if (v->poll > 1 && xv_rtab(v) && !v->tq[0].no &&
 		    v->kid[XV_TK].pid <= 0 &&
 		    (!v->tq[0].at || (v->tq[0].fol && xv_live(v) && now_ms() -
 		     v->tq[0].at >= (v->tab == 4 ? 1 : 6) * XV_TEVERY)))
@@ -5679,11 +5863,15 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		/* Memory (#323): the same start; again every XV_MEVERY while
 		** shown, a transcript line or not: memory files change apart
 		** from it (LOW-V28) */
-		if (v->poll && xv_rtab(v) && !v->tq[1].no &&
+		if (v->poll > 1 && xv_rtab(v) && !v->tq[1].no &&
 		    v->kid[XV_MK].pid <= 0 &&
 		    (!v->tq[1].at || (xv_live(v) &&
 		     v->tab == 5 && now_ms() - v->tq[1].at >= xv_mevery())))
 			xv_tasks(v, 1);
+		/* Schedules (#687): one query, for a host whose follow carries
+		** none (its live changes need a dch that streams them) */
+		if (v->poll && xv_rtab(v) && !v->tq[2].at)
+			xv_tasks(v, 2);
 		xv_draw(v, force);
 		FD_ZERO(&rs);
 		FD_SET(fd, &rs);
@@ -5721,13 +5909,15 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 				xv_tend(v, v->blk, 1, "");
 			v->blk = -1;
 			/* a host whose dch refused the follow with the lists (an
-			** older dch: "--tasks and --follow", or it does not know
-			** them): the follow alone and the lists' own children */
-			if (!v->have && !v->poll &&
+			** older dch: "--schedules and --tasks", "--tasks and
+			** --follow", or it does not know them): the follow with
+			** fewer, then alone, and the lists' own children */
+			if (!v->have && v->poll < 2 &&
 			    (strstr(f->err, "--follow") ||
+			     strstr(f->err, "--schedules") ||
 			     strstr(f->err, "does not know")))
 			{
-				v->poll = 1;
+				v->poll++;
 				if (xv_follow(v) == 0)
 					continue;
 				snprintf(err, errsz, "dch: %s", v->status);
@@ -5776,6 +5966,8 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 			xv_tend(v, 0, v->kid[XV_TK].rc, v->kid[XV_TK].err);
 		if (xv_pump(v, XV_MK, &rs))
 			xv_tend(v, 1, v->kid[XV_MK].rc, v->kid[XV_MK].err);
+		if (xv_pump(v, XV_HK, &rs))
+			xv_tend(v, 2, v->kid[XV_HK].rc, v->kid[XV_HK].err);
 		if (xv_pump(v, XV_RK, &rs) && v->mode == XV_READ)
 		{
 			const char *e = v->kid[XV_RK].err, *w = xv_noun(v);

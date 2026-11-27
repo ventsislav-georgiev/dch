@@ -31,7 +31,8 @@ Covers:
       (the lists in it, #448) and the chapter each a ctl --xray. A fake
       host that refuses --tasks as a dch before it: no tab, nothing said.
       A fake host older than #446 refuses --follow with the lists (exit 2):
-      the follow alone, then the lists' own queries (#448). A fake
+      the follow without --schedules (#687), then alone, then the lists'
+      own queries (#448). A fake
       answer in two parts 1.5 s apart: the tab with the first part's rows,
       a line over 64 KB dropped, the list's title, warning and partial line,
       PARKED and blocked by 9, 12 on a row, ESC, BEL, C1, bidi and invalid
@@ -85,6 +86,9 @@ class Flaky(Fake):
         # --tasks' (#320), --memory's (#323): bytes, a list of parts sent
         # 1.5 s apart, or "old"
         self.tasks = self.memory = None
+        # a 1.187.0 host (#687): its --follow carries the lists but refuses
+        # --schedules; --schedules' one-shot answer (bytes)
+        self.v187, self.schedules = False, None
 
     def down(self):
         self.up = False
@@ -117,8 +121,18 @@ class Flaky(Fake):
                     elif t == 0x30:
                         argv = json.loads(body)["argv"]
                         self.bodies.append(argv)
-                        if "--follow" in argv and ("--tasks" in argv or
-                                                   "--memory" in argv):
+                        if self.v187 and "--schedules" in argv and \
+                                "--follow" in argv:
+                            c.sendall(frame(0x32, b"dch: bad usage: "
+                                            b"--schedules and --tasks\n") +
+                                      frame(0x33, {"exit": 2}))
+                            continue
+                        if "--schedules" in argv and self.schedules:
+                            c.sendall(frame(0x31, self.schedules) +
+                                      frame(0x33, {"exit": 0}))
+                            continue
+                        if "--follow" in argv and not self.v187 and (
+                                "--tasks" in argv or "--memory" in argv):
                             fl = "--tasks" if "--tasks" in argv \
                                 else "--memory"
                             c.sendall(frame(0x32, ("dch: bad usage: %s and "
@@ -535,10 +549,12 @@ def test_tasks_fake():
             v.pump(0.1)
         fol = [a for a in h.bodies if "--follow" in a]
         check("Tasks, a host older than #446 (#448): the follow with the "
-              "lists refused (exit 2), then the follow alone and the task "
-              "and memory lists' own queries", ok and len(fol) == 2 and
-              "--tasks" in fol[0] and "--memory" in fol[0] and
-              "--tasks" not in fol[1] and "--memory" not in fol[1] and
+              "three lists refused (exit 2), then with two (#687), then the "
+              "follow alone and the task and memory lists' own queries",
+              ok and len(fol) == 3 and "--schedules" in fol[0] and
+              "--tasks" in fol[1] and "--memory" in fol[1] and
+              "--schedules" not in fol[1] and
+              "--tasks" not in fol[2] and "--memory" not in fol[2] and
               [a for a in h.bodies if "--tasks" in a and "--follow" not in a]
               and [a for a in h.bodies if "--memory" in a and
                    "--follow" not in a], h.bodies)
@@ -1208,6 +1224,40 @@ def test_stop():
         h.close()
 
 
+def test_schedules_187():
+    """#687: a 1.187.0 host refuses --follow --schedules (exit 2): the
+    follow with the task and memory lists, and Schedules from one
+    --schedules query of its own, never asked again"""
+    h = Flaky()
+    h.v187 = True
+    h.schedules = (json.dumps({"schema": 1, "block": "schedules",
+                               "session": "fk", "live": False}) + "\n" +
+                   json.dumps({"schedule": {
+                       "id": "aaaa0001", "kind": "cron", "status": "pending",
+                       "cron": "*/10 * * * *", "human": "every 10 minutes",
+                       "prompt": "check CI", "recurring": True}}) + "\n" +
+                   json.dumps({"done": True, "count": 1})).encode() + b"\n"
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        ok = tabbar(v, "Schedules 1")
+        v.pump(2.0)
+        fol = [a for a in h.bodies if "--follow" in a]
+        one = [a for a in h.bodies if "--schedules" in a and
+               "--follow" not in a]
+        check("Schedules, a 1.187.0 host: the follow with three lists "
+              "refused (exit 2), then with two; Schedules from one query of "
+              "its own", ok and len(fol) == 2 and "--schedules" in fol[0] and
+              "--schedules" not in fol[1] and "--tasks" in fol[1] and
+              "--memory" in fol[1] and len(one) == 1, h.bodies)
+        v.key(b"q", 0)
+        check("Schedules, a 1.187.0 host: q exits 0", v.exit() == 0,
+              v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+
+
 def main(port, part="a"):
     if part == "b":
         test_stop()
@@ -1223,6 +1273,7 @@ def main(port, part="a"):
     fixture_memory()
     test_memory(port)
     test_memory_fake()
+    test_schedules_187()
 
 
 if __name__ == "__main__":

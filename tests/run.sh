@@ -408,6 +408,7 @@ pyrun "the --xray view: narrow Reply rows over keycaps and flags (#495)" xray_vi
 pyrun "the --xray view: tabs, card, reader, hostile text, Refs, look-up, order, temp files, live Memory" xray_view_test.py
 pyrun "the --xray view: auto rows, compact, Responses, Codex tasks, Search" xray_view_turns_test.py
 pyrun "the --xray view: Tasks, Memory, a hit's place, twin hits, the tab bar" xray_view_tasks_test.py
+pyrun "the --xray view: Schedules, its groups, card and Enter (#687)" xray_view_schedules_test.py
 pyrun "the --xray view: small card, shell, signals, On screen, picker X, o, the chord's end and detach" xray_view_shell_test.py
 pyrun "the --xray view: the chord over an attach, held o" xray_view_shell_more_test.py
 pyrun "the --xray view: agent rows marked, a hides the cross-session ones (#360)" xray_peer_view_test.py
@@ -1384,6 +1385,7 @@ pyrun "xray: an ended Codex's rollout via History, .jsonl.zst too" xray_codex_en
 pyrun "xray --memory: memories, instruction files, Claude, Codex, serve" xray_memory_test.py
 # --schedules (#685): crons, the /loop wake-up, Codex heartbeats; live, ended
 pyrun "xray --schedules: crons, wake-up, heartbeats, live and ended (#685)" xray_schedules_test.py
+pyrun "xray --follow --schedules: block [2], ended when the Claude leaves (#686)" xray_follow_schedules_test.py
 # the file window's guard (#178): QA's repro with FAKE files, local and over
 # a loopback dch serve, through ended sessions so lite runs it too
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
