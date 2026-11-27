@@ -36,6 +36,13 @@ jobs:
       - name: Build
         run: make
 
+      # #707: only nightly built tests/fuzz, so a signature change broke a harness unseen
+      - name: Fuzz harnesses compile
+        run: |
+          for f in tests/fuzz/*.c; do
+            cc -fsyntax-only -Werror -I. -Ivendor/libghostty-vt/include -Dmain=dch_main "$f" || exit 1
+          done
+
       - name: Binary size
         run: ls -la dch
 
