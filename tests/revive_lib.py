@@ -1217,6 +1217,10 @@ def main(part):
                     check("launch_unknown detail has no double space (#678): "
                           "%r" % dets[-1], "  " not in dets[-1]
                           and "claude NOT resumed" in dets[-1])
+                if n == "rrf":
+                    check("relaunch_failed detail has no double space (#681): "
+                          "%r" % dets[-1], "  " not in dets[-1]
+                          and "claude could not be started" in dets[-1])
                 check("--revive --json %s: running %s, the last key [%r]"
                       % (want[1], want[2], got), got == want)
             for n, kw, why in (
