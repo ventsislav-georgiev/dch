@@ -128,7 +128,10 @@ class Flaky(Fake):
                                       frame(0x33, {"exit": 2}))
                             continue
                         if "--schedules" in argv and self.schedules:
-                            c.sendall(frame(0x31, self.schedules) +
+                            sc = self.schedules
+                            if isinstance(sc, list):
+                                sc = sc.pop(0)    # one answer per query
+                            c.sendall(frame(0x31, sc) +
                                       frame(0x33, {"exit": 0}))
                             continue
                         if "--follow" in argv and not self.v187 and (
@@ -142,6 +145,7 @@ class Flaky(Fake):
                             continue
                         if "--follow" in argv:
                             c.sendall(frame(0x31, self.snap))
+                            self.fconn = c
                             continue    # a stream: held until the close
                         if "--search" in argv and self.search == "old":
                             c.sendall(frame(0x13, {
@@ -1258,6 +1262,46 @@ def test_schedules_187():
         h.close()
 
 
+def test_schedules_187_exit():
+    """#703: on a 1.187.0 host the one --schedules answer goes when the
+    Claude exits (the snapshot is a shell's: no Schedules tab, no "due"),
+    and a second Claude's cron is asked once"""
+    def sched(i):
+        return (json.dumps({"schema": 1, "block": "schedules",
+                            "session": "fk", "live": False}) + "\n" +
+                json.dumps({"schedule": {
+                    "id": i, "kind": "cron", "status": "pending",
+                    "cron": "*/10 * * * *", "human": "every 10 minutes",
+                    "prompt": "check CI", "recurring": True}}) + "\n" +
+                json.dumps({"done": True, "count": 1})).encode() + b"\n"
+    h = Flaky()
+    h.v187 = True
+    h.schedules = [sched("aaaa0001"), sched("bbbb0002")]
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        ok = tabbar(v, "Schedules 1")
+        h.fconn.sendall(frame(0x31, SNAP.replace(b'"claude"', b'"none"')
+                              .replace(b"0000000000000001", b"")))
+        gone = until(lambda: (v.pump(0.1), "Schedules" not in
+                              screen_rows(v).get(2, ""))[1], 10)
+        check("Schedules, a 1.187.0 host: the Claude exits, the tab goes",
+              ok and gone, screen_rows(v).get(2))
+        h.fconn.sendall(frame(0x31, SNAP.replace(b"0000000000000001",
+                                                 b"0000000000000002")))
+        again = tabbar(v, "Schedules 1")
+        v.pump(1.0)
+        one = [a for a in h.bodies if "--schedules" in a and
+               "--follow" not in a]
+        check("Schedules, a 1.187.0 host: a second Claude's cron is asked "
+              "once", again and len(one) == 2, (h.bodies, screen_rows(v).get(2)))
+        v.key(b"q", 0)
+        v.exit()
+    finally:
+        v.close()
+        h.close()
+
+
 def main(port, part="a"):
     if part == "b":
         test_stop()
@@ -1274,6 +1318,7 @@ def main(port, part="a"):
     test_memory(port)
     test_memory_fake()
     test_schedules_187()
+    test_schedules_187_exit()
 
 
 if __name__ == "__main__":
