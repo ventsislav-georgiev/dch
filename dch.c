@@ -4959,6 +4959,7 @@ det_glyph(const char *p)
 ** prompt covering it reads 0 until answered. Exact counts need
 ** SubagentStart/SubagentStop hooks reporting into a sidecar. */
 static char det_panel[4096];	/* its rows, '\n' each (folded): #712 */
+static int det_cut;	/* det_panel lost rows: no row is sure */
 
 static int
 detect_agents(const char *name)
@@ -4968,6 +4969,7 @@ detect_agents(const char *name)
 	size_t pl = 0;
 
 	det_panel[0] = '\0';
+	det_cut = 0;
 	if (dch_env_on("DCH_NO_DETECT") || make_sock_path(name) < 0)
 		return 0;
 	fold = screen_tail(sock_path, &novt);
@@ -4993,14 +4995,12 @@ detect_agents(const char *name)
 		for (q = p + strlen(p); q > p && q[-1] == ' '; q--)
 			;
 		if (q - p == 4 && strncmp(p, "main", 4) == 0)
-			in = 1, n = 0, pl = 0; /* the last panel on screen wins */
-		else if (in && n++ >= 0 && pl < sizeof det_panel)
-			/* full: this row and later ones left out, never misnumbered */
-			pl = pl + (size_t)(q - p) + 2 > sizeof det_panel
-			     ? sizeof det_panel
-			     : pl + (size_t)snprintf(det_panel + pl,
-			                             sizeof det_panel - pl, "%.*s\n",
-			                             (int)(q - p), p);
+			in = 1, n = 0, pl = 0, det_cut = 0; /* the last panel wins */
+		else if (in && n++ >= 0 && !det_cut &&
+		         !(det_cut = pl + (size_t)(q - p) + 2 > sizeof det_panel))
+			/* full: this row and later ones left out, det_cut set */
+			pl += (size_t)snprintf(det_panel + pl, sizeof det_panel - pl,
+			                       "%.*s\n", (int)(q - p), p);
 		if (pl < sizeof det_panel)
 			det_panel[pl] = '\0';
 	}
@@ -7162,6 +7162,15 @@ jfield(const struct json_parser *p, int obj, const char *key)
 	return obj < 0 ? -1 : dch_json_field(p, obj, key);
 }
 
+/* Whether token i is the literal true. */
+static int
+jtrue(const struct json_parser *p, int i)
+{
+	return i >= 0 && p->tok[i].kind == JSON_PRIMITIVE &&
+	       p->tok[i].end - p->tok[i].start == 4 &&
+	       !strncmp(p->text + p->tok[i].start, "true", 4);
+}
+
 /* String token `tok` decoded, then cut by cut_text into out[cap]; -1 when
 ** it is no string. */
 static int
@@ -7316,21 +7325,21 @@ struct sub { char id[64]; time_t mt; };
 /* <dir>/agent-<id>.meta.json: desc[dcap] its "description" (cut_text), and
 ** with type, type[64] its "agentType", tu[128] its "toolUseId" ("" for
 ** any missing) and *fin the meta's mtime when it says "finished":true
-** (Claude Code rewrites it so when the agent ends), else 0. -1 no
-** readable meta. */
+** (Claude Code rewrites it so when the agent ends) or "stoppedByUser":true
+** (*stop 1 then), else 0. -1 no readable meta. */
 static int
 sub_meta(const char *dir, const char *id, char *desc, size_t dcap,
-         char *type, char *tu, time_t *fin)
+         char *type, char *tu, time_t *fin, int *stop)
 {
 	char f[PATH_MAX + 100], meta[65536];
 	struct json_parser p;
 	struct stat st;
 	ssize_t n = -1;
-	int fd, i;
+	int fd;
 
 	*desc = '\0';
 	if (type)
-		*type = *tu = '\0', *fin = 0;
+		*type = *tu = '\0', *fin = 0, *stop = 0;
 	snprintf(f, sizeof f, "%s/agent-%s.meta.json", dir, id);
 	if ((fd = open(f, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
 		return -1;
@@ -7347,10 +7356,8 @@ sub_meta(const char *dir, const char *id, char *desc, size_t dcap,
 			if (type && dch_json_decode(&p, jfield(&p, 0, "toolUseId"),
 			                            tu, 128) < 0)
 				*tu = '\0';
-			if (type && (i = jfield(&p, 0, "finished")) >= 0 &&
-			    p.tok[i].kind == JSON_PRIMITIVE &&
-			    p.tok[i].end - p.tok[i].start == 4 &&
-			    !strncmp(p.text + p.tok[i].start, "true", 4))
+			if (type && ((*stop = jtrue(&p, jfield(&p, 0, "stoppedByUser"))) ||
+			             jtrue(&p, jfield(&p, 0, "finished"))))
 				*fin = st.st_mtime;
 		}
 		else
@@ -7423,7 +7430,7 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 	if (!hit)
 		return 0;
 	memcpy(agent, sv[i].id, sizeof sv->id);
-	(void)sub_meta(dir, agent, adesc, adcap, NULL, NULL, NULL);
+	(void)sub_meta(dir, agent, adesc, adcap, NULL, NULL, NULL, NULL);
 	return 2;
 }
 
@@ -7580,16 +7587,17 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 ** failed, 0 none yet (*end its line's timestamp). The first complete line
 ** stamped since mt - 10 s that is either its Agent call's tool_result (a
 ** background agent's "async_launched" one is its launch, not its end;
-** "is_error":true fails it) or a <task-notification> naming it as
+** "is_error":true in that result block fails it) or a <task-notification> naming it as
 ** <task-id> (<status>completed</status> done, any other status failed). */
 static int
 sub_state(char *b, ssize_t n, off_t at, const char *id, const char *tu,
           time_t mt, long *end)
 {
 	char nd[2][200], *m, *ls, *le, *x, *y;
+	struct json_parser p;
 	size_t nl[2];
 	long ts;
-	int k, r = 0;
+	int k, i, r = 0;
 	char *best = NULL;
 
 	nl[0] = (size_t)snprintf(nd[0], sizeof nd[0], "\"tool_use_id\":\"%s\"", tu);
@@ -7610,9 +7618,13 @@ sub_state(char *b, ssize_t n, off_t at, const char *id, const char *tu,
 			{
 				if (mem_find(ls, le, "\"async_launched\"", 16))
 					continue;
-				/* its own tool_result's is_error: before the next one */
-				y = mem_find(m + 1, le, "\"tool_use_id\":\"", 15);
-				r = mem_find(m, y ? y : le, "\"is_error\":true", 15) ? 2 : 1;
+				/* its own result block's is_error: Claude Code writes it
+				** before or after tool_use_id */
+				i = content_with(&p, ls, le, "tool_use_id", tu);
+				r = i < 0 ? 0 : jtrue(&p, jfield(&p, i, "is_error")) ? 2 : 1;
+				dch_json_free(&p);
+				if (!r)
+					continue;	/* the id outside a result block */
 			}
 			else
 			{
@@ -7643,10 +7655,10 @@ sub_type_is(const char *t, const char *w, size_t wl)
 ** just ended. ord[0, no) indexes a[] by start (key, ms) ascending. The running
 ** ones, if exactly the panel's types in order; else the one offset where
 ** the panel is a contiguous run of all listed ones, type by type, holding
-** every running one; else (none, two, no panel) every row -1. */
+** every running one; else (none, two, no panel, a cut one) every row -1. */
 struct sag { char id[64], type[64], tu[128], desc[201];
              long started, end; long long key; time_t mt, fin;
-             int state, row; };
+             int stop, state, row; };
 
 static void
 sub_rows(struct sag *a, const int *ord, int no)
@@ -7658,6 +7670,8 @@ sub_rows(struct sag *a, const int *ord, int no)
 
 	for (i = 0; i < no; i++)
 		a[ord[i]].row = -1, nr += !a[ord[i]].state;
+	if (det_cut)
+		return;
 	for (r = det_panel; *r && (nx = strchr(r, '\n')); r = nx + 1)
 	{
 		if (m == PMAX)
@@ -7706,9 +7720,11 @@ sub_rows(struct sag *a, const int *ord, int no)
 ** the last SUB_MAX_RUN s. shortcut: a running agent silent that long is
 ** missed, and a Claude Code too old to write "finished" shows an agent
 ** that ended unseen by the window as running for up to that long; widen
-** SUB_MAX_RUN if day-long silent agents ever matter. */
+** SUB_MAX_RUN if day-long silent agents ever matter. An agent with no end
+** last written before its Claude started (cstart, -1 unknown) is a dead
+** Claude's leftover: not listed. */
 static void
-put_subagents(const char *tp)
+put_subagents(const char *tp, time_t cstart)
 {
 	enum { SUB_WIN = 600, SUB_MAX_RUN = 86400, CAND = 128, FWD = 4 << 20,
 	       BUDGET = 16 << 20 };
@@ -7744,7 +7760,7 @@ put_subagents(const char *tp)
 			/* finished well before the window: its end line can't be in it
 			** (one-minute slack for the end line written after the meta) */
 			if (sub_meta(dir, s->id, s->desc, sizeof s->desc, s->type,
-			             s->tu, &s->fin) < 0 || !*s->tu ||
+			             s->tu, &s->fin, &s->stop) < 0 || !*s->tu ||
 			    (s->fin && s->fin < now - SUB_WIN - 60))
 				continue;
 			s->mt = st.st_mtime;
@@ -7795,8 +7811,9 @@ put_subagents(const char *tp)
 		a[i].state = b ? sub_state(b, n, at, a[i].id, a[i].tu, a[i].mt,
 		                           &a[i].end) : 0;
 		if (!a[i].state && a[i].fin)	/* finished, no end line seen */
-			a[i].state = 1, a[i].end = (long)a[i].fin;
-		if (a[i].state && a[i].end < (long)(now - SUB_WIN))
+			a[i].state = a[i].stop ? 2 : 1, a[i].end = (long)a[i].fin;
+		if (a[i].state ? a[i].end < (long)(now - SUB_WIN)
+		               : cstart > 0 && a[i].mt < cstart)
 			continue;
 		for (j = no++; j > 0 && a[ord[j - 1]].key > a[i].key; j--)
 			ord[j] = ord[j - 1];
@@ -7804,10 +7821,11 @@ put_subagents(const char *tp)
 	}
 	free(b);
 	sub_rows(a, ord, no);
-	for (i = 1; i < no; i++)	/* one type, one start ms: no order */
-		if (a[ord[i]].key == a[ord[i - 1]].key &&
-		    !strcasecmp(a[ord[i]].type, a[ord[i - 1]].type))
-			a[ord[i]].row = a[ord[i - 1]].row = -1;
+	for (i = 0; i < no; i++)	/* one type twice in one start ms: no order */
+		for (j = 0; j < no; j++)
+			if (j != i && a[ord[i]].key == a[ord[j]].key &&
+			    !strcasecmp(a[ord[i]].type, a[ord[j]].type))
+				a[ord[i]].row = -1;
 	for (i = no - 1; i >= 0 && i >= no - 64; i--)	/* newest first */
 	{
 		struct sag *s = &a[ord[i]];
@@ -7818,8 +7836,11 @@ put_subagents(const char *tp)
 		put_json_str(s->type);
 		fputs(",\"description\":", stdout);
 		put_json_str(s->desc);
-		printf(",\"started\":%ld,\"state\":\"%s\",\"row\":", s->started,
+		printf(",\"started\":%ld,\"state\":\"%s\"", s->started,
 		       s->state == 2 ? "failed" : s->state ? "done" : "running");
+		if (s->state)
+			printf(",\"ended\":%ld", s->end);
+		fputs(",\"row\":", stdout);
 		if (s->row >= 0)
 			printf("%d}", s->row);
 		else
@@ -20828,7 +20849,8 @@ main_run(int argc, char **argv)
 			if (c)
 			{
 				(void)put_shells(c->pid, c->sid, tp_ok ? tp : NULL, 1);
-				put_subagents(tp_ok ? tp : NULL);
+				put_subagents(tp_ok ? tp : NULL,
+				              proc_started(c->pid));
 			}
 			/* omitted, not 0, when the master can't answer */
 			if (sz && sz[k][0] >= 0)
