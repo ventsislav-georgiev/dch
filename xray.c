@@ -2305,7 +2305,7 @@ iso_num(const char *p, int w, int *v)
 {
 	int neg = 0, k = 0;
 
-	while (isspace((unsigned char)*p))
+	while (*p && isspace((unsigned char)*p))	/* *p: clang --analyze on glibc */
 		p++;
 	if (*p == '+' || *p == '-')
 		neg = *p++ == '-', w--;
