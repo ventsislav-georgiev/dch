@@ -429,6 +429,18 @@ def main():
                       (rc, o, views(ev)))
                 safe("XI8 " + tag, ev)
 
+        # XI16: no-facts rows, "Fix" not in the list, "Fix   the bug" is:
+        # that row is the other agent's, not "Fix" + facts
+        n = sess("x9", {"version": V, "agents": [
+            ag("z1", "Fix"), ag("z2", "Fix   the bug")],
+            "rows": [dict(row("Fix   the bug", "z2"), meta=[]), SHELL]})
+        rc, o, ev = view(n, "z1")
+        check("XI16: no facts, Fix not listed, Fix   the bug is: refused, "
+              "no f", rc == 1 and o.get("result") == "refused" and
+              o.get("reason") in ("not_listed", "ambiguous") and
+              views(ev) == [], (rc, o))
+        safe("XI16", ev, escs=1)
+
         # XI2: a reply heading "Background" above a busy line
         n = sess("x2", {"version": V, "agents": [ag("x21", "Explore"),
                                                  ag("x22", "Write it")],

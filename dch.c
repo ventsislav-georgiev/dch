@@ -11203,10 +11203,11 @@ va_main_close(const char *path, const char *ver)
 /* Drive /tasks to description want (NULL: main): 0 switched, 1 already on
 ** main, -1 refused (va_reason, va_detail). */
 static int
-va_drive(const char *path, const char *want, const char *ver, int busy)
+va_drive(const char *path, const char *want, const char *ver, int busy,
+         const struct sag *sa, const int *ord, int no)
 {
 	struct va_scr s, was;
-	int i, t, m, hit;
+	int i, t, m, hit, o;
 	/* want cut by cut_text at the meta's cap (possibly a character short) */
 	int cut = want && strlen(want) + 4 >= sizeof ((struct sag *)0)->desc;
 
@@ -11274,6 +11275,12 @@ va_drive(const char *path, const char *want, const char *ver, int busy)
 		for (m = 0, hit = -1, t = 0; t < s.n; t++)
 			if (s.ag[t] && va_match(s.lab[t], want, cut))
 				m++, hit = t;
+		/* a no-facts row "Fix   the bug" also reads as "Fix" + facts: when
+		** it is another known agent's description too, it may be theirs */
+		for (o = 0; m == 1 && o < no; o++)
+			if (strcmp(sa[ord[o]].desc, want) &&
+			    va_match(s.lab[hit], sa[ord[o]].desc, 0))
+				m = 2;
 		if (!m)
 			va_say("not_listed", "no /tasks row reads \"%s\"", want);
 		else if (m > 1)
@@ -11469,7 +11476,8 @@ do_view_agent_verb(const char *name, const char *id, int json)
 		want = a[ord[k]].desc;
 	}
 	ty_codex = 0;
-	res = va_drive(path, want, ver, strcmp(r.status, "busy") == 0);
+	res = va_drive(path, want, ver, strcmp(r.status, "busy") == 0, a, ord,
+	               no);
 	return va_print(name, res, json);
 #endif
 }
