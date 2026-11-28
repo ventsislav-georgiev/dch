@@ -9117,11 +9117,13 @@ ag_type(const char *path, const char *text, int paste)
 		** gone socket alone is not an end, heal_tick re-binds it; like a
 		** socket there, it is one failed read, which neither sends nor
 		** resets the timer. Enter again only on a screen that shows the
-		** text. */
+		** text. A read with no composer is retried at once (#738): reads
+		** a fixed AG_POLL_MS apart can alias with a repaint cycle and
+		** land on its torn half every time, past land on a slow host. */
 		for (next = wall_ms() + gap, h = 1; wall_ms() < next ||
 		     (h < 0 && wall_ms() < next + (paste ? land : AG_GONE_MS)); )
 		{
-			poll(NULL, 0, AG_POLL_MS);
+			poll(NULL, 0, h == -1 ? AG_POLL_MS / 5 : AG_POLL_MS);
 			h = composer_holds_at(path, text);
 			if (h == -2 && access(path, F_OK) < 0)
 			{

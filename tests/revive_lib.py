@@ -1273,7 +1273,11 @@ def main(part):
                     ("rtear", 99, ("failed", "not_submitted"), [120, 200]),
                     ("rtear2", 2, ("ok", ""), [120, 200]),
                     ("rtear3", 99, ("failed", "not_submitted"), [1500, 400]),
-                    ("rtear4", 2, ("ok", ""), [1500, 400])):
+                    ("rtear4", 2, ("ok", ""), [1500, 400]),
+                    # rtear5 (#738): a 500 ms cycle, about 2 of dch's
+                    # AG_POLL_MS reads: fixed-period reads alias onto the
+                    # torn 400 and miss the whole 100 past the 1.5 s land
+                    ("rtear5", 2, ("ok", ""), [400, 100])):
                 if lite:
                     continue
                 sid = "60660660-0000-4000-8000-%012d" % len(names)
