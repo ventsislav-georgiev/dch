@@ -8202,9 +8202,10 @@ sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 		** end line lands within seconds of that write, so look there too
 		** (#748: a 10 h old agent stayed "running" for a day): from the
 		** line before mt - 10 s to 256 KB past the one before mt + 10 s
-		** (a busy 10 s can outgrow a fixed 1 MB, #750), FWD at most. The
-		** FWD bytes ending there are read, kept in b2[w0, w0 + n2) for
-		** the next, older, agents: a busy stretch holds several. */
+		** (a busy 10 s can outgrow a fixed 1 MB, #750), FWD at most. Read
+		** is twice that span ending there, BACK2 to FWD, kept in b2[w0,
+		** w0 + n2) for the next, older, agents: a busy stretch holds
+		** several, a quiet one costs BACK2. */
 		if (!a[i].state && !a[i].fin && b && tx_read - r0 < BUDGET &&
 		    (at2 = ts_seek(fd, st.st_size, a[i].mt)) < at)
 		{
@@ -8216,7 +8217,10 @@ sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 			if ((at2 < w0 || e2 > w0 + n2) && tx_read - r0 < BUDGET &&
 			    (b2 || (b2 = malloc(FWD + 1))))
 			{
-				w0 = e2 > FWD ? e2 - FWD : 0;
+				w0 = 2 * (e2 - at2);
+				w0 = e2 - (w0 < BACK2 ? BACK2 : w0 > FWD ? FWD : w0);
+				if (w0 < 0)
+					w0 = 0;
 				if ((n2 = pread(fd, b2, (size_t)(e2 - w0), w0)) < 0)
 					n2 = 0;
 				tx_read += (size_t)n2;

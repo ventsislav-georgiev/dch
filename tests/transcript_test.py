@@ -1195,6 +1195,24 @@ def main():
               % (st, g.get("aSTILL", {}).get("state")),
               st == [("done", t8 + 4 * i + 1) for i in range(5)] and
               g.get("aSTILL", {}).get("state") == "running")
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        # #750: 11 agents 30 s apart, each after 1.5 MB stamped before its
+        # last write - 10 s, its end line 1 s after it, then 4.7 MB: each
+        # second look reads about 1 MB (1.2 with its binary searches), so
+        # all 11 fit the budget (a fixed 4 MB per look fits 3)
+        t9 = int(time.time()) - 400
+        for i in range(11):
+            agent("aS%02d" % i, "Explore", "s", t9 - 60 + i, t9 + 30 * i)
+        with open(satp, "w") as f:
+            for i in range(11):
+                f.write(pad8(t9 + 30 * i - 15) * 1500)
+                f.write(tres("toolu_aS%02d" % i, t9 + 30 * i + 1))
+            f.write(pad8(t9 + 330) * 4700)
+        g, _ = panel()
+        st = [g.get("aS%02d" % i, {}).get("state") for i in range(11)]
+        check("11 scattered agents before the 4 MB window: all done (%s)"
+              % st, st == ["done"] * 11)
         check("a non-Claude row: no subagents key",
               field(b, "subagents") == MISSING)
         os.unlink(os.path.join(sessdir, "%d.json" % sap))
