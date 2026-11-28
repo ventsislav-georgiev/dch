@@ -8115,8 +8115,9 @@ sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 	time_t now = time(NULL), tmin = now;
 	size_t l = tp ? strlen(tp) : 0, el, r0 = tx_read;
 	ssize_t n = 0;
-	off_t at = 0;
-	int na = 0, no = 0, i, j, fd;
+	off_t at = 0, w0 = 0;
+	ssize_t n2 = 0;
+	int na = 0, no = 0, i, j, v, fd, vis[SUB_CAND];
 	DIR *d;
 
 	if (l > 6 && snprintf(dir, sizeof dir, "%.*s/subagents", (int)(l - 6),
@@ -8182,25 +8183,48 @@ sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 		tx_read += (size_t)n;
 		b[n] = '\0';
 	}
+	/* the newest last write first: past BUDGET the second look below
+	** goes to those most likely still listed */
 	for (i = 0; i < na; i++)
 	{
-		off_t at2;
-		ssize_t n2;
+		for (j = i; j > 0 && a[vis[j - 1]].mt < a[i].mt; j--)
+			vis[j] = vis[j - 1];
+		vis[j] = i;
+	}
+	for (v = 0; v < na; v++)
+	{
+		off_t at2, e2;
 
+		i = vis[v];
 		a[i].state = b ? sub_state(b, n, at, a[i].id, a[i].tu, a[i].mt,
 		                           &a[i].end) : 0;
 		/* no end in the window, which starts after its last write: its
-		** end line follows that write within seconds, so look there too
-		** (#748: a 10 h old agent stayed "running" for a day) */
+		** end line lands within seconds of that write, so look there too
+		** (#748: a 10 h old agent stayed "running" for a day): from the
+		** line before mt - 10 s to 256 KB past the one before mt + 10 s
+		** (a busy 10 s can outgrow a fixed 1 MB, #750), FWD at most. The
+		** FWD bytes ending there are read, kept in b2[w0, w0 + n2) for
+		** the next, older, agents: a busy stretch holds several. */
 		if (!a[i].state && !a[i].fin && b && tx_read - r0 < BUDGET &&
-		    (at2 = ts_seek(fd, st.st_size, a[i].mt)) < at &&
-		    (b2 || (b2 = malloc(BACK2 + 1))) &&
-		    (n2 = pread(fd, b2, BACK2, at2)) > 0)
+		    (at2 = ts_seek(fd, st.st_size, a[i].mt)) < at)
 		{
-			tx_read += (size_t)n2;
-			b2[n2] = '\0';
-			a[i].state = sub_state(b2, n2, at2, a[i].id, a[i].tu, a[i].mt,
-			                       &a[i].end);
+			e2 = ts_seek(fd, st.st_size, a[i].mt + 20) + BACK2 / 4;
+			if (e2 > st.st_size)
+				e2 = st.st_size;
+			if (e2 - at2 > FWD)
+				e2 = at2 + FWD;
+			if ((at2 < w0 || e2 > w0 + n2) && tx_read - r0 < BUDGET &&
+			    (b2 || (b2 = malloc(FWD + 1))))
+			{
+				w0 = e2 > FWD ? e2 - FWD : 0;
+				if ((n2 = pread(fd, b2, (size_t)(e2 - w0), w0)) < 0)
+					n2 = 0;
+				tx_read += (size_t)n2;
+				b2[n2] = '\0';
+			}
+			if (n2 > 0 && at2 >= w0)
+				a[i].state = sub_state(b2, n2, w0, a[i].id, a[i].tu,
+				                       a[i].mt, &a[i].end);
 		}
 		if (!a[i].state && a[i].fin)	/* finished, no end line seen */
 			a[i].state = a[i].stop ? 2 : 1, a[i].end = (long)a[i].fin;

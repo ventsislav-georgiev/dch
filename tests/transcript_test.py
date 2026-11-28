@@ -1168,6 +1168,33 @@ def main():
         check("an end line before the 4 MB window: done, not running; a "
               "quiet one with no end: running (%s)" % st,
               st == [("done", t7), ("running", None)])
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        # #750: 5 agents 4 s apart, 1.5 MB in the 10 s before the first
+        # one's last write, 600 KB after each, its end line 1 s after it,
+        # then 4.7 MB (all before the 4 MB window): all done (base: the
+        # 1 MB from mt - 10 s missed all); one with no end stays running
+        t8 = int(time.time()) - 20
+        pad8 = lambda t: jl2({"type": "progress", "timestamp": iso2(t),
+                              "pad": "x" * 1000})
+        for i in range(5):
+            agent("aB%d" % i, "Explore", "b", t8 - 60 + i, t8 + 4 * i)
+        agent("aSTILL", "Explore", "s", t8 - 50, t8 + 20)
+        with open(satp, "w") as f:
+            for k in range(1500):
+                f.write(pad8(t8 - 9 + k * 9 // 1500))
+            for i in range(5):
+                f.write(pad8(t8 + 4 * i) * 600)
+                f.write(tres("toolu_aB%d" % i, t8 + 4 * i + 1))
+            f.write(pad8(t8 + 30) * 4700)
+        g, _ = panel()
+        st = [(g.get("aB%d" % i, {}).get("state"),
+               g.get("aB%d" % i, {}).get("ended")) for i in range(5)]
+        check("5 agents after a busy 10 s, ends past 1 MB from mt - 10 s: "
+              "all done (%s); one with no end: running (%s)"
+              % (st, g.get("aSTILL", {}).get("state")),
+              st == [("done", t8 + 4 * i + 1) for i in range(5)] and
+              g.get("aSTILL", {}).get("state") == "running")
         check("a non-Claude row: no subagents key",
               field(b, "subagents") == MISSING)
         os.unlink(os.path.join(sessdir, "%d.json" % sap))
