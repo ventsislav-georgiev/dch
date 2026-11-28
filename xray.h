@@ -702,6 +702,9 @@ void xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 
 /* ---- --tasks (#319): the session's task list ---------------------------- */
 #define XR_TASKS       50000		/* tasks kept: the newest */
+/* shortcut: no total budget across rows, so XR_TASKS rows of XR_DESC each
+** bound memory at ~800 MB; real lists are tens of short tasks. Add a total
+** byte budget if a transcript ever carries thousands of long ones. */
 #define XR_DESC        (16u << 10)	/* a description, then "cut":true (XM_BODY) */
 #define XR_LINE        (64u << 10)	/* one row line (XM_LINE) */
 #define XR_TASK_DEPS   64		/* blocked_by ids a task keeps */
