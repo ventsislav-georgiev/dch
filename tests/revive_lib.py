@@ -1276,7 +1276,9 @@ def main(part):
                     ("rtear4", 2, ("ok", ""), [1500, 400]),
                     # rtear5 (#738): a 500 ms cycle, about 2 of dch's
                     # AG_POLL_MS reads: fixed-period reads alias onto the
-                    # torn 400 and miss the whole 100 past the 1.5 s land
+                    # torn 400 and miss the whole 100 past the 1.5 s land.
+                    # [700, 50] base-fails 1.206 more often but its 50 ms
+                    # clear is under one read on a slow CI host (#740)
                     ("rtear5", 2, ("ok", ""), [400, 100])):
                 if lite:
                     continue

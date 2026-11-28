@@ -9090,6 +9090,7 @@ ag_type(const char *path, const char *text, int paste)
 	if ((t = ty_push(path, text, paste)) < 0)
 		return t;
 	/* no composer read (a torn repaint): retry soon, as below (#738) */
+	next = wall_ms();	/* land is wall-clock: reads cost time too */
 	for (t = AG_ENTER_MS, h = 1; ;
 	     t += h == -1 ? AG_POLL_MS / 5 : AG_POLL_MS / 2)
 	{
@@ -9099,7 +9100,7 @@ ag_type(const char *path, const char *text, int paste)
 			break;
 		/* a prompt the paste raised: nothing lands until a human
 		** answers it, so stop waiting */
-		if (t >= land || claude_gate(path) == CG_DIALOG)
+		if (wall_ms() >= next + land || claude_gate(path) == CG_DIALOG)
 			return ty_sig ? -6 : -2;	/* it may paint later */
 	}
 	for (n = 0; ; n++)
@@ -11262,6 +11263,13 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 			va_say("not_listed", "the one task shown is \"%s\"", s.det);
 			return (void)va_close(path, ver), -1;
 		}
+		for (o = 0; o < no; o++)
+			if (o != tk && va_match(s.det, sa[ord[o]].desc, 0))
+			{
+				va_say("ambiguous", "the one task shown, \"%s\", "
+				       "reads as another agent too", s.det);
+				return (void)va_close(path, ver), -1;
+			}
 		if (va_key(path, "f") < 0)
 			return -1;
 		if (!va_until(path, &s, 0, NULL, 3000))
