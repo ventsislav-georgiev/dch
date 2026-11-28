@@ -3006,6 +3006,12 @@ usage(void)
 	    "                                             per session: sent,\n"
 	    "                                             skipped (prompt,\n"
 	    "                                             draft, ...) or failed\n"
+	    "  dch --view-agent <name> <id|main> [--json] switch the session's\n"
+	    "                                             Claude Code view to\n"
+	    "                                             subagent <id> (or main)\n"
+	    "                                             via /tasks, gated like\n"
+	    "                                             --say: switched,\n"
+	    "                                             already_main or refused\n"
 	    "  dch --stop <name>...|--all [--json]        pause each session's\n"
 	    "                                             Claude Code, /exit it\n"
 	    "                                             (as the command; typed\n"
@@ -7685,7 +7691,8 @@ sub_rows(struct sag *a, const int *ord, int no)
 	{
 		for (good = 1, i = k = 0; good && i < no; i++)
 			if (!a[ord[i]].state)
-				good = sub_type_is(a[ord[i]].type, w[k], wl[k]), k++;
+				good = k < m && sub_type_is(a[ord[i]].type, w[k],
+				                            wl[k]), k++;
 		if (good)
 		{
 			for (i = k = 0; i < no; i++)
@@ -7722,13 +7729,14 @@ sub_rows(struct sag *a, const int *ord, int no)
 ** that ended unseen by the window as running for up to that long; widen
 ** SUB_MAX_RUN if day-long silent agents ever matter. An agent with no end
 ** last written before its Claude started (cstart, -1 unknown) is a dead
-** Claude's leftover: not listed. */
-static void
-put_subagents(const char *tp, time_t cstart)
+** Claude's leftover: not listed. sub_collect fills a[] and ord[] (both
+** SUB_CAND long) and returns how many are listed; put_subagents prints. */
+#define SUB_CAND 128
+static int
+sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 {
-	enum { SUB_WIN = 600, SUB_MAX_RUN = 86400, CAND = 128, FWD = 4 << 20,
-	       BUDGET = 16 << 20 };
-	static struct sag a[CAND];
+	enum { SUB_WIN = 600, SUB_MAX_RUN = 86400, CAND = SUB_CAND,
+	       FWD = 4 << 20, BUDGET = 16 << 20 };
 	char dir[PATH_MAX], f[PATH_MAX + 100], *b = NULL;
 	struct dirent *e;
 	struct stat st;
@@ -7736,10 +7744,9 @@ put_subagents(const char *tp, time_t cstart)
 	size_t l = tp ? strlen(tp) : 0, el, r0 = tx_read;
 	ssize_t n = 0;
 	off_t at = 0;
-	int na = 0, ord[CAND], no = 0, i, j, fd;
+	int na = 0, no = 0, i, j, fd;
 	DIR *d;
 
-	fputs(",\"subagents\":[", stdout);
 	if (l > 6 && snprintf(dir, sizeof dir, "%.*s/subagents", (int)(l - 6),
 	                      tp) < (int)sizeof dir && (d = opendir(dir)))
 	{
@@ -7820,6 +7827,17 @@ put_subagents(const char *tp, time_t cstart)
 		ord[j] = i;
 	}
 	free(b);
+	return no;
+}
+
+static void
+put_subagents(const char *tp, time_t cstart)
+{
+	static struct sag a[SUB_CAND];
+	int ord[SUB_CAND], no, i, j;
+
+	fputs(",\"subagents\":[", stdout);
+	no = sub_collect(tp, cstart, a, ord);
 	sub_rows(a, ord, no);
 	for (i = 0; i < no; i++)	/* one type twice in one start ms: no order */
 		for (j = 0; j < no; j++)
@@ -10448,6 +10466,535 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	free(text);
 	slist_free(&sl);
 	return bad ? 1 : 0;
+}
+
+/* ---- --view-agent: switch Claude Code's main view (#713) -----------
+**
+** `--view-agent <name> <id|main>` makes the Claude Code in a session show
+** one subagent (or main again) in its main view, by driving the /tasks
+** dialog (2.1.322: immediate, so it opens mid-turn too). --say's gate
+** first, the id looked up in the session's subagents (sub_collect) before
+** any key, then "/tasks" and one key at a time, the screen re-read after
+** each: Down/Up to the row whose label is the agent's description (a
+** label cut with "…" matches as a prefix), then f, which switches the view
+** and closes the dialog. Never Ctrl-C or x (both stop an agent). Esc kills
+** a viewed running agent outside the dialog, so it is sent only to a list
+** with no "main" leader row (main is the view then), re-read right before
+** it, and only on the Claude Code version the keys were read from. */
+
+/* bump only after tests/claude_tasks_contract.py passes on the new one */
+#define VA_VERIFIED "2.1.322"
+#define VA_ROWS 64
+
+static const char *va_reason;	/* the refusal's code */
+static char va_detail[512];
+
+static void
+va_say(const char *code, const char *fmt, ...)
+	__attribute__((format(printf, 2, 3)));
+static void
+va_say(const char *code, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_reason = code;
+	va_start(ap, fmt);
+	vsnprintf(va_detail, sizeof va_detail, fmt, ap);
+	va_end(ap);
+}
+
+#ifdef HAVE_LIBGHOSTTY_VT
+#define VA_PTR "\xe2\x9d\xaf "		/* "❯ ", the focused row's glyph */
+
+struct va_scr { int mode, n, focus; char lab[VA_ROWS][208], det[208]; };
+
+/* The /tasks dialog on screen txt: mode 1 its list ("Background" title,
+** then rows under section headings like "Shells (1)", the focused one
+** led by VA_PTR, down to the "Esc to …" hints), 2 one task's detail pane
+** ("<type> › <description>" with no composer on screen; det = the
+** description), 0 neither. */
+static void
+va_parse(char *txt, struct va_scr *s)
+{
+	static const char *const heads[] = { "Shells", "Monitors", "MCP tasks",
+		"Cloud agents", "Local agents", "Completed", "Dynamic workflows" };
+	char *l, *nx, *e, *end, *det = NULL;
+	size_t w, k, h;
+	int in = 0, rows = 0;
+
+	s->mode = s->n = 0;
+	s->focus = -1;
+	s->det[0] = '\0';
+	for (l = txt; l && *l; l = nx)
+	{
+		nx = strchr(l, '\n');
+		e = nx ? nx : l + strlen(l);
+		if (nx)
+			nx++;
+		/* the dialog's padding and border, both ends */
+		for (;;)
+			if (*l == ' ' || *l == '\t')
+				l++;
+			else if (!strncmp(l, "\xc2\xa0", 2))
+				l += 2;
+			else if (!strncmp(l, "\xe2\x94\x82", 3))
+				l += 3;
+			else
+				break;
+		for (w = l < e ? (size_t)(e - l) : 0; w; w--)
+			if (l[w - 1] == ' ' || l[w - 1] == '\r')
+				;
+			else if (w >= 3 && !strncmp(l + w - 3, "\xe2\x94\x82", 3))
+				w -= 2;
+			else
+				break;
+		if (!in)
+		{
+			if (w == 10 && !strncmp(l, "Background", 10))
+				in = 1;
+			else if (!det && w > 5 &&
+			         (det = mem_find(l, l + w, " \xe2\x80\xba ", 5)))
+				snprintf(s->det, sizeof s->det, "%.*s",
+				         (int)(l + w - det - 5), det + 5);
+			continue;
+		}
+		if (!w)
+			continue;
+		for (k = 0; k + 6 <= w && strncasecmp(l + k, "esc to", 6); k++)
+			;
+		if (k + 6 <= w)
+			break;	/* the hints row: the list is over */
+		for (h = 0; h < sizeof heads / sizeof heads[0]; h++)
+			if (!strncmp(l, heads[h], strlen(heads[h])) &&
+			    l[strlen(heads[h])] == ' ' &&
+			    l[strlen(heads[h]) + 1] == '(' && l[w - 1] == ')')
+				break;
+		if (h < sizeof heads / sizeof heads[0])
+		{
+			rows = 1;
+			continue;
+		}
+		k = w >= 4 && !strncmp(l, VA_PTR, 4) ? 4 : 0;
+		/* above the first heading only the focused row or "main" */
+		if (!rows && !k && !(w == 4 && !strncmp(l, "main", 4)))
+			continue;
+		rows = 1;
+		if (s->n == VA_ROWS)
+			break;
+		if (k)
+			s->focus = s->n;
+		snprintf(s->lab[s->n++], sizeof s->lab[0], "%.*s", (int)(w - k),
+		         l + k);
+	}
+	if (in)
+		s->mode = 1;
+	else if (det && !composer_find(txt, &end))
+		s->mode = 2;
+}
+
+/* Is row label lab the description d? A label cut with "…" is a prefix. */
+static int
+va_match(const char *lab, const char *d)
+{
+	size_t n = strlen(lab);
+
+	if (n > 3 && !strcmp(lab + n - 3, "\xe2\x80\xa6"))
+	{
+		for (n -= 3; n && lab[n - 1] == ' '; n--)
+			;
+		return n && !strncmp(lab, d, n);
+	}
+	return !strcmp(lab, d);
+}
+
+/* The screen at path parsed into s; -1 when it cannot be read. */
+static int
+va_read(const char *path, struct va_scr *s)
+{
+	char *txt, *dim;
+	int err;
+
+	if (!(txt = screen_faint(path, &dim, &err)))
+	{
+		s->mode = s->n = 0;
+		s->focus = -1;
+		return -1;
+	}
+	va_parse(txt, s);
+	free(txt);
+	free(dim);
+	return 0;
+}
+
+/* Re-read until the dialog is in mode want (-1: any but 0), or, with
+** want -2, until its focus or rows differ from was's; 1 when seen within
+** ms. */
+static int
+va_until(const char *path, struct va_scr *s, int want, const struct va_scr *was,
+         long ms)
+{
+	long long end = wall_ms() + ms;
+
+	for (;;)
+	{
+		if (va_read(path, s) == 0 &&
+		    (want == -1 ? s->mode != 0
+		     : want == -2 ? s->mode != 1 || s->focus != was->focus ||
+		                    s->n != was->n
+		     : s->mode == want))
+			return 1;
+		if (wall_ms() >= end || ty_sig)
+			return 0;
+		poll(NULL, 0, AG_POLL_MS / 5);
+	}
+}
+
+/* One key; 0 sent, else the refusal set. */
+static int
+va_key(const char *path, const char *k)
+{
+	int t = ty_push(path, k, 0);
+
+	if (t == -4)
+		va_say("interrupted", "a signal came: no more keys sent");
+	else if (t < 0)
+		va_say("not_typed", "a key could not be sent");
+	return t;
+}
+
+/* Focus row 0 ("main") with Up, each press verified, then f: 0 once the
+** dialog closed, -1 with the refusal set. */
+static int
+va_main_row(const char *path, struct va_scr *s)
+{
+	struct va_scr was;
+	int i;
+
+	for (i = 0; s->focus != 0; i++)
+	{
+		was = *s;
+		if (i == VA_ROWS || s->focus < 0)
+			return va_say("timeout", "the focus is lost (last seen on "
+			              "row %d)", s->focus), -1;
+		if (va_key(path, "\x1b[A") < 0)
+			return -1;
+		if (!va_until(path, s, -2, &was, 3000) || s->mode != 1 ||
+		    s->focus != was.focus - 1 || s->n < 1 ||
+		    strcmp(s->lab[0], "main"))
+			return va_say("timeout", "Up moved the focus from row %d to "
+			              "%d", was.focus, s->focus), -1;
+	}
+	if (va_key(path, "f") < 0)
+		return -1;
+	if (!va_until(path, s, 0, NULL, 3000))
+		return va_say("timeout", "the dialog stayed open after f on "
+		              "main"), -1;
+	return 0;
+}
+
+/* Rule A (Prosper): close the dialog after a late refusal or for
+** already_main. The rows re-read right before the key: "main" on row 0 is
+** reached with Up and taken with f (the view is main then, and the detail
+** says so); else Esc, only to the list and only on VA_VERIFIED (ver);
+** Space closes a detail pane; no dialog, no key. Appends to va_detail;
+** -1 when the dialog was left open for want of a verified Esc. */
+static int
+va_close(const char *path, const char *ver)
+{
+	size_t l = strlen(va_detail);
+	struct va_scr s;
+	long p = env_ms("DCH_VIEW_CLOSE_PAUSE_MS", 0);	/* tests: a row may move */
+
+	if (p > 0)
+		poll(NULL, 0, (int)p);
+	if (va_read(path, &s) < 0 || !s.mode)
+		return 0;
+	if (s.mode == 2)
+		(void)ty_push(path, " ", 0);
+	else if (s.n && !strcmp(s.lab[0], "main"))
+	{
+		const char *r = va_reason;
+		char d[sizeof va_detail];
+
+		memcpy(d, va_detail, sizeof d);
+		if (va_main_row(path, &s) == 0)
+			snprintf(d + l, sizeof d - l, "; view moved to main");
+		else
+			snprintf(d + l, sizeof d - l, "; closing on main failed: %s",
+			         va_detail);
+		memcpy(va_detail, d, sizeof d);
+		va_reason = r;
+	}
+	else if (!ver || strcmp(ver, VA_VERIFIED))
+		return snprintf(va_detail + l, sizeof va_detail - l, "%sdialog_open "
+		                "(Esc not verified on %s)", l ? "; " : "",
+		                ver ? ver : "unknown"), -1;
+	else
+		(void)ty_push(path, "\x1b", 0);
+	return 0;
+}
+
+/* already_main, unless the list could not be closed: refused dialog_open */
+static int
+va_main_close(const char *path, const char *ver)
+{
+	va_detail[0] = '\0';
+	if (va_close(path, ver) == 0)
+		return 1;
+	va_reason = "dialog_open";
+	return -1;
+}
+
+/* Drive /tasks to description want (NULL: main): 0 switched, 1 already on
+** main, -1 refused (va_reason, va_detail). */
+static int
+va_drive(const char *path, const char *want, const char *ver)
+{
+	struct va_scr s, was;
+	int i, t, m, hit;
+
+	switch (claude_gate_q(path, 1))
+	{
+	case CG_EMPTY:
+		break;
+	case CG_DIALOG:
+		return va_say(say_code[SAY_PROMPT], "%s", say_why[SAY_PROMPT]), -1;
+	case CG_DRAFT:
+		return va_say("prompt_not_empty", "the composer is not empty"), -1;
+	default:
+		return va_say(say_code[SAY_NO_SCREEN], "%s",
+		              say_why[SAY_NO_SCREEN]), -1;
+	}
+	switch (ag_type(path, "/tasks", 0))
+	{
+	case 0:
+		break;
+	case -3:
+		return va_say(say_code[SAY_NOT_SUBMITTED], "/tasks stayed in the "
+		              "composer through every Enter"), -1;
+	case -4:
+		return va_say(say_code[SAY_INTERRUPTED], "%s",
+		              say_why[SAY_INTERRUPTED]), -1;
+	default:
+		return va_say(say_code[SAY_NOT_TYPED], "/tasks could not be "
+		              "typed"), -1;
+	}
+	if (!va_until(path, &s, -1, NULL, env_ms("DCH_VIEW_MS", 5000)))
+		return va_say("timeout", "no /tasks dialog seen"), -1;
+	if (s.mode == 2)
+	{
+		if (!want)
+			return va_main_close(path, ver);
+		if (!va_match(s.det, want))
+		{
+			va_say("not_listed", "the one task shown is \"%s\"", s.det);
+			return (void)va_close(path, ver), -1;
+		}
+		if (va_key(path, "f") < 0)
+			return -1;
+		if (!va_until(path, &s, 0, NULL, 3000))
+			return va_say("timeout", "the detail pane stayed open after "
+			              "f"), -1;
+		return 0;
+	}
+	if (!want)
+	{
+		if (!s.n || strcmp(s.lab[0], "main"))
+			return va_main_close(path, ver);
+		return va_main_row(path, &s) ? -1 : 0;
+	}
+	for (i = 0; ; i++)
+	{
+		for (m = 0, hit = -1, t = 0; t < s.n; t++)
+			if (va_match(s.lab[t], want))
+				m++, hit = t;
+		if (!m)
+			va_say("not_listed", "no /tasks row reads \"%s\"", want);
+		else if (m > 1)
+			va_say("ambiguous", "%d /tasks rows read \"%s\"", m, want);
+		else if (s.focus < 0 || i == VA_ROWS)
+			va_say("timeout", "no focused row (last seen on row %d)",
+			       s.focus);
+		if (!m || m > 1 || s.focus < 0 || i == VA_ROWS)
+			return (void)va_close(path, ver), -1;
+		if (s.focus == hit)
+			break;
+		was = s;
+		if (va_key(path, s.focus < hit ? "\x1b[B" : "\x1b[A") < 0)
+			return -1;
+		if (!va_until(path, &s, -2, &was, 3000) || s.mode != 1 ||
+		    abs(s.focus - was.focus) != 1)
+		{
+			va_say("timeout", "the focus went from row %d to %d (%s)",
+			       was.focus, s.focus, s.mode == 1 ? "list" : s.mode ?
+			       "detail pane" : "no dialog");
+			return (void)va_close(path, ver), -1;
+		}
+	}
+	if (va_key(path, "f") < 0)
+		return -1;
+	if (!va_until(path, &s, 0, NULL, 3000))
+		return va_say("timeout", "the dialog stayed open after f"), -1;
+	return 0;
+}
+
+/* The last "version" a line of transcript tp carries, in v; NULL none. */
+static char *
+va_version(const char *tp, char *v, size_t vsz, const char *tu, int *bg)
+{
+	enum { TAIL = 4 << 20 };
+	char *b, *m, *x, *last = NULL, nd[160];
+	struct stat st;
+	off_t at;
+	ssize_t n;
+	size_t nl;
+	int fd;
+
+	*bg = -1;
+	v[0] = '\0';
+	if (!tp || (fd = open(tp, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
+		return NULL;
+	if (fstat(fd, &st) || !S_ISREG(st.st_mode) || !(b = malloc(TAIL + 1)))
+	{
+		close(fd);
+		return NULL;
+	}
+	at = st.st_size > TAIL ? st.st_size - TAIL : 0;
+	n = pread(fd, b, TAIL, at);
+	close(fd);
+	if (n < 0)
+		n = 0;
+	b[n] = '\0';
+	for (m = b; (m = mem_find(m, b + n, "\"version\":\"", 11)); m++)
+		last = m + 11;
+	if (last && (x = memchr(last, '"', (size_t)(b + n - last))) &&
+	    (size_t)(x - last) < vsz)
+		snprintf(v, vsz, "%.*s", (int)(x - last), last);
+	/* backgrounded: its Agent call's "run_in_background":true, or its
+	** "async_launched" result; a call with neither is a blocking one */
+	if (tu && *tu)
+	{
+		char *ls, *le;
+
+		nl = (size_t)snprintf(nd, sizeof nd, "\"tool_use_id\":\"%s\"", tu);
+		for (m = b; nl < sizeof nd && *bg < 1 &&
+		     (m = mem_find(m, b + n, nd, nl)); m++)
+		{
+			for (ls = m; ls > b && ls[-1] != '\n'; ls--)
+				;
+			le = memchr(m, '\n', (size_t)(b + n - m));
+			if (mem_find(ls, le ? le : b + n, "\"async_launched\"", 16))
+				*bg = 1;
+		}
+		nl = (size_t)snprintf(nd, sizeof nd, "\"id\":\"%s\"", tu);
+		for (m = b; nl < sizeof nd && *bg < 1 &&
+		     (m = mem_find(m, b + n, nd, nl)); m++)
+		{
+			for (ls = m; ls > b && ls[-1] != '\n'; ls--)
+				;
+			le = memchr(m, '\n', (size_t)(b + n - m));
+			*bg = mem_find(ls, le ? le : b + n,
+			               "\"run_in_background\":true", 24) != NULL;
+		}
+	}
+	free(b);
+	return *v ? v : NULL;
+}
+
+#endif
+
+static int
+va_print(const char *name, int res, int json)
+{
+	static const char *const rs[] = { "switched", "already_main",
+	                                  "refused" };
+	const char *r = rs[res < 0 ? 2 : res];
+
+	if (json)
+	{
+		fputs("{\"name\":", stdout);
+		put_json_str(name);
+		printf(",\"result\":\"%s\",\"reason\":", r);
+		put_json_str(res < 0 ? va_reason : "");
+		fputs(",\"detail\":", stdout);
+		put_json_str(res < 0 ? va_detail : "");
+		fputs("}\n", stdout);
+	}
+	else if (res < 0)
+		fprintf(stderr, "dch: %s: %s (%s)\n", name, va_detail, va_reason);
+	else
+		printf("%s: %s\n", name, res ? "already on main" : "switched");
+	return res < 0;
+}
+
+static int
+do_view_agent_verb(const char *name, const char *id, int json)
+{
+	static struct sag a[SUB_CAND];
+	const char *self = getenv("DCH_SESSION");
+	char selfb[256], cb[256], path[1100], tp[2000], vb[32], *ver = NULL;
+	const char *want = NULL;
+	struct cmd_info ci;
+	struct crec r;
+	long cx = 0;
+	int st, ord[SUB_CAND], no, k, bg, res;
+
+	ty_arm();
+	session_sock_path(name, path, sizeof path);
+	memset(&r, 0, sizeof r);
+	if (self && *self && strcmp(canon_name(self, selfb, sizeof selfb),
+	                            canon_name(name, cb, sizeof cb)) == 0)
+		return va_say(say_code[SAY_SELF], "%s", say_why[SAY_SELF]),
+		       va_print(name, -1, json);
+	if ((st = cmd_query(path, &ci)) == DCH_ST_UNSUP)
+		return va_say(say_code[SAY_OLD_MASTER], "%s",
+		              say_why[SAY_OLD_MASTER]), va_print(name, -1, json);
+	if (st != 0)
+		return va_say(say_code[SAY_NO_SESSION], "%s",
+		              say_why[SAY_NO_SESSION]), va_print(name, -1, json);
+	k = ci.pid <= 0 ? SAY_NOT_CLAUDE
+	    : agent_front(ci.pid, &r, &cx) <= 0 ? SAY_NOT_CLAUDE
+	    : proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : SAY_OK;
+	cmd_info_free(&ci);
+	if (k != SAY_OK)
+		return va_say(say_code[k], "%s", say_why[k]),
+		       va_print(name, -1, json);
+#ifndef HAVE_LIBGHOSTTY_VT
+	(void)a, (void)ord, (void)no, (void)bg, (void)res, (void)want;
+	(void)tp, (void)vb, (void)ver, (void)id;
+	return va_say(say_code[SAY_NO_SCREEN], "%s", say_why[SAY_NO_SCREEN]),
+	       va_print(name, -1, json);	/* dch-lite: no mirror to gate on */
+#else
+	if (dch_env_on("DCH_NO_DETECT"))
+		return va_say(say_code[SAY_NO_SCREEN], "%s",
+		              say_why[SAY_NO_SCREEN]), va_print(name, -1, json);
+	if (claude_transcript(&r, tp, sizeof tp) != 0)
+		tp[0] = '\0';
+	no = *tp && strcmp(id, "main") ? sub_collect(tp, proc_started(r.pid),
+	                                              a, ord) : 0;
+	for (k = 0; k < no && strcmp(a[ord[k]].id, id); k++)
+		;
+	ver = va_version(*tp ? tp : NULL, vb, sizeof vb,
+	                 k < no ? a[ord[k]].tu : NULL, &bg);
+	if (strcmp(id, "main"))
+	{
+		if (k == no)
+			return va_say("not_listed", "no subagent %s", id),
+			       va_print(name, -1, json);
+		if (a[ord[k]].state)
+			return va_say("not_listed", "subagent %s %s", id,
+			              a[ord[k]].state == 2 ? "failed" : "ended"),
+			       va_print(name, -1, json);
+		if (bg == 0)
+			return va_say("not_listed", "subagent %s runs in the "
+			              "foreground (not in /tasks)", id),
+			       va_print(name, -1, json);
+		want = a[ord[k]].desc;
+	}
+	ty_codex = 0;
+	res = va_drive(path, want, ver);
+	return va_print(name, res, json);
+#endif
 }
 
 /* each_pid callback: pid when it is in the process group *arg. */
@@ -19606,7 +20153,7 @@ main_run(int argc, char **argv)
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
-	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP,
+	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_VIEW, A_STOP,
 	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW, A_PASSIVE, A_GROUPSET, A_GROUPRENAME }
 	    action = argc == 1 ? A_LIST : A_ATTACH;	/* bare dch is dch -l (#590) */
 	char alias_arg[600] = "";
@@ -20154,6 +20701,22 @@ main_run(int argc, char **argv)
 			i++;
 			break;
 		}
+		else if (strcmp(a, "--view-agent") == 0)
+		{
+			/* <name> <id|main> [--json]: the rest of the line */
+			action = A_VIEW;
+			for (say_at = ++i; i < argc; i++)
+				if (strcmp(argv[i], "--json") == 0)
+					opt_json = 1;
+				else
+					argv[say_at + say_n++] = argv[i];
+			if (say_n != 2 || !*argv[say_at] || !*argv[say_at + 1])
+			{
+				fprintf(stderr, "dch: usage: dch --view-agent <name> "
+				        "<id|main> [--json]\n");
+				return 1;
+			}
+		}
 		else if (strcmp(a, "--stop") == 0)
 		{
 			/* <name>... or --all, maybe --json: the rest of the
@@ -20583,12 +21146,12 @@ main_run(int argc, char **argv)
 		return 1;
 	}
 	if (opt_json && action != A_RESTART && action != A_REVIVE &&
-	    action != A_SAY && action != A_STOP && action != A_PIN &&
-	    action != A_UNPIN && action != A_FORGET && action != A_GROUPSET &&
+	    action != A_SAY && action != A_VIEW && action != A_STOP &&
+	    action != A_PIN && action != A_UNPIN && action != A_FORGET && action != A_GROUPSET &&
 	    action != A_GROUPRENAME)
 	{
 		fprintf(stderr, "dch: --json only works with --restart, --revive, "
-		        "--say, --stop, --pin, --unpin, --forget, --group-set, --group-rename\n");
+		        "--say, --view-agent, --stop, --pin, --unpin, --forget, --group-set, --group-rename\n");
 		return 1;
 	}
 	/* clean (--forget --all) never removes a pin; a pin has no force */
@@ -21319,6 +21882,9 @@ main_run(int argc, char **argv)
 	case A_SAY:
 		return do_say_verb(opt_all ? NULL : argv + say_at, say_n,
 		                   inner_argv, inner_argc, opt_json);
+	case A_VIEW:
+		return do_view_agent_verb(argv[say_at], argv[say_at + 1],
+		                          opt_json);
 	case A_STOP:
 		return do_stop_verb(opt_all ? NULL : argv + say_at, say_n,
 		                    opt_json);

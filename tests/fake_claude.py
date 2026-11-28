@@ -55,7 +55,10 @@ State lives in $FAKE_CLAUDE_DIR:
                     MCP_CONNECTION_NONBLOCKING=0 makes it wait; each turn logs mcp, true once they
                     have), bash (the composer is in bash mode, as a
                     human left it), key_cap (a draft stops growing at
-                    that many characters: typed text never lands whole)
+                    that many characters: typed text never lands whole),
+                    tasks (#713, read at start for its files: a /tasks
+                    dialog laid out as Claude Code 2.1.322's "Background"
+                    list, see TASKS below)
   <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE*,
                     DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
                     cfg, MCP_CONNECTION_NONBLOCKING's value as nonblocking), line (typed), turn (a message taken),
@@ -171,6 +174,189 @@ dismissed = None     # the screen knob a digit answered
 exit_up = []         # /exit's "Background work is running" prompt, its work
 
 
+# --- /tasks (#713) ---------------------------------------------------------
+# The tasks knob: {"version": written into every transcript line (default
+# the installed one), "agents": [{"id","type","desc","state":"running|done|
+# failed","bg"}] written as <transcript>/subagents files and Agent calls in
+# its transcript ($CONFIG/projects/-fake/<sid>.jsonl), "rows": [{"label",
+# "kind":"shell|agent|completed","id"}] the dialog's rows below the "main"
+# leader row, which shows while viewing an agent or, with "main_after_ms",
+# that long after the dialog opened, "view": the agent viewed at start}.
+# /tasks (immediate: busy too) opens the list, focus on row 0, or with one row while on main that row's detail
+# pane ("<type> › <label>"). List: Up/Down move, f takes main or an agent
+# (the view switches) and closes, Enter opens a detail pane, Esc closes, x
+# logs stop. Detail: f takes the agent, Space or Enter close, Left goes
+# back, Esc closes. Outside the dialog Esc or Ctrl-C while viewing an agent
+# logs kill (it would stop the agent) and goes back to main. Every byte read
+# is logged as byte (hex) with the view and dialog; also tasks_open, view,
+# esc, kill, stop.
+vagent = None        # the agent id the main view shows, None main
+dlg = None           # None, "list" or "detail"
+dfocus, ddet, dopen = 0, None, 0.0
+
+
+def tasks():
+    return ctl().get("tasks")
+
+
+def drows():
+    t = tasks() or {}
+    rows = list(t.get("rows", []))
+    ma = t.get("main_after_ms")
+    if vagent is not None or (ma is not None and dlg and
+                            time.time() - dopen >= ma / 1000.0):
+        rows.insert(0, {"label": "main", "kind": "main"})
+    return rows
+
+
+def tasks_files():
+    """The transcript, its lines stamped with the version, and the
+    subagents' files (sub_collect reads them)."""
+    t = tasks()
+    if not t:
+        return
+    ver = t.get("version", VERSION)
+    d = os.path.join(base, "projects", "-fake")
+    os.makedirs(os.path.join(d, SID, "subagents"), exist_ok=True)
+    now = time.time()
+
+    def iso(x):
+        return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(x))
+
+    def jl(o):
+        o.update(version=ver, sessionId=SID, timestamp=iso(now))
+        return json.dumps(o, separators=(",", ":")) + "\n"
+    lines = [jl({"type": "user", "message": {"role": "user",
+                                             "content": "hi"}})]
+    for a in t.get("agents", []):
+        tu = "toolu_" + a["id"]
+        sd = os.path.join(d, SID, "subagents")
+        with open(os.path.join(sd, "agent-%s.meta.json" % a["id"]), "w") as f:
+            json.dump({"agentType": a.get("type", "general-purpose"),
+                       "description": a["desc"], "toolUseId": tu}, f)
+        with open(os.path.join(sd, "agent-%s.jsonl" % a["id"]), "w") as f:
+            f.write(json.dumps({"type": "user", "isSidechain": True,
+                                "agentId": a["id"],
+                                "timestamp": iso(now)}) + "\n")
+        inp = {"description": a["desc"], "prompt": "p"}
+        if a.get("bg"):
+            inp["run_in_background"] = True
+        lines.append(jl({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": tu, "name": "Agent", "input": inp}]}}))
+        if a.get("bg"):
+            lines.append(jl({"type": "user", "message": {"content": [
+                {"tool_use_id": tu, "type": "tool_result", "content": "ok"}]},
+                "toolUseResult": {"status": "async_launched"}}))
+        if a.get("state") in ("done", "failed"):
+            blk = {"tool_use_id": tu, "type": "tool_result", "content": "ok"}
+            if a["state"] == "failed":
+                blk["is_error"] = True
+            lines.append(jl({"type": "user", "message": {"content": [blk]},
+                             "toolUseResult": {"status": "completed"}}))
+    with open(os.path.join(d, SID + ".jsonl"), "w") as f:
+        f.writelines(lines)
+
+
+def tasks_paint():
+    """The dialog in place of the composer: 2.1.322's row layout, a
+    two-column glyph (the focused row's "❯", else blank) and a gap, then the
+    label; section headings "<Label> (<n>)" in the same column."""
+    rows = drows()
+    if dlg == "detail":
+        r = rows[ddet] if ddet is not None and ddet < len(rows) else {}
+        return ["─" * 60, " %s \u203a %s" % (
+            "shell" if r.get("kind") == "shell" else "general-purpose",
+            r.get("label", "?")), "  Running", "",
+            " \u2190 to go back \u00b7 Space to close \u00b7 f to foreground"]
+    out = ["─" * 60, " Background", " %d active" % len(rows), ""]
+    heads = {"shell": "Shells", "agent": "Local agents",
+             "completed": "Completed"}
+    last = None
+    for i, r in enumerate(rows):
+        k = r.get("kind", "agent")
+        if k in heads and k != last:
+            n = sum(1 for x in rows if x.get("kind", "agent") == k)
+            if last is not None:
+                out.append("")
+            out.append("   %s (%d)" % (heads[k], n))
+        last = k
+        out.append(" %s %s" % ("\u276f" if i == dfocus else " ", r["label"]))
+    out += ["", " \u2191/\u2193 to select \u00b7 Enter to vagent \u00b7 f to "
+            "foreground \u00b7 x to stop \u00b7 Esc to close"]
+    return out
+
+
+def tasks_open():
+    global dlg, dfocus, ddet, dopen
+    dopen, dfocus = time.time(), 0
+    rows = drows()
+    dlg = "list"
+    if vagent is None and len(rows) == 1 and rows[0].get("kind") != "main":
+        dlg, ddet = "detail", 0
+    log(ev="tasks_open", text=dlg)
+
+
+def tasks_close(why):
+    global dlg
+    dlg = None
+    log(ev="tasks_close", text=why)
+
+
+def set_view(v):
+    global vagent
+    vagent = v
+    log(ev="view", text=v or "main")
+
+
+def tasks_take(r):
+    """f or Enter that takes a row's vagent: main or an agent."""
+    if r.get("kind") == "main":
+        set_view(None)
+    elif r.get("kind") in ("agent", "completed"):
+        set_view(r.get("id"))
+    else:
+        return False
+    tasks_close("vagent")
+    return True
+
+
+def tasks_key(k):
+    """A key while the dialog is up ("up", "down", or the byte)."""
+    global dfocus, dlg, ddet
+    rows = drows()
+    if dlg == "detail":
+        r = rows[ddet] if ddet is not None and ddet < len(rows) else {}
+        if k == b"f":
+            tasks_take(r)
+        elif k in (b" ", b"\r"):
+            tasks_close("space")
+        elif k == b"\x1b":
+            log(ev="esc", text="detail", vagent=vagent)
+            tasks_close("esc")
+        elif k == "left":
+            dlg = "list"
+        elif k == b"x":
+            log(ev="stop", text=r.get("label"))
+        return
+    if k == "up":
+        dfocus = max(dfocus - 1, 0)
+    elif k == "down":
+        dfocus = min(dfocus + 1, len(rows) - 1)
+    elif k == b"\x1b":
+        log(ev="esc", text="list", vagent=vagent)
+        tasks_close("esc")
+    elif k == b"x":
+        log(ev="stop", text=rows[dfocus]["label"])
+    elif k == b"f" and dfocus < len(rows):
+        tasks_take(rows[dfocus])
+    elif k == b"\r" and dfocus < len(rows):
+        r = rows[dfocus]
+        if r.get("kind") in ("main", "completed"):
+            tasks_take(r)
+        else:
+            dlg, ddet = "detail", dfocus
+
+
 def screen_up(c):
     return c.get("screen") and json.dumps(c) != dismissed
 idle_gap = 0.0       # a turn ended with a message queued: idle this long
@@ -231,7 +417,9 @@ def paint(c):
     for q in queue:
         rows += ["❯ " + q, "  ctrl+enter to send now"]
     rule = "─" * 60
-    if exit_up:
+    if dlg:
+        rows += tasks_paint()
+    elif exit_up:
         # Claude Code 2.1.322's, under a ▔ rule (dch reads it as a prompt)
         rows += ["▔" * 60, "   Background work is running",
                  "   The following will stop when you exit:"]
@@ -342,12 +530,17 @@ def submit(text, c, confirmed=False):
     if text.startswith("!run "):
         run_cmd(text[5:])
         return
+    if text.strip() == "/tasks" and tasks() is not None:
+        tasks_open()      # immediate: a busy turn does not queue it
+        return
     if status == "busy":
         queue.append(text)
     else:
         take(text)
 
 
+tasks_files()
+vagent = (tasks() or {}).get("view")     # already viewing that agent
 # its MCP servers connect in the background, after the idle record (#364)
 MCP_AT = time.time() + ctl().get("mcp_ms", 0) / 1000.0
 # start busy if asked, so a status read before the first tick never sees idle
@@ -406,6 +599,9 @@ while True:
             bye(0)
         buf += chunk
         burst = len(chunk) > 1
+        if tasks() is not None:
+            for bt in chunk:
+                log(ev="byte", text="%02x" % bt, view=vagent, dlg=dlg)
         while buf:
             if buf.startswith(b"\033["):          # paste marker / key
                 end = 2
@@ -420,6 +616,9 @@ while True:
                     log(ev="paste")    # before the lag: it has the paste
                     # busy right after --resume: a paste shows this late
                     time.sleep(c.get("lag_ms", 0) / 1000.0)
+                elif dlg and seq in (b"\033[A", b"\033[B", b"\033[D"):
+                    tasks_key({b"A": "up", b"B": "down",
+                               b"D": "left"}[seq[2:]])
                 elif seq == b"\033[201~":
                     in_paste = False
                     collapsed = len(draft) - pstart > 800
@@ -428,6 +627,12 @@ while True:
             ch, buf = buf[:1], buf[1:]
             if in_paste and ch in (b"\r", b"\n"):
                 draft += "\n"      # a paste keeps its line breaks
+            elif dlg:
+                tasks_key(ch)
+            elif ch in (b"\x1b", b"\x03") and vagent is not None and \
+                    tasks() is not None:
+                log(ev="kill", text=vagent)   # Claude Code stops the agent
+                set_view(None)
             elif exit_up and ch in (b"1", b"\r"):
                 log(ev="exit_answer", text=ch.decode())
                 exit_up = []
@@ -503,7 +708,7 @@ while True:
             set_status(want)
     view = (status, len(transcript), len(queue), draft, json.dumps(c),
             prompt_up, collapsed, dismissed, kill_dialog, len(exit_up),
-            torn(c), bash)
+            torn(c), bash, dlg, dfocus, len(drows()) if dlg else 0, vagent)
     if view != last:
         if cont_paints:
             cont_paints -= 1
