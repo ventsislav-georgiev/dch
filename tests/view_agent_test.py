@@ -228,6 +228,16 @@ def main():
               ev[-3:])
         safe("ambiguous", ev, escs=1)
 
+        # X7a (#739): same description, only e2 shown: targeting e1 is ambiguous
+        n = sess("xq", {"version": V, "agents": [ag("e1", "Explore"),
+                                                  ag("e2", "Explore")],
+                         "rows": [SHELL, row("Explore", "e2")]})
+        rc, o, ev = view(n, "e1")
+        check("X7a: a same-description agent not shown: ambiguous, no f",
+              rc == 1 and is_(o, "refused", "ambiguous") and views(ev) == [],
+              (rc, o, views(ev)))
+        safe("X7a", ev, escs=1)
+
         # --- not_listed before any key: missing, ended, failed, blocking ---
         n = sess("nl", {"version": V, "agents": [
             ag("c1", "Done already", "done"), ag("c2", "Broke", "failed"),
