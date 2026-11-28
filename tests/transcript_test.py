@@ -830,6 +830,53 @@ def main():
                   "window: both listed (%s)" % got,
                   got.get(p7a, {}).get("id") == "b730a" and
                   got.get(p7b, {}).get("id") == "b730b")
+            # --- #737: A's call, 1.2 MB on its result (in B's window only),
+            # then B: the windows run in ascending start, A's first
+            with open(stp, "w") as f:
+                f.write(filler(t7a - 3600, 20))
+                f.write(mcall("toolu_a", t7a - 10, x7a, "Watch a"))
+                f.write(filler(t7a - 10, 1150))
+                f.write(mres("toolu_a", t7a - 7, "b737a"))
+                f.write(mcall("toolu_b", t7b, x7b, "Watch b"))
+                f.write(mres("toolu_b", t7b, "b737b"))
+            got = mons([p7a, p7b])
+            check("a result 1.2 MB after its call, read in a later window: "
+                  "both listed (%s)" % got,
+                  got.get(p7a, {}).get("id") == "b737a" and
+                  got.get(p7b, {}).get("id") == "b737b")
+            # more than 1 MB between the window start and the call: read on
+            # in steps, a line longer than the buffer skipped
+            big = jl({"type": "user", "isSidechain": False,
+                      "timestamp": iso(t7b - 2), "message": {
+                          "role": "user", "content": [{
+                              "type": "image", "source": {
+                                  "type": "base64", "media_type": "image/png",
+                                  "data": "A" * 1300000}}]}})
+            for what, pre in (("1.2 MB of lines", filler(t7b - 2, 1150)),
+                              ("one 1.3 MB image line", big)):
+                with open(stp, "w") as f:
+                    f.write(filler(t7b - 3600, 20) + pre)
+                    f.write(mcall("toolu_b", t7b, x7b, "Watch b"))
+                    f.write(mres("toolu_b", t7b, "b737b"))
+                got = mons([p7b])
+                check("%s in the 2 s before a monitor's call: listed (%s)" %
+                      (what, got.get(p7b)),
+                      got.get(p7b, {}).get("id") == "b737b")
+            # 64 calls of the live command fill the cap (63 old, one whose
+            # child is gone), then the live one's: null, never the dead id
+            with open(stp, "w") as f:
+                f.write(filler(t7b - 3600, 20))
+                for i in range(63):
+                    f.write(mcall("toolu_o%d" % i, t7b - 60, x7b, "Old", i))
+                    f.write(mres("toolu_o%d" % i, t7b - 60, "bo%d" % i))
+                f.write(mcall("toolu_old", t7b - 5, x7b, "Bold"))
+                f.write(mres("toolu_old", t7b - 5, "bold"))
+                f.write(mcall("toolu_b", t7b, x7b, "Live"))
+                f.write(mres("toolu_b", t7b, "blive"))
+            got = mons([p7b])
+            check("a full cap of one command's calls: its monitor listed "
+                  "with id null (%s)" % got.get(p7b),
+                  p7b in got and got[p7b].get("id") is None)
             os.unlink(os.path.join(sessdir, "%d.json" % hp))
             check("its record gone: no shells key", field(h, "shells") ==
                   MISSING)

@@ -326,10 +326,15 @@ def main():
                         "rows": [SHELL, row("Busy helper", "i1")]},
                  busy=True)
         rc, o, ev = view(n, "i1")
-        check("busy Claude: /tasks opens mid-turn, switched",
-              rc == 0 and is_(o, "switched") and views(ev) == ["i1"],
-              (rc, o, views(ev)))
-        safe("busy", ev)
+        def no_keys(ev):
+            return not [e for e in ev if e["ev"] in (
+                "byte", "line", "tasks_open", "view", "kill", "stop")]
+
+        def busy_refused(o):
+            return is_(o, "refused", "busy") and \
+                o["detail"] == "Claude is mid-turn; try when idle"
+        check("busy Claude: refused busy before /tasks, no key sent",
+              rc == 1 and busy_refused(o) and no_keys(ev), (rc, o, ev))
 
         # --- another version: no Esc, the dialog left open -----------------
         n = sess("vm", {"version": "2.1.300",
@@ -424,6 +429,18 @@ def main():
                       (rc, o, views(ev)))
                 safe("XI8 " + tag, ev)
 
+        # XI16: no-facts rows, "Fix" not in the list, "Fix   the bug" is:
+        # that row is the other agent's, not "Fix" + facts
+        n = sess("x9", {"version": V, "agents": [
+            ag("z1", "Fix"), ag("z2", "Fix   the bug")],
+            "rows": [dict(row("Fix   the bug", "z2"), meta=[]), SHELL]})
+        rc, o, ev = view(n, "z1")
+        check("XI16: no facts, Fix not listed, Fix   the bug is: refused, "
+              "no f", rc == 1 and o.get("result") == "refused" and
+              o.get("reason") in ("not_listed", "ambiguous") and
+              views(ev) == [], (rc, o))
+        safe("XI16", ev, escs=1)
+
         # XI2: a reply heading "Background" above a busy line
         n = sess("x2", {"version": V, "agents": [ag("x21", "Explore"),
                                                  ag("x22", "Write it")],
@@ -462,14 +479,52 @@ def main():
                 ag("r31", "Explore")], "rows": [row("Explore", "r31")],
                 "view": "r31", "shut": True}, above=above, busy=True)
             rc, o, ev = view(n, "main")
-            check("XI7 %s: no dialog opened, the shape%s above a busy "
-                  "composer while viewing an agent: timeout, no Esc, "
-                  "nothing stopped" % (tag, "" if tag == "R3" else
-                                       " without its rule"),
-                  rc == 1 and is_(o, "refused", "timeout") and
-                  "no /tasks dialog" in o["detail"] and not lone_esc(ev) and
-                  not [e for e in ev if e["ev"] in ("kill", "stop", "view")],
+            check("XI7 %s: the shape%s above a busy composer while viewing "
+                  "an agent: refused busy, no key, nothing stopped" %
+                  (tag, "" if tag == "R3" else " without its rule"),
+                  rc == 1 and busy_refused(o) and no_keys(ev),
                   (rc, o, lone_esc(ev), [e["ev"] for e in ev][-6:]))
+        # LOW-XI13: a decoy streamed in after /tasks was typed. Busy turn:
+        # refused before typing (D1, D1t); idle turn: it sits above a live
+        # composer, so it is not the dialog (timeout, no Esc)
+        def late_decoy(n):
+            def go():
+                k = len(events(n))
+                if until(lambda: [e for e in events(n)[k:] if e["ev"] in (
+                        "line", "tasks_open")], 8):
+                    p = os.path.join(fc, n + ".ctl")
+                    with open(p) as f:
+                        c = json.load(f)
+                    c["above"] = decoy
+                    with open(p + ".t", "w") as f:
+                        json.dump(c, f)
+                    os.replace(p + ".t", p)
+            th = threading.Thread(target=go)
+            th.start()
+            return th
+        for tag, tgt, busy in (("D1", "main", True), ("D1t", "r52", True),
+                               ("I1", "main", False)):
+            n = sess(tag.lower(), {"version": V, "agents": [
+                ag("r51", "Explore"), ag("r52", "Decoy")],
+                "rows": [row("Explore", "r51")], "view": "r51",
+                "shut": True}, busy=busy)
+            th = late_decoy(n)
+            rc, o, ev = view(n, tgt)
+            th.join()
+            if busy:
+                check("XI13 %s: busy turn, refused busy before typing, no "
+                      "key, nothing stopped" % tag,
+                      rc == 1 and busy_refused(o) and no_keys(ev),
+                      (rc, o, [e["ev"] for e in ev][-6:]))
+            else:
+                check("XI13 %s: a decoy streamed in above the live "
+                      "composer: timeout, no Esc, no f, nothing stopped" %
+                      tag, rc == 1 and is_(o, "refused", "timeout") and
+                      "no /tasks dialog" in o["detail"] and
+                      not lone_esc(ev) and not views(ev) and
+                      not [e for e in ev if e["ev"] in ("kill", "stop") or
+                           (e["ev"] == "byte" and e["text"] == "66")],
+                      (rc, o, lone_esc(ev), [e["ev"] for e in ev][-6:]))
         n = sess("r4", {"version": V, "agents": [ag("r41", "Explore")],
                         "rows": [SHELL, row("Explore", "r41")],
                         "hints": False})
@@ -527,6 +582,18 @@ def main():
               "columns: switched", rc == 0 and is_(o, "switched") and
               views(ev) == ["x71"], (rc, o, views(ev)))
         safe("XI4 CJK", ev)
+
+        # XI15: the same over-cap descriptions with facts shown: the name
+        # column is cut at 50 with "\u2026", the want itself at its cap
+        for tag, d in (("242 B ASCII", asc), ("216 B CJK", cjk)):
+            n = sess("x8" + tag[:2].strip(), {"version": V, "agents": [
+                ag("x81", d), ag("x82", "Other")],
+                "rows": [row(d.rstrip(), "x81"), row("Other", "x82")]})
+            rc, o, ev = view(n, "x81")
+            check("XI15: %s with facts, name cut with \u2026: switched" % tag,
+                  rc == 0 and is_(o, "switched") and views(ev) == ["x81"],
+                  (rc, o, views(ev)))
+            safe("XI15 " + tag, ev)
 
         # --- DCH_NO_DETECT, and the text shape -----------------------------
         n = sess("nd", {"version": V, "agents": [ag("l1", "Agent")],
