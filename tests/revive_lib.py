@@ -1276,7 +1276,7 @@ def main(part):
                     ("rtear4", 2, ("ok", ""), [1500, 400]),
                     # rtear5 (#738): a 500 ms cycle, about 2 of dch's
                     # AG_POLL_MS reads: fixed-period reads alias onto the
-                    # torn 400 and miss the whole 100 past the 1.5 s land.
+                    # torn 400 and miss the whole 100 past the land.
                     # [700, 50] base-fails 1.206 more often but its 50 ms
                     # clear is under one read on a slow CI host (#740)
                     ("rtear5", 2, ("ok", ""), [400, 100])):
@@ -1295,8 +1295,12 @@ def main(part):
 
                 def say_up():
                     r2 = run("--say", n, "--json", "--", long_msg,
+                             # rtear5 (#744): land is wall time since
+                             # #740; 1.5 s holds 3 clear 100 ms windows, too
+                             # few for a slow CI host's reads
                              env=dict(renv, DCH_AGENT_LAND_MS="6000"
-                                      if tear[0] > 1000 else "1500"),
+                                      if tear[0] > 1000 else "3000"
+                                      if n == "rtear5" else "1500"),
                              timeout=120)
                     o = (ndjson(r2.stdout) or [{}])[-1]
                     said[:] = [r2, (o.get("result"), o.get("reason"))]
