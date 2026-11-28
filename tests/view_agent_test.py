@@ -331,6 +331,17 @@ def main():
               ["space"] and views(ev) == [], (rc, o, ev[-3:]))
         safe("detail non-target", ev)
 
+        # X9a (#741): one-task detail pane of e2, target e1, same description
+        n = sess("xd", {"version": V, "agents": [ag("e1", "Explore"),
+                                                  ag("e2", "Explore")],
+                         "rows": [row("Explore", "e2")]})
+        rc, o, ev = view(n, "e1")
+        check("X9a: one-task pane of a same-description agent: ambiguous, no f",
+              rc == 1 and is_(o, "refused", "ambiguous") and views(ev) == [] and
+              [e["text"] for e in ev if e["ev"] == "tasks_close"] ==
+              ["space"], (rc, o, ev[-3:]))
+        safe("X9a", ev)
+
         # --- a busy Claude -------------------------------------------------
         n = sess("bz", {"version": V, "agents": [ag("i1", "Busy helper")],
                         "rows": [SHELL, row("Busy helper", "i1")]},

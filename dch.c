@@ -11263,6 +11263,13 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 			va_say("not_listed", "the one task shown is \"%s\"", s.det);
 			return (void)va_close(path, ver), -1;
 		}
+		for (o = 0; o < no; o++)
+			if (o != tk && va_match(s.det, sa[ord[o]].desc, 0))
+			{
+				va_say("ambiguous", "the one task shown, \"%s\", "
+				       "reads as another agent too", s.det);
+				return (void)va_close(path, ver), -1;
+			}
 		if (va_key(path, "f") < 0)
 			return -1;
 		if (!va_until(path, &s, 0, NULL, 3000))
