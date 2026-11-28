@@ -1150,6 +1150,24 @@ def main():
         check("ended ones: the panel fits at two offsets: rows null (%s)"
               % r, r == [None] * 4 and g.get("aA0", {}).get("state") ==
               "done")
+        for fn in os.listdir(sad):
+            os.unlink(os.path.join(sad, fn))
+        # #748: an end line more than the 4 MB window back from the end is
+        # found at the agent's last write; one with no end stays running
+        t7 = int(time.time())
+        agent("aGONE", "Plan", "g", t7 - 5, t7)
+        agent("aQUIET", "Explore", "q", t7 - 4, t7)
+        with open(satp, "w") as f:
+            f.write(tres("toolu_aGONE", t7))
+            pad = jl2({"type": "progress", "timestamp": iso2(t7),
+                       "pad": "x" * 1000})
+            f.write(pad * 4700)
+        g, _ = panel("Explore")
+        st = [(g.get(i, {}).get("state"), g.get(i, {}).get("ended"))
+              for i in ("aGONE", "aQUIET")]
+        check("an end line before the 4 MB window: done, not running; a "
+              "quiet one with no end: running (%s)" % st,
+              st == [("done", t7), ("running", None)])
         check("a non-Claude row: no subagents key",
               field(b, "subagents") == MISSING)
         os.unlink(os.path.join(sessdir, "%d.json" % sap))

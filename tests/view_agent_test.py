@@ -384,6 +384,20 @@ def main():
                   (rc, o, ev[-3:]))
             safe("X9l " + tag, ev, escs=1 if tag == "list" else 0)
 
+        # X10a (#749): the X9l pair as no-facts rows (the facts-bearing
+        # list twin is cut by the name column on 1.211 too, so guards nothing)
+        n = sess("xla", {"version": V, "agents": [
+            ag("m1", pre + " alpha"), ag("m2", pre + " beta"),
+            ag("m3", "Other")],
+            "rows": [dict(row(pre + " beta", "m2"), meta=[]),
+                     dict(row("Other", "m3"), meta=[])]}, size="300x30")
+        rc, o, ev = view(n, "m1")
+        check("X10a: list, no facts, A cut at the cap, only B shown whole: "
+              "ambiguous, no f", rc == 1 and
+              is_(o, "refused", "ambiguous") and views(ev) == [],
+              (rc, o, ev[-3:]))
+        safe("X10a", ev, escs=1)
+
         # --- a busy Claude -------------------------------------------------
         n = sess("bz", {"version": V, "agents": [ag("i1", "Busy helper")],
                         "rows": [SHELL, row("Busy helper", "i1")]},
