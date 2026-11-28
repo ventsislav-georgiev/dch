@@ -7611,7 +7611,7 @@ t_tasks(void)
 	      strstr(o, "\"source\":\"claude\",\"title\":null,\"partial\":true}\n"
 	             "{\"task\":{\"id\":\"12\",\"title\":\"Fix it\",\"status\":"
 	             "\"pending\",\"label\":\"pending\",\"active\":\"Fixing\","
-	             "\"note\":\"why\",\"created\":\"2026-11-14T07:00:01Z\","
+	             "\"note\":\"why\",\"description\":\"why\\nmore\",\"created\":\"2026-11-14T07:00:01Z\","
 	             "\"updated\":\"2026-11-14T07:00:01Z\",\"chapter\":\"f1f:0\","
 	             "\"created_chapter\":\"f1f:0\",\"blocked_by\":[],\"url\":null,"
 	             "\"group\":null}}\n{\"task\":{\"id\":\"?2\",\"title\":"
@@ -7648,12 +7648,12 @@ t_tasks(void)
 
 		snprintf(w1, sizeof w1, "{\"task\":{\"id\":\"1\",\"title\":\"A2\","
 		         "\"status\":\"dropped\",\"label\":\"deleted\",\"active\":null,"
-		         "\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+		         "\"note\":null,\"description\":null,\"created\":\"2026-11-14T07:00:01Z\","
 		         "\"updated\":\"2026-11-14T07:00:09Z\",\"chapter\":\"f1f:%d\","
 		         "\"created_chapter\":\"f1f:0\",\"blocked_by\":[]", k);
 		snprintf(w2, sizeof w2, "{\"task\":{\"id\":\"2\",\"title\":\"B\","
 		         "\"status\":\"pending\",\"label\":\"pending\",\"active\":null,"
-		         "\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+		         "\"note\":null,\"description\":null,\"created\":\"2026-11-14T07:00:01Z\","
 		         "\"updated\":\"2026-11-14T07:00:08Z\",\"chapter\":\"f1f:%d\","
 		         "\"created_chapter\":\"f1f:0\",\"blocked_by\":[\"1\",\"5\"]",
 		         k);
@@ -7692,7 +7692,7 @@ t_tasks(void)
 	      "its first created time kept",
 	      strstr(o, "{\"task\":{\"id\":\"1\",\"title\":\"A\",\"status\":"
 	             "\"active\",\"label\":\"in_progress\",\"active\":null,"
-	             "\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+	             "\"note\":null,\"description\":null,\"created\":\"2026-11-14T07:00:01Z\","
 	             "\"updated\":\"2026-11-14T07:00:31Z\"") &&
 	      !strstr(o, "side") &&
 	      strstr(o, "{\"done\":true,\"count\":1,\"dropped\":0}\n"));
@@ -7715,7 +7715,7 @@ t_tasks(void)
 	o = tk_end(&f, 0);
 	snprintf(todos, sizeof todos, "{\"task\":{\"id\":\"1\",\"title\":\"a\","
 	         "\"status\":\"active\",\"label\":\"in_progress\",\"active\":"
-	         "\"aing\",\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+	         "\"aing\",\"note\":null,\"description\":null,\"created\":\"2026-11-14T07:00:01Z\","
 	         "\"updated\":\"2026-11-14T07:00:11Z\",\"chapter\":\"f1f:%d\","
 	         "\"created_chapter\":\"f1f:0\"", k);
 	CHECK("tasks: TodoWrite: rows by position; a row keeps created while its "
@@ -7724,7 +7724,7 @@ t_tasks(void)
 	      strstr(o, todos) &&
 	      strstr(o, "{\"task\":{\"id\":\"2\",\"title\":\"c\",\"status\":"
 	             "\"pending\",\"label\":\"odd_word\",\"active\":\"cing\","
-	             "\"note\":null,\"created\":\"2026-11-14T07:00:12Z\"") &&
+	             "\"note\":null,\"description\":null,\"created\":\"2026-11-14T07:00:12Z\"") &&
 	      strstr(o, "{\"done\":true,\"count\":2,\"dropped\":0}\n"));
 	free(o);
 	tk_begin(&f, 0);
@@ -7775,7 +7775,7 @@ t_tasks(void)
 	      strstr(o, "\"source\":\"codex\"") &&
 	      strstr(o, "{\"task\":{\"id\":\"1\",\"title\":\"read\",\"status\":"
 	             "\"done\",\"label\":\"completed\",\"active\":null,\"note\":"
-	             "null,\"created\":\"2026-11-14T07:00:01Z\"") &&
+	             "null,\"description\":null,\"created\":\"2026-11-14T07:00:01Z\"") &&
 	      strstr(o, "{\"task\":{\"id\":\"2\",\"title\":\"write\",\"status\":"
 	             "\"active\",\"label\":\"in_progress\"") &&
 	      strstr(o, "{\"done\":true,\"count\":2,\"dropped\":0}\n"));

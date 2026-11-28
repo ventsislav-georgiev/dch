@@ -1758,7 +1758,8 @@ TSID2 = "11111111-2222-4333-8444-5555555555c2"
 TSID3 = "11111111-2222-4333-8444-5555555555c3"
 TK_HEAD = ["schema", "block", "session", "session_id", "source", "title",
            "partial"]
-TK_KEYS = ["id", "title", "status", "label", "active", "note", "created",
+TK_KEYS = ["id", "title", "status", "label", "active", "note", "description",
+           "created",
            "updated", "chapter", "created_chapter", "blocked_by", "url",
            "group"]
 
@@ -1807,6 +1808,7 @@ def test_tasks():
     tp = os.path.join(pdir, TSID + ".jsonl")
     tp2 = os.path.join(pdir, TSID2 + ".jsonl")
     ts = lambda s: "2026-11-14T07:%02d:%02d.000Z" % divmod(s, 60)
+    LONGD = "\nThe login test fails\n" + "second line, long. " * 10 + "\nend"
     iso = lambda s: "2026-11-14T07:%02d:%02dZ" % divmod(s, 60)
     ask = lambda s, t: {"type": "user", "cwd": "/home/demo/proj",
                         "timestamp": ts(s), "message": {"content": t}}
@@ -1814,7 +1816,7 @@ def test_tasks():
         ask(0, "plan the fix"),
         tk_said(ts(1), tk_use("toolu_a", "TaskCreate", {
             "subject": "Fix the login test",
-            "description": "\nThe login test fails\nsecond line",
+            "description": LONGD,
             "activeForm": "Fixing the login test"})),
         tk_made(ts(2), "toolu_a", "1"),
         tk_said(ts(3), tk_use("toolu_b", "TaskCreate", {
@@ -1883,17 +1885,18 @@ def test_tasks():
     want = [
         {"id": "1", "title": "Fix the login test", "status": "done",
          "label": "completed", "active": "Fixing the login test",
-         "note": "The login test fails", "created": iso(1),
+         "note": "The login test fails", "description": LONGD,
+         "created": iso(1),
          "updated": iso(21), "chapter": a3, "created_chapter": a0,
          "blocked_by": [], "url": None, "group": None},
         {"id": "2", "title": "Write docs", "status": "dropped",
          "label": "deleted", "active": None, "note": None,
-         "created": iso(3), "updated": iso(21), "chapter": a3,
+         "description": None, "created": iso(3), "updated": iso(21), "chapter": a3,
          "created_chapter": a0, "blocked_by": ["1"], "url": None,
          "group": None},
         {"id": "?3", "title": "Ship it", "status": "pending",
          "label": "pending", "active": None, "note": "soon",
-         "created": iso(21), "updated": iso(21), "chapter": a3,
+         "description": "soon", "created": iso(21), "updated": iso(21), "chapter": a3,
          "created_chapter": a3, "blocked_by": [], "url": None,
          "group": None}]
     check("tasks: ids from the results, statuses mapped, deleted stays as "
@@ -1957,6 +1960,23 @@ def test_tasks():
           "line, done count 0", rc == 0 and h.get("source") == "none" and
           tk == [] and done == {"done": True, "count": 0, "dropped": 0},
           (rc, h, tk, done, err))
+    # a description over 16 KB is cut on a character, "cut":true after it
+    big = "\u00e9" * 9000 + "\nz"
+    with open(os.path.join(pdir, SSID2 + ".jsonl"), "w") as f:
+        for o in [ask(0, "big"), tk_said(ts(1), tk_use(
+                "toolu_big", "TaskCreate", {"subject": "big",
+                                            "description": big})),
+                  tk_made(ts(2), "toolu_big", "1")]:
+            f.write(json.dumps(o) + "\n")
+    r = dch("--xray", "xr-tk-plain", "--tasks", "--json")
+    ls = ref_lines(r.stdout) or [{}]
+    t = (ls[1:2] or [{}])[0].get("task") or {}
+    check("tasks: a description over 16 KB is cut at 16384 bytes, then "
+          "\"cut\":true; note stays the first line",
+          r.returncode == 0 and list(t)[5:8] == ["note", "description",
+          "cut"] and t["cut"] is True and
+          t["description"] == "\u00e9" * 8192 and t["note"] == "\u00e9" * 120,
+          (r.returncode, str(t)[:300]))
     os.unlink(os.path.join(pdir, SSID2 + ".jsonl"))
     # the transcript gone: no corpus, as --search and --chapter say
     history("xr-tk-gone", TSID3, cfg)

@@ -15855,6 +15855,8 @@ struct tk_row
 {
 	char *id, *title, *label;	/* never NULL in a row that is not gone */
 	char *active, *note;		/* NULL for none */
+	char *desc;		/* the whole description, XR_DESC at most; NULL for none */
+	int dcut;		/* desc was cut at XR_DESC */
 	char **dep;
 	int ndep, status;
 	int gone;		/* a create that failed, an id created again */
@@ -15906,6 +15908,7 @@ tk_row_free(struct tk_row *r)
 	free(r->label);
 	free(r->active);
 	free(r->note);
+	free(r->desc);
 	for (k = 0; k < r->ndep; k++)
 		free(r->dep[k]);
 	free(r->dep);
@@ -15969,6 +15972,30 @@ tk_text(const struct json_parser *p, int obj, const char *const *key,
 	xr_title(s, n, b, sizeof b);
 	free(s);
 	return b[0] || keep ? tk_dup(b, strlen(b)) : NULL;
+}
+
+/* key's string whole, as a memory body is: XR_DESC bytes at most, cut on a
+** scalar; NULL for none or empty; *cut set when cut */
+static char *
+tk_desc(const struct json_parser *p, int obj, const char *const *key, int *cut)
+{
+	size_t n = 0;
+	char *s = k_str(p, obj, key, &n);
+
+	*cut = 0;
+	if (s && n > XR_DESC)
+	{
+		for (n = XR_DESC; n && ((unsigned char)s[n] & 0xc0) == 0x80; n--)
+			;
+		s[n] = '\0';
+		*cut = 1;
+	}
+	if (s && !s[0])
+	{
+		free(s);
+		s = NULL;
+	}
+	return s;
 }
 
 /* An id: a string of 1..XR_ID_MAX bytes, or a whole number as written (a
@@ -16140,6 +16167,7 @@ tk_create(struct xr_claude *d, const struct json_parser *p, int use, int in)
 	r->label = tk_dup("pending", 7);
 	r->active = tk_text(p, in, A_AFORM, 0, NULL);
 	r->note = tk_text(p, in, A_DESC, 0, NULL);
+	r->desc = tk_desc(p, in, A_DESC, &r->dcut);
 	r->status = TS_PENDING;
 	r->gone = !r->id || !r->title || !r->label;
 	r->created = r->updated = d->at;
@@ -16244,7 +16272,11 @@ tk_update(struct xr_claude *d, const struct json_parser *p, int in)
 	if (j_get(p, in, A_AFORM) >= 0)
 		c |= tk_set(&r->active, tk_text(p, in, A_AFORM, 0, NULL));
 	if (j_get(p, in, A_DESC) >= 0)
+	{
 		c |= tk_set(&r->note, tk_text(p, in, A_DESC, 0, NULL));
+		c |= tk_set(&r->desc, tk_desc(p, in, A_DESC, &k));
+		r->dcut = k;
+	}
 	if ((v = j_get(p, in, A_ADDBY)) >= 0 && p->tok[v].kind == JSON_ARRAY)
 		for (i = v + 1; i < p->tok[v].next; i = p->tok[i].next)
 			c |= tk_dep(r, tk_id(p, i));
@@ -16428,7 +16460,8 @@ tk_anchor(FILE *f, uint64_t ino, uint64_t off)
 }
 
 static void
-tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
+tk_put1(FILE *f, const struct xr_tasks *t, const struct tk_row *r, size_t dn,
+        int cut)
 {
 	int k;
 
@@ -16442,6 +16475,18 @@ tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
 	put_or_null(f, r->active);
 	fputs(",\"note\":", f);
 	put_or_null(f, r->note);
+	fputs(",\"description\":", f);
+	if (r->desc)
+	{
+		char *d = tk_dup(r->desc, dn);
+
+		put_or_null(f, d ? d : "");
+		free(d);
+	}
+	else
+		fputs("null", f);
+	if (cut)
+		fputs(",\"cut\":true", f);
 	fputs(",\"created\":", f);
 	tk_iso(f, r->created);
 	fputs(",\"updated\":", f);
@@ -16458,6 +16503,38 @@ tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
 		xr_put_str(f, r->dep[k]);
 	}
 	fputs("],\"url\":null,\"group\":null}}\n", f);
+}
+
+/* a row's line, under XR_LINE: the description halved (cut) until it fits,
+** as a memory body is */
+static void
+tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
+{
+	size_t dn = r->desc ? strlen(r->desc) : 0, ll;
+	int cut = r->dcut;
+	char *line;
+	FILE *m;
+
+	for (;;)
+	{
+		line = NULL;
+		if (!(m = open_memstream(&line, &ll)))
+			return;
+		tk_put1(m, t, r, dn, cut);
+		if (fclose(m) != 0)
+		{
+			free(line);
+			return;
+		}
+		if (ll <= XR_LINE || !dn)
+			break;
+		free(line);
+		for (dn /= 2; dn && ((unsigned char)r->desc[dn] & 0xc0) == 0x80; dn--)
+			;
+		cut = 1;
+	}
+	fwrite(line, 1, ll, f);
+	free(line);
 }
 
 int

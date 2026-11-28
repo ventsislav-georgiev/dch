@@ -321,7 +321,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.210.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.211.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -2414,7 +2414,7 @@ turns begun and the refs mentioned at or after `<time>`, as one JSON object:
 the way `--ref` prints its lines, and exits 0:
 ```json
 {"schema":1,"block":"tasks","session":"api","session_id":"…","source":"claude","title":null,"partial":false}
-{"task":{"id":"12","title":"Fix the login test","status":"active","label":"in_progress","active":"Fixing the login test","note":null,"created":"2026-11-14T07:01:02Z","updated":"2026-11-14T07:09:40Z","chapter":"f1a2:4096","created_chapter":"f1a2:0","blocked_by":["9"],"url":null,"group":null}}
+{"task":{"id":"12","title":"Fix the login test","status":"active","label":"in_progress","active":"Fixing the login test","note":null,"description":null,"created":"2026-11-14T07:01:02Z","updated":"2026-11-14T07:09:40Z","chapter":"f1a2:4096","created_chapter":"f1a2:0","blocked_by":["9"],"url":null,"group":null}}
 {"done":true,"count":1,"dropped":0}
 ```
 - **Sources.** Claude Code: `TaskCreate` and `TaskUpdate` (the id is the
@@ -2436,7 +2436,10 @@ the way `--ref` prints its lines, and exits 0:
   source's own word. A deleted task stays, `dropped`. `title`, `active`
   (the text shown while it runs) and `note` (the description's first line)
   are one line each, cut as chapter titles are: 120 characters, and any
-  Unicode line break ends the line (U+000B and U+000C too). `created` and `updated` are
+  Unicode line break ends the line (U+000B and U+000C too). `description`
+  (right after `note`) is the task's whole description, kept as a memory
+  `body` is: 16 KB at most, cut on a character, then `"cut":true` follows
+  it; `null` when there is none. `created` and `updated` are
   ISO 8601 UTC from the records' timestamps, or `null`. `chapter` is the
   anchor of the chapter that last changed the task, `created_chapter` the
   one that created it; both open with `--chapter`. `blocked_by` lists ids.

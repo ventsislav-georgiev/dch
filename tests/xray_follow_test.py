@@ -498,7 +498,7 @@ def test_follow_tasks_memory():
              use("u2", "TaskUpdate", {"taskId": "1",
                                       "status": "in_progress"}),
              use("u3", "TaskCreate", {"subject": "Second task",
-                                      "description": ""}),
+                                      "description": "line one\nline two"}),
              made("u3", "2")])
         fl.wait(lambda o: "task" in o and o["task"]["id"] == "2", frm=k0)
         fl.wait(lambda o: "task" in o and o["task"]["id"] == "1" and
@@ -506,6 +506,11 @@ def test_follow_tasks_memory():
         time.sleep(0.4)
         _, tk2, _ = lines(n, "--tasks", "--json")
         rows = [o for o in fl.objs(k0) if "task" in o]
+        check("tasks+memory: a task delta carries description, after note",
+              [o["task"]["description"] for o in rows
+               if o["task"]["id"] == "2"] == ["line one\nline two"] and
+              all(list(o["task"])[5:7] == ["note", "description"]
+                  for o in rows), rows)
         hdr, st, sm = blocks(fl.objs())
         check("tasks+memory: a task delta is the task's whole row, keyed "
               "by id, and the stream's tasks are the one-shot's now",
