@@ -7501,10 +7501,10 @@ json_dup(const struct json_parser *p, int tok)
 	return s;
 }
 
-/* The entry of mv[*nm] (cap 64) for tool_use id tu, added when new; NULL
-** when full. */
+/* The entry of mv[*nm] (cap 64) for tool_use id tu, added when new and
+** `add`; NULL when absent or full. */
 static struct mtu *
-mtu_of(struct mtu *mv, int *nm, const char *tu)
+mtu_of(struct mtu *mv, int *nm, const char *tu, int add)
 {
 	int i;
 
@@ -7512,7 +7512,7 @@ mtu_of(struct mtu *mv, int *nm, const char *tu)
 		;
 	if (i == *nm)
 	{
-		if (*nm >= 64)
+		if (!add || *nm >= 64)
 			return NULL;
 		memset(&mv[i], 0, sizeof mv[i]);
 		mv[i].tsr = -1;
@@ -7524,9 +7524,15 @@ mtu_of(struct mtu *mv, int *nm, const char *tu)
 
 /* The Monitor tool_uses and their results in the window of transcript tp
 ** around t (tx_shell's: 64 KB before 10 s ahead of t, then 1 MB), added
-** to mv[*nm] once each. Only complete lines count. */
+** to mv[*nm] once each. Only complete lines count. A tool_use is kept only
+** when its command is one of cm[ncm] and it is not after t (no child
+** started at t fits it), a result only for a kept tool_use, so unrelated
+** Monitor calls take no slot.
+** shortcut: 64 kept calls (same-command Monitor calls), the rest dropped;
+** raise mv and c when a session arms more of one command. */
 static void
-tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm)
+tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm,
+            char *const *cm, int ncm)
 {
 	enum { BACK = 64 << 10, FWD = 1 << 20 };
 	static char *b;	/* one window for every call, kept to the exit */
@@ -7537,7 +7543,8 @@ tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm)
 	long long tsu;
 	off_t at;
 	ssize_t n = 0, k;
-	int fd, a, i, use, res;
+	int fd, a, i, use, res, j;
+	char *cmd;
 
 	if ((fd = open(tp, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
 		return;
@@ -7575,18 +7582,26 @@ tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm)
 				    !dch_json_decode(&p, jfield(&p, i, "name"), tu, sizeof tu) &&
 				    !strcmp(tu, "Monitor") &&
 				    !dch_json_decode(&p, jfield(&p, i, "id"), tu, sizeof tu) &&
-				    (m = mtu_of(mv, nm, tu)) && !m->cmd)
+				    tsu / 1000 <= t &&
+				    (cmd = json_dup(&p, jfield(&p, jfield(&p, i, "input"),
+				                               "command"))))
 				{
+					for (j = 0; j < ncm && strcmp(cm[j], cmd); j++)
+						;
+					if (j == ncm || !(m = mtu_of(mv, nm, tu, 1)) || m->cmd)
+					{
+						free(cmd);
+						continue;
+					}
 					m->tsu = tsu;
-					m->cmd = json_dup(&p, jfield(&p, jfield(&p, i, "input"),
-					                             "command"));
+					m->cmd = cmd;
 					(void)json_cut(&p, jfield(&p, jfield(&p, i, "input"),
 					               "description"), m->desc, sizeof m->desc);
 				}
 				else if (res && !strcmp(tu, "tool_result") &&
 				         !dch_json_decode(&p, jfield(&p, i, "tool_use_id"), tu,
 				                          sizeof tu) &&
-				         (m = mtu_of(mv, nm, tu)) && !*m->task)
+				         (m = mtu_of(mv, nm, tu, 0)) && !*m->task)
 				{
 					/* content: a string, or [{"type":"text","text":…}] */
 					int c = jfield(&p, i, "content");
@@ -7636,7 +7651,7 @@ mon_shells(long pid, const char *sid, const char *tp, const long *tree, int n,
 	struct mtu mv[64];
 	struct { long pid; time_t t; char *cmd; int u, fit; unsigned long long e; }
 	    c[64];
-	char root[PATH_MAX], f[PATH_MAX], rp[PATH_MAX], **v;
+	char root[PATH_MAX], f[PATH_MAX], rp[PATH_MAX], **v, *cm[64];
 	const char *sl, *se;
 	int nc = 0, nm = 0, i, j, k, q, w, ev, ok;
 
@@ -7657,12 +7672,14 @@ mon_shells(long pid, const char *sid, const char *tp, const long *tree, int n,
 		else
 			free(c[nc].cmd);
 	}
+	for (i = 0; i < nc; i++)
+		cm[i] = c[i].cmd;
 	for (i = 0; i < nc; i++)	/* one window per distinct start */
 	{
 		for (j = 0; j < i && c[j].t != c[i].t; j++)
 			;
 		if (j == i)
-			tx_monitors(tp, c[i].t, mv, &nm);
+			tx_monitors(tp, c[i].t, mv, &nm, cm, nc);
 	}
 	/* the tool_uses each child fits: bit k for mv[k] */
 	for (i = 0; i < nc; i++)
@@ -10860,14 +10877,15 @@ va_cpy(char *out, const char *s, size_t n)
 ** ("<type> › <description>" with no composer on screen; det = the
 ** description), 0 neither. A Local agents row (2.1.322's _o) is the icon
 ** box, a blank, the name column padded to its width, 3 blanks, then the
-** facts ("running · opus/medium"); lab keeps the name column only. */
+** facts ("running · opus/medium"); lab keeps all of it (va_match finds
+** where the name ends, a name may hold 3 blanks). */
 static void
 va_parse(char *txt, struct va_scr *s)
 {
 	static const char *const heads[] = { "Shells", "Monitors", "MCP tasks",
 		"Cloud agents", "Local agents", "Completed", "Dynamic workflows" };
 	char *l, *nx, *e, *end, *det = NULL;
-	const char *p, *q, *r;
+	const char *p, *q;
 	size_t w, k, h;
 	int in = 0, rows = 0, rule = 0, sec = 0, at = -1;
 
@@ -10955,10 +10973,6 @@ va_parse(char *txt, struct va_scr *s)
 				p++;
 			while (p < q && *p == ' ')
 				p++;
-			for (r = p; r + 3 <= q && strncmp(r, "   ", 3); r++)
-				;
-			if (r + 3 <= q)
-				q = r;
 		}
 		va_cpy(s->lab[s->n++], p, (size_t)(q - p));
 	}
@@ -10968,22 +10982,52 @@ va_parse(char *txt, struct va_scr *s)
 		s->mode = 2;
 }
 
-/* Is row label lab the description d? A label cut with "…" is a prefix of
-** d; d itself cut at its cap (cut) is a prefix of the label. */
+/* Does r end a name: the row's end, or 3+ blanks and then facts, which
+** are joined with " · " and never hold 3 blanks. So "Fix" is not the name
+** of "Fix   the bug   running". shortcut: a row painted without facts
+** reads "Fix   the bug" as "Fix" + facts "the bug" too (only when the pane
+** is too narrow for facts); then "Fix" and "Fix   the bug" are ambiguous. */
+static int
+va_gap(const char *r)
+{
+	if (!*r)
+		return 1;
+	if (strncmp(r, "   ", 3))
+		return 0;
+	while (*r == ' ')
+		r++;
+	return !strstr(r, "   ");
+}
+
+/* Is row label lab (the row's text after its icon, facts and all) the
+** description d? Edge blanks are not part of either. A name cut with "…"
+** is a prefix of d; d itself cut at its cap (cut) is a prefix of the row. */
 static int
 va_match(const char *lab, const char *d, int cut)
 {
-	size_t n = strlen(lab);
+	size_t n, dn;
+	const char *e;
 
-	if (cut && !strncmp(lab, d, strlen(d)))
+	while (*lab == ' ')
+		lab++;
+	while (*d == ' ')
+		d++;
+	for (dn = strlen(d); dn && d[dn - 1] == ' '; dn--)
+		;
+	if (cut)
+		return !strncmp(lab, d, dn);
+	if (!strncmp(lab, d, dn) && va_gap(lab + dn))
 		return 1;
-	if (n > 3 && !strcmp(lab + n - 3, "\xe2\x80\xa6"))
+	for (e = lab; (e = strstr(e, "\xe2\x80\xa6")); e += 3)
 	{
-		for (n -= 3; n && lab[n - 1] == ' '; n--)
+		if (!va_gap(e + 3))
+			continue;
+		for (n = (size_t)(e - lab); n && lab[n - 1] == ' '; n--)
 			;
-		return n && !strncmp(lab, d, n);
+		if (n && n <= dn && !strncmp(lab, d, n))
+			return 1;
 	}
-	return !strcmp(lab, d);
+	return 0;
 }
 
 /* The screen at path parsed into s; -1 when it cannot be read. */

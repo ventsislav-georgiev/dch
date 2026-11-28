@@ -400,6 +400,30 @@ def main():
               views(ev) == ["x11"], (rc, o, views(ev)))
         safe("XI1 cut name column", ev)
 
+        # XI8: 3+ blanks inside a description, edge blanks, a name that
+        # starts another's (no-facts rows: a pane too narrow for facts)
+        cases = [("interior 3 blanks", ["Fix   the bug", "Other"], "y1"),
+                 ("trailing blank", ["Write the tests ", "Other"], "y1"),
+                 ("leading blank", [" Write the tests", "Other"], "y1"),
+                 ("Fix + Fix   the bug", ["Fix", "Fix   the bug"], "y1"),
+                 ("Fix + Fix   the bug", ["Fix", "Fix   the bug"], "y2")]
+        for k, (tag, descs, hit) in enumerate(cases):
+            for facts in (True, False):
+                if not facts and tag.startswith("Fix +"):
+                    continue
+                rr = [row(d, "y%d" % (j + 1)) for j, d in enumerate(descs)]
+                if not facts:
+                    rr = [dict(r, meta=[]) for r in rr]
+                n = sess("y%d%d" % (k, facts), {"version": V, "agents": [
+                    ag("y%d" % (j + 1), d) for j, d in enumerate(descs)],
+                    "rows": rr})
+                rc, o, ev = view(n, hit)
+                check("XI8: %s, target %s, %s: switched" % (
+                      tag, hit, "facts" if facts else "no facts"),
+                      rc == 0 and is_(o, "switched") and views(ev) == [hit],
+                      (rc, o, views(ev)))
+                safe("XI8 " + tag, ev)
+
         # XI2: a reply heading "Background" above a busy line
         n = sess("x2", {"version": V, "agents": [ag("x21", "Explore"),
                                                  ag("x22", "Write it")],
