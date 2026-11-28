@@ -3964,9 +3964,11 @@ version. Commands run as argument vectors, never through a shell.
 A `0x02` also takes `"group": "<name>"` (#723, `create_group` in `ops`): a
 config group of this host, matched ignoring case as `dch --spawn --group`
 does, that the new session gets as its manual group (the `--group-set`
-`.group` file, stored in the config's spelling). Not a string: `malformed
-create request`. No such group: the coded `0x13` `no_group` (see the
-refusal codes), before any session starts, then the close. When the name
+`.group` file, stored in the config's spelling). Not a string (or with a NUL): `malformed
+create request`. No such group, or a name over 255 B: the coded `0x13`
+`no_group` (see the refusal codes), before any session starts, then the
+close; the same when the group is deleted before the started dch re-checks
+it (its exit 1 becomes the `no_group`, not a `0x12`). When the name
 attaches to a session that already runs, the group is ignored and nothing
 changes (an unknown group is still refused). `0x01` ignores the key.
 

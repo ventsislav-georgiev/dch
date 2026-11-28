@@ -818,6 +818,8 @@ struct conn
 	int kid_out, view_due;	/* the kid wrote; a 0x35 waits for that */
 	long long jiggle_at;
 	char name[NAME_CAP + 1];	/* "" after a create dch named */
+	char grp[64];		/* the create's --group, "" none */
+	long long grp_until;	/* ...and until when its exit 1 may mean no_group */
 	int watching;
 	char *last_list;
 	long long next_poll, last_sent;
@@ -1102,7 +1104,22 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 	** attaches (then the child ignores it) */
 	if (create && (r = jstr(&jp, 0, "group", grp, sizeof grp)) < 0)
 	{
+		/* a string past the buffer is no group's name; a NUL or a
+		** non-string stays malformed */
+		int g = dch_json_field(&jp, 0, "group");
+		size_t gl = g >= 0 ? (size_t)(jp.tok[g].end - jp.tok[g].start) : 0;
+		char *big = g >= 0 && jp.tok[g].kind == JSON_STRING &&
+		            gl >= sizeof grp ? malloc(gl + 1) : NULL;
+		int fits = big && dch_json_decode(&jp, g, big, gl + 1) == 0;
+
+		free(big);
 		dch_json_free(&jp);
+		if (fits)
+		{
+			out_err_code(c, "no_group", "no such group in the config");
+			c->closing = 1;
+			return;
+		}
 		out_err(c, "malformed create request: group must be a string");
 		return;
 	}
@@ -1190,6 +1207,10 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 	c->kid = pid;
 	c->attached = 1;
 	copy_str(c->name, sizeof c->name, name);
+	copy_str(c->grp, sizeof c->grp, gn);
+	/* shortcut: the child's re-check is taken as done 10 s after spawn, a
+	** slower start misses the coded refusal; upgrade with a dch flag for it */
+	c->grp_until = now_ms() + 10000;
 	slog("%s: %s %s (%dx%d)", c->ipstr, create ? "create" : "attach",
 	     name[0] ? name : "(dch names it)", c->cols, c->rows);
 	if (name[0])
@@ -2307,6 +2328,16 @@ serve_conn(int fd, uint32_t ip)
 		if (c->kid > 0 && !c->kid_done &&
 		    waitpid(c->kid, &c->kid_status, WNOHANG) == c->kid)
 			c->kid_done = 1;
+		if (c->kid_done && c->attached && !c->closing && c->grp[0] &&
+		    now_ms() < c->grp_until && WIFEXITED(c->kid_status) &&
+		    WEXITSTATUS(c->kid_status) == 1 &&
+		    dch_group_lookup(c->grp, (char[64]){0}, 64) < 0)
+		{
+			/* the group went between on_attach's check and the
+			** child's own: its exit 1 is the coded refusal */
+			out_err_code(c, "no_group", "no such group in the config");
+			c->closing = 1;
+		}
 		if (c->kid_done && c->attached && !c->closing)
 		{
 			/* the session's client exited: its last output, then
