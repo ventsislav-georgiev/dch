@@ -10860,14 +10860,15 @@ va_cpy(char *out, const char *s, size_t n)
 ** ("<type> › <description>" with no composer on screen; det = the
 ** description), 0 neither. A Local agents row (2.1.322's _o) is the icon
 ** box, a blank, the name column padded to its width, 3 blanks, then the
-** facts ("running · opus/medium"); lab keeps the name column only. */
+** facts ("running · opus/medium"); lab keeps all of it (va_match finds
+** where the name ends, a name may hold 3 blanks). */
 static void
 va_parse(char *txt, struct va_scr *s)
 {
 	static const char *const heads[] = { "Shells", "Monitors", "MCP tasks",
 		"Cloud agents", "Local agents", "Completed", "Dynamic workflows" };
 	char *l, *nx, *e, *end, *det = NULL;
-	const char *p, *q, *r;
+	const char *p, *q;
 	size_t w, k, h;
 	int in = 0, rows = 0, rule = 0, sec = 0, at = -1;
 
@@ -10955,10 +10956,6 @@ va_parse(char *txt, struct va_scr *s)
 				p++;
 			while (p < q && *p == ' ')
 				p++;
-			for (r = p; r + 3 <= q && strncmp(r, "   ", 3); r++)
-				;
-			if (r + 3 <= q)
-				q = r;
 		}
 		va_cpy(s->lab[s->n++], p, (size_t)(q - p));
 	}
@@ -10968,22 +10965,52 @@ va_parse(char *txt, struct va_scr *s)
 		s->mode = 2;
 }
 
-/* Is row label lab the description d? A label cut with "…" is a prefix of
-** d; d itself cut at its cap (cut) is a prefix of the label. */
+/* Does r end a name: the row's end, or 3+ blanks and then facts, which
+** are joined with " · " and never hold 3 blanks. So "Fix" is not the name
+** of "Fix   the bug   running". shortcut: a row painted without facts
+** reads "Fix   the bug" as "Fix" + facts "the bug" too (only when the pane
+** is too narrow for facts); then "Fix" and "Fix   the bug" are ambiguous. */
+static int
+va_gap(const char *r)
+{
+	if (!*r)
+		return 1;
+	if (strncmp(r, "   ", 3))
+		return 0;
+	while (*r == ' ')
+		r++;
+	return !strstr(r, "   ");
+}
+
+/* Is row label lab (the row's text after its icon, facts and all) the
+** description d? Edge blanks are not part of either. A name cut with "…"
+** is a prefix of d; d itself cut at its cap (cut) is a prefix of the row. */
 static int
 va_match(const char *lab, const char *d, int cut)
 {
-	size_t n = strlen(lab);
+	size_t n, dn;
+	const char *e;
 
-	if (cut && !strncmp(lab, d, strlen(d)))
+	while (*lab == ' ')
+		lab++;
+	while (*d == ' ')
+		d++;
+	for (dn = strlen(d); dn && d[dn - 1] == ' '; dn--)
+		;
+	if (cut)
+		return !strncmp(lab, d, dn);
+	if (!strncmp(lab, d, dn) && va_gap(lab + dn))
 		return 1;
-	if (n > 3 && !strcmp(lab + n - 3, "\xe2\x80\xa6"))
+	for (e = lab; (e = strstr(e, "\xe2\x80\xa6")); e += 3)
 	{
-		for (n -= 3; n && lab[n - 1] == ' '; n--)
+		if (!va_gap(e + 3))
+			continue;
+		for (n = (size_t)(e - lab); n && lab[n - 1] == ' '; n--)
 			;
-		return n && !strncmp(lab, d, n);
+		if (n && n <= dn && !strncmp(lab, d, n))
+			return 1;
 	}
-	return !strcmp(lab, d);
+	return 0;
 }
 
 /* The screen at path parsed into s; -1 when it cannot be read. */
