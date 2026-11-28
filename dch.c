@@ -7523,18 +7523,20 @@ mtu_of(struct mtu *mv, int *nm, const char *tu, int add)
 }
 
 /* The Monitor tool_uses and their results in the window of transcript tp
-** around t (tx_shell's: 64 KB before 10 s ahead of t, then 1 MB), added
-** to mv[*nm] once each. Only complete lines count. A tool_use is kept only
-** when its command is one of cm[ncm] and it is not after t (no child
-** started at t fits it), a result only for a kept tool_use, so unrelated
-** Monitor calls take no slot.
-** shortcut: 64 kept calls (same-command Monitor calls), the rest dropped;
-** raise mv and c when a session arms more of one command. */
+** around t, added to mv[*nm] once each: from 64 KB before 10 s ahead of t
+** (ts_seek), at least 1 MB on, then in steps until a line is past t + 10 s,
+** MAX bytes at most; a line longer than the buffer (an image) is skipped.
+** Only complete lines count. A tool_use is kept only when its command is
+** one of cm[ncm] and it is not after t (no child started at t fits it), a
+** result only for a kept tool_use, so unrelated Monitor calls take no slot.
+** A call of cm[j] dropped by the cap sets ov[j]: its children get null ids.
+** shortcut: 64 kept calls (same-command Monitor calls); raise mv and c when
+** a session arms more of one command. */
 static void
 tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm,
-            char *const *cm, int ncm)
+            char *const *cm, int ncm, char *ov)
 {
-	enum { BACK = 64 << 10, FWD = 1 << 20 };
+	enum { BACK = 64 << 10, FWD = 1 << 20, MAX = 4 << 20 };
 	static char *b;	/* one window for every call, kept to the exit */
 	struct json_parser p;
 	struct stat st;
@@ -7543,7 +7545,8 @@ tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm,
 	long long tsu;
 	off_t at;
 	ssize_t n = 0, k;
-	int fd, a, i, use, res, j;
+	size_t got = 0;
+	int fd, a, i, use, res, j, skip, past = 0;
 	char *cmd;
 
 	if ((fd = open(tp, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
@@ -7553,16 +7556,25 @@ tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm,
 		goto out;
 	at = ts_seek(fd, st.st_size, t);
 	at = at > BACK ? at - BACK : 0;
-	while (n < BACK + FWD && (k = pread(fd, b + n, (size_t)(BACK + FWD - n),
-	                                    at + n)) > 0)
-		n += k;
-	tx_read += (size_t)n;
+	skip = at > 0;	/* a cut first line */
+	/* b[0, n) holds the unparsed tail; refill it until past t + 10 s */
+more:
+	if (got >= MAX || (past && got >= BACK + FWD) ||
+	    (k = pread(fd, b + n, (size_t)(BACK + FWD - n), at)) <= 0)
+		goto out;
+	at += k;
+	got += (size_t)k;
+	tx_read += (size_t)k;
+	n += k;
 	b[n] = '\0';
 	ls = b;
-	if (at > 0 && (ls = memchr(b, '\n', (size_t)n)))	/* a cut first line */
-		ls++;
+	if (skip && (ls = memchr(b, '\n', (size_t)n)))
+		ls++, skip = 0;
 	for (; ls && (le = memchr(ls, '\n', (size_t)(b + n - ls))); ls = le + 1)
 	{
+		if (!past && (x = mem_find(ls, le, "\"timestamp\":\"", 13)) &&
+		    iso_epoch(x + 13) > (long)t + 10)
+			past = 1;
 		use = mem_find(ls, le, "\"name\":\"Monitor\"", 16) != NULL;
 		res = mem_find(ls, le, "Monitor started (task ", 22) != NULL;
 		if (!use && !res)
@@ -7588,7 +7600,9 @@ tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm,
 				{
 					for (j = 0; j < ncm && strcmp(cm[j], cmd); j++)
 						;
-					if (j == ncm || !(m = mtu_of(mv, nm, tu, 1)) || m->cmd)
+					if (!(m = j < ncm ? mtu_of(mv, nm, tu, 1) : NULL) && j < ncm)
+						ov[j] = 1;	/* full: a dropped call */
+					if (!m || ov[j] || m->cmd)
 					{
 						free(cmd);
 						continue;
@@ -7626,6 +7640,11 @@ tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm,
 		dch_json_free(&p);
 		*le = '\n';
 	}
+	if (!ls || (ls == b && n == BACK + FWD))	/* in a line too long */
+		n = 0, skip = 1;
+	else
+		memmove(b, ls, (size_t)(n -= ls - b));
+	goto more;
 out:
 	close(fd);
 }
@@ -7652,7 +7671,9 @@ mon_shells(long pid, const char *sid, const char *tp, const long *tree, int n,
 	struct { long pid; time_t t; char *cmd; int u, fit; unsigned long long e; }
 	    c[64];
 	char root[PATH_MAX], f[PATH_MAX], rp[PATH_MAX], **v, *cm[64];
+	char ov[64] = {0};	/* a call of c[i]'s command dropped by the cap */
 	const char *sl, *se;
+	time_t tl;
 	int nc = 0, nm = 0, i, j, k, q, w, ev, ok;
 
 	for (i = 1; tp && i < n && nc < 64; i++)
@@ -7674,13 +7695,21 @@ mon_shells(long pid, const char *sid, const char *tp, const long *tree, int n,
 	}
 	for (i = 0; i < nc; i++)
 		cm[i] = c[i].cmd;
-	for (i = 0; i < nc; i++)	/* one window per distinct start */
+	/* one window per distinct start, ascending: a call is kept before a
+	** later window reads its result */
+	for (tl = 0; ; )
 	{
-		for (j = 0; j < i && c[j].t != c[i].t; j++)
-			;
-		if (j == i)
-			tx_monitors(tp, c[i].t, mv, &nm, cm, nc);
+		for (j = -1, i = 0; i < nc; i++)
+			if (c[i].t > tl && (j < 0 || c[i].t < c[j].t))
+				j = i;
+		if (j < 0)
+			break;
+		tx_monitors(tp, tl = c[j].t, mv, &nm, cm, nc, ov);
 	}
+	for (i = 0; i < nc; i++)	/* a dropped call: no id guessed */
+		for (j = 0; j < nc; j++)
+			if (ov[j] && !strcmp(c[j].cmd, c[i].cmd))
+				ov[i] = 1;
 	/* the tool_uses each child fits: bit k for mv[k] */
 	for (i = 0; i < nc; i++)
 		for (c[i].e = 0, k = 0; k < nm; k++)
@@ -7693,6 +7722,8 @@ mon_shells(long pid, const char *sid, const char *tp, const long *tree, int n,
 		unsigned long long all = 0;
 		int cp[64], ncp = 0, uk[64], nu = 0;
 
+		if (c[i].fit && ov[i])
+			c[i].u = -2;
 		if (!c[i].fit || c[i].u != -1)
 			continue;
 		/* its group: the children of the same command that fit any */
