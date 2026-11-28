@@ -3940,7 +3940,7 @@ refused or busy peers wait for their close at once; past that, one is closed
 at once, and a reset may then lose its frame.
 
 **What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,
-alias, state, agent count, `agent` (`claude` or `codex`) when one runs, `cwd` when known, and only GitHub pull-request
+alias, state, agent count, `shells` (count of live background shells, omitted when 0, the same set `--ls-json`'s `shells` lists; #722), `agent` (`claude` or `codex`) when one runs, `cwd` when known, and only GitHub pull-request
 links from `--meta`),
 a live list for its home screen (polled every 2 s), attach with resize and
 redraw, kill, rename, and a screen snapshot from the terminal mirror (empty in
