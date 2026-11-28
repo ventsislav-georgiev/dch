@@ -10515,21 +10515,41 @@ va_say(const char *code, const char *fmt, ...)
 #ifdef HAVE_LIBGHOSTTY_VT
 #define VA_PTR "\xe2\x9d\xaf "		/* "❯ ", the focused row's glyph */
 
-struct va_scr { int mode, n, focus; char lab[VA_ROWS][208], det[208]; };
+/* a whole row's text: 4 bytes a column; shortcut: rows past 256 CJK or
+** 1023 ASCII columns are cut (and so never match), raise it for wider panes */
+#define VA_LAB 1024
 
-/* The /tasks dialog on screen txt: mode 1 its list ("Background" title,
-** then rows under section headings like "Shells (1)", the focused one
-** led by VA_PTR, down to the "Esc to …" hints), 2 one task's detail pane
+/* ag[i]: row i sits under "Local agents" (the only rows matched, #724) */
+struct va_scr { int mode, n, focus; char ag[VA_ROWS], lab[VA_ROWS][VA_LAB],
+	det[VA_LAB]; };
+
+/* s[0..n) into out[VA_LAB], cut on a UTF-8 character boundary */
+static void
+va_cpy(char *out, const char *s, size_t n)
+{
+	if (n > VA_LAB - 1)
+		n = dch_utf8_trim(s, VA_LAB - 1);
+	memcpy(out, s, n);
+	out[n] = '\0';
+}
+
+/* The /tasks dialog on screen txt: mode 1 its list (the "Background"
+** title on the line under the dialog's "─" rule, the last such on screen,
+** then rows under section headings like "Shells (1)", the focused one led
+** by VA_PTR, down to the "Esc to …" hints), 2 one task's detail pane
 ** ("<type> › <description>" with no composer on screen; det = the
-** description), 0 neither. */
+** description), 0 neither. A Local agents row (2.1.322's _o) is the icon
+** box, a blank, the name column padded to its width, 3 blanks, then the
+** facts ("running · opus/medium"); lab keeps the name column only. */
 static void
 va_parse(char *txt, struct va_scr *s)
 {
 	static const char *const heads[] = { "Shells", "Monitors", "MCP tasks",
 		"Cloud agents", "Local agents", "Completed", "Dynamic workflows" };
 	char *l, *nx, *e, *end, *det = NULL;
+	const char *p, *q, *r;
 	size_t w, k, h;
-	int in = 0, rows = 0;
+	int in = 0, rows = 0, rule = 0, sec = 0;
 
 	s->mode = s->n = 0;
 	s->focus = -1;
@@ -10557,22 +10577,33 @@ va_parse(char *txt, struct va_scr *s)
 				w -= 2;
 			else
 				break;
-		if (!in)
-		{
-			if (w == 10 && !strncmp(l, "Background", 10))
-				in = 1;
-			else if (!det && w > 5 &&
-			         (det = mem_find(l, l + w, " \xe2\x80\xba ", 5)))
-				snprintf(s->det, sizeof s->det, "%.*s",
-				         (int)(l + w - det - 5), det + 5);
-			continue;
-		}
 		if (!w)
 			continue;
+		/* a reply's "Background" heading has no rule right above it */
+		if (rule && w == 10 && !strncmp(l, "Background", 10))
+		{
+			in = 1, rows = sec = rule = 0;
+			s->n = 0;
+			s->focus = -1;
+			continue;
+		}
+		for (k = 0; k + 3 <= w && !strncmp(l + k, "\xe2\x94\x80", 3); k += 3)
+			;
+		rule = k == w && w >= 30;
+		if (in != 1)
+		{
+			if (!in && !det && w > 5 &&
+			    (det = mem_find(l, l + w, " \xe2\x80\xba ", 5)))
+				va_cpy(s->det, det + 5, (size_t)(l + w - det - 5));
+			continue;
+		}
 		for (k = 0; k + 6 <= w && strncasecmp(l + k, "esc to", 6); k++)
 			;
 		if (k + 6 <= w)
-			break;	/* the hints row: the list is over */
+		{
+			in = 2;	/* the hints row: the list is over */
+			continue;
+		}
 		for (h = 0; h < sizeof heads / sizeof heads[0]; h++)
 			if (!strncmp(l, heads[h], strlen(heads[h])) &&
 			    l[strlen(heads[h])] == ' ' &&
@@ -10581,6 +10612,7 @@ va_parse(char *txt, struct va_scr *s)
 		if (h < sizeof heads / sizeof heads[0])
 		{
 			rows = 1;
+			sec = !strcmp(heads[h], "Local agents");
 			continue;
 		}
 		k = w >= 4 && !strncmp(l, VA_PTR, 4) ? 4 : 0;
@@ -10589,11 +10621,27 @@ va_parse(char *txt, struct va_scr *s)
 			continue;
 		rows = 1;
 		if (s->n == VA_ROWS)
-			break;
+		{
+			in = 2;
+			continue;
+		}
 		if (k)
 			s->focus = s->n;
-		snprintf(s->lab[s->n++], sizeof s->lab[0], "%.*s", (int)(w - k),
-		         l + k);
+		p = l + k;
+		q = l + w;
+		if ((s->ag[s->n] = (char)sec))
+		{
+			/* the icon box and its margin, then the name column */
+			while (p < q && *p != ' ')
+				p++;
+			while (p < q && *p == ' ')
+				p++;
+			for (r = p; r + 3 <= q && strncmp(r, "   ", 3); r++)
+				;
+			if (r + 3 <= q)
+				q = r;
+		}
+		va_cpy(s->lab[s->n++], p, (size_t)(q - p));
 	}
 	if (in)
 		s->mode = 1;
@@ -10601,12 +10649,15 @@ va_parse(char *txt, struct va_scr *s)
 		s->mode = 2;
 }
 
-/* Is row label lab the description d? A label cut with "…" is a prefix. */
+/* Is row label lab the description d? A label cut with "…" is a prefix of
+** d; d itself cut at its cap (cut) is a prefix of the label. */
 static int
-va_match(const char *lab, const char *d)
+va_match(const char *lab, const char *d, int cut)
 {
 	size_t n = strlen(lab);
 
+	if (cut && !strncmp(lab, d, strlen(d)))
+		return 1;
 	if (n > 3 && !strcmp(lab + n - 3, "\xe2\x80\xa6"))
 	{
 		for (n -= 3; n && lab[n - 1] == ' '; n--)
@@ -10761,6 +10812,8 @@ va_drive(const char *path, const char *want, const char *ver)
 {
 	struct va_scr s, was;
 	int i, t, m, hit;
+	/* want cut by cut_text at the meta's cap (possibly a character short) */
+	int cut = want && strlen(want) + 4 >= sizeof ((struct sag *)0)->desc;
 
 	switch (claude_gate_q(path, 1))
 	{
@@ -10794,7 +10847,7 @@ va_drive(const char *path, const char *want, const char *ver)
 	{
 		if (!want)
 			return va_main_close(path, ver);
-		if (!va_match(s.det, want))
+		if (!va_match(s.det, want, cut))
 		{
 			va_say("not_listed", "the one task shown is \"%s\"", s.det);
 			return (void)va_close(path, ver), -1;
@@ -10815,7 +10868,7 @@ va_drive(const char *path, const char *want, const char *ver)
 	for (i = 0; ; i++)
 	{
 		for (m = 0, hit = -1, t = 0; t < s.n; t++)
-			if (va_match(s.lab[t], want))
+			if (s.ag[t] && va_match(s.lab[t], want, cut))
 				m++, hit = t;
 		if (!m)
 			va_say("not_listed", "no /tasks row reads \"%s\"", want);
@@ -10874,11 +10927,22 @@ va_version(const char *tp, char *v, size_t vsz, const char *tu, int *bg)
 	if (n < 0)
 		n = 0;
 	b[n] = '\0';
-	for (m = b; (m = mem_find(m, b + n, "\"version\":\"", 11)); m++)
-		last = m + 11;
-	if (last && (x = memchr(last, '"', (size_t)(b + n - last))) &&
-	    (size_t)(x - last) < vsz)
-		snprintf(v, vsz, "%.*s", (int)(x - last), last);
+	/* the last line's top-level "version", never a tool input's (#724);
+	** a first line cut by the tail is skipped */
+	for (x = b + n; x > b && !v[0]; x = last > b ? last - 1 : b)
+	{
+		char c = *x;
+
+		for (last = x; last > b && last[-1] != '\n'; last--)
+			;
+		if (last == b && at > 0)
+			break;
+		*x = '\0';
+		if (mem_find(last, x, "\"version\"", 9) &&
+		    dch_json_string(last, "version", v, vsz) != 0)
+			v[0] = '\0';
+		*x = c;
+	}
 	/* backgrounded: its Agent call's "run_in_background":true, or its
 	** "async_launched" result; a call with neither is a blocking one */
 	if (tu && *tu)

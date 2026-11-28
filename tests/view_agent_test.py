@@ -16,6 +16,10 @@ another: Space), a busy Claude, another Claude Code version (no Esc: the
 dialog stays open, detail dialog_open; for main while on main the refusal
 dialog_open), a main row that appears between
 the reads (f on it, not Esc), DCH_NO_DETECT, and the text-mode shape.
+#724 (QA 1.200.0): rows painted as icon + name column + facts (and a name
+column cut at 50), a reply's "Background" line above a busy line, only a
+line's top-level "version" (C1, C2), descriptions over 200 bytes shown
+whole (ASCII, CJK), a shell row equal to the description.
 Every row: no Ctrl-C (03) and no x (78) byte after /tasks, Esc only where
 the close rule allows it and never while the fake views an agent. On
 dch-lite: every Claude row is refused no_screen, nothing typed.
@@ -24,7 +28,7 @@ The fake approximates Claude Code's rendering; it is not Claude Code.
 
 Run:  python3 tests/view_agent_test.py        (uses ./dch)
 """
-import json, os, shutil, stat, subprocess, sys, tempfile, time
+import json, os, re, shutil, stat, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -97,14 +101,14 @@ def main():
         except OSError:
             return []
 
-    def sess(base, tasks=None, cmd=("claude",), **ctl):
+    def sess(base, tasks=None, cmd=("claude",), size="100x30", **ctl):
         n = "%s%s" % (base, TAG)
         names.append(n)
         if tasks is not None:
             ctl["tasks"] = tasks
         with open(os.path.join(fc, n + ".ctl"), "w") as f:
             json.dump(ctl, f)
-        subprocess.run([DCH, "--spawn", n, "--size", "100x30"] + list(cmd),
+        subprocess.run([DCH, "--spawn", n, "--size", size] + list(cmd),
                        capture_output=True, check=True)
         if cmd == ("claude",):
             s = until(lambda: [e for e in events(n) if e["ev"] == "start"], 15)
@@ -153,6 +157,14 @@ def main():
         check("%s: nothing stopped or killed" % what,
               not [e for e in ev if e["ev"] in ("kill", "stop")],
               [e for e in ev if e["ev"] in ("kill", "stop")])
+
+    def append_line(o):
+        """One more transcript line, in Claude Code's compact JSON."""
+        d = os.path.join(home, ".claude", "projects", "-fake")
+        f = max((os.path.join(d, x) for x in os.listdir(d)
+                 if x.endswith(".jsonl")), key=os.path.getmtime)
+        with open(f, "a") as fh:
+            fh.write(json.dumps(o, separators=(",", ":")) + "\n")
 
     def views(ev):
         return [e["text"] for e in ev if e["ev"] == "view"]
@@ -353,6 +365,103 @@ def main():
               "view moved to main" in o.get("detail", "") and
               views(ev) == ["main"], (rc, o, views(ev)))
         safe("main appeared", ev, escs=0)
+
+        # --- #724 (QA 1.200.0 XI1-XI5) ------------------------------------
+        # XI1: rows are icon + name column + facts; the dialog painted so
+        # while the close pauses, read from outside
+        n = sess("x5", {"version": V, "agents": [
+            ag("x51", "sleep 300"), ag("x52", "Write the tests")],
+            "rows": [SHELL, row("sleep 300", "x51"),
+                     row("Write the tests", "x52")]})
+        seen = []
+        th = threading.Thread(target=lambda: seen.append(until(
+            lambda: [x for x in [run("--read", n).stdout]
+                     if "Local agents" in x], 8)))
+        th.start()
+        rc, o, ev = view(n, "x51", env={"DCH_VIEW_CLOSE_PAUSE_MS": "3000"})
+        th.join()
+        scr = seen[0][0] if seen and seen[0] else ""
+        check("XI1: the fake paints an agent row as icon, name column, "
+              "then the facts joined ' \u00b7 '", re.search(
+                  "\u25cf sleep 300 {3,}running \u00b7 opus/medium", scr),
+              repr(scr[-700:]))
+        # XI5: a shell row reading the description is not a match
+        check("XI5: a shell row equal to the description is not counted: "
+              "switched, not ambiguous", rc == 0 and is_(o, "switched") and
+              views(ev) == ["x51"], (rc, o, views(ev)))
+        safe("XI5 shell twin", ev)
+        long_ = "Investigate the flaky login test that fails on CI runners"
+        n = sess("x1", {"version": V, "agents": [ag("x11", long_),
+                                                 ag("x12", "Other")],
+                        "rows": [row(long_, "x11"), row("Other", "x12")]})
+        rc, o, ev = view(n, "x11")
+        check("XI1: a 58-column description, its name column cut at 50 "
+              "with \u2026: switched", rc == 0 and is_(o, "switched") and
+              views(ev) == ["x11"], (rc, o, views(ev)))
+        safe("XI1 cut name column", ev)
+
+        # XI2: a reply heading "Background" above a busy line
+        n = sess("x2", {"version": V, "agents": [ag("x21", "Explore"),
+                                                 ag("x22", "Write it")],
+                        "rows": [row("Explore", "x21"),
+                                 row("Write it", "x22")]},
+                 above=["\u23fa Summary", "", "  Background", "",
+                        "  The parser is slow.",
+                        "\u273b Thinking\u2026 (esc to interrupt)"])
+        rc, o, ev = view(n, "x22")
+        check("XI2: a reply's 'Background' line does not hide the dialog: "
+              "switched", rc == 0 and is_(o, "switched") and
+              views(ev) == ["x22"], (rc, o, views(ev)))
+        safe("XI2 reply heading", ev)
+
+        # XI3: only a transcript line's top-level "version" counts
+        n = sess("x3", {"version": V, "agents": [ag("x31", "Write it")],
+                        "rows": [row("Write it", "x31"), SHELL]})
+        append_line({"type": "assistant", "version": V, "message": {
+            "content": [{"type": "tool_use", "id": "toolu_x",
+                         "name": "mcp__pkg__info",
+                         "input": {"version": "1.0.0"}}]}})
+        rc, o, ev = view(n, "main")
+        check("XI3 C1: on %s a later tool input's version 1.0.0 is not the "
+              "version: already_main (Esc)" % V, rc == 0 and
+              is_(o, "already_main"), (rc, o))
+        safe("XI3 C1", ev, escs=1)
+        n = sess("x4", {"version": "2.1.999", "agents": [
+            ag("x41", "Write it")], "rows": [row("Write it", "x41"), SHELL]})
+        append_line({"type": "assistant", "version": "2.1.999", "message": {
+            "content": [{"type": "tool_use", "id": "toolu_y",
+                         "name": "mcp__pkg__pin",
+                         "input": {"version": V}}]}})
+        rc, o, ev = view(n, "main")
+        check("XI3 C2: on 2.1.999 a tool input's version %s does not "
+              "enable Esc: dialog_open" % V, rc == 1 and
+              is_(o, "refused", "dialog_open") and
+              "2.1.999" in o.get("detail", ""), (rc, o))
+        safe("XI3 C2", ev, escs=0)
+
+        # XI4: a description over the meta's 200-byte cap, shown whole
+        asc = "Investigate " + "the flaky login test " * 11
+        n = sess("x6", {"version": V, "agents": [ag("x61", asc),
+                                                 ag("x62", "Other")],
+                        "rows": [dict(row(asc.rstrip(), "x61"), meta=[]),
+                                 dict(row("Other", "x62"), meta=[])]},
+                 size="260x30")
+        rc, o, ev = view(n, "x61")
+        check("XI4: %d bytes of ASCII shown whole at 260 columns: switched"
+              % len(asc.rstrip()), rc == 0 and is_(o, "switched") and
+              views(ev) == ["x61"], (rc, o, views(ev)))
+        safe("XI4 ASCII", ev)
+        cjk = "\u4fee\u590d\u767b\u5f55\u6d4b\u8bd5" * 12
+        n = sess("x7", {"version": V, "agents": [ag("x71", cjk),
+                                                 ag("x72", "Other")],
+                        "rows": [dict(row(cjk, "x71"), meta=[]),
+                                 dict(row("Other", "x72"), meta=[])]},
+                 size="200x30")
+        rc, o, ev = view(n, "x71")
+        check("XI4: 72 CJK characters (216 bytes) shown whole at 200 "
+              "columns: switched", rc == 0 and is_(o, "switched") and
+              views(ev) == ["x71"], (rc, o, views(ev)))
+        safe("XI4 CJK", ev)
 
         # --- DCH_NO_DETECT, and the text shape -----------------------------
         n = sess("nd", {"version": V, "agents": [ag("l1", "Agent")],

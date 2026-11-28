@@ -71,7 +71,7 @@ State lives in $FAKE_CLAUDE_DIR:
 <session> is DCH_SESSION, which the master sets for its child.
 """
 import json, os, select, signal, subprocess, sys, termios, time
-import tty, uuid
+import tty, unicodedata, uuid
 
 D = os.environ["FAKE_CLAUDE_DIR"]
 SESS = os.environ.get("DCH_SESSION", "nosession")
@@ -179,9 +179,11 @@ exit_up = []         # /exit's "Background work is running" prompt, its work
 # the installed one), "agents": [{"id","type","desc","state":"running|done|
 # failed","bg"}] written as <transcript>/subagents files and Agent calls in
 # its transcript ($CONFIG/projects/-fake/<sid>.jsonl), "rows": [{"label",
-# "kind":"shell|agent|completed","id"}] the dialog's rows below the "main"
-# leader row, which shows while viewing an agent or, with "main_after_ms",
-# that long after the dialog opened, "view": the agent viewed at start}.
+# "kind":"shell|agent|completed","id","state","meta"}] the dialog's rows
+# below the "main" leader row, which shows while viewing an agent or, with
+# "main_after_ms", that long after the dialog opened (agent rows painted as
+# row_cells: icon, name, facts; "meta" [] leaves the facts column out, so
+# the label shows whole), "view": the agent viewed at start}.
 # /tasks (immediate: busy too) opens the list, focus on row 0, or with one row while on main that row's detail
 # pane ("<type> › <label>"). List: Up/Down move, f takes main or an agent
 # (the view switches) and closes, Enter opens a detail pane, Esc closes, x
@@ -257,10 +259,82 @@ def tasks_files():
         f.writelines(lines)
 
 
+ICONS = {"running": "\u25cf", "done": "\u2714", "failed": "\u2718"}
+
+
+def cw(t):
+    """Columns text t takes (CJK and fullwidth 2)."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in t)
+
+
+def cut_end(t, w):
+    """Ink's wrap truncate-end: t in w columns, cut with "…"."""
+    if cw(t) <= w:
+        return t
+    o = ""
+    for c in t:
+        if cw(o + c) > w - 1:
+            break
+        o += c
+    return o + "\u2026"
+
+
+def facts(meta, w):
+    """so(): the longest " · " join of meta's leading items within w."""
+    j = [" \u00b7 ".join(meta[:i + 1]) for i in range(len(meta))]
+    return ([x for i, x in enumerate(j) if i == 0 or cw(x) <= w] or [""])[-1]
+
+
+def row_cells(rows, width):
+    """2.1.322's _o rows (zn's widths): an icon box iconWidth wide and a
+    blank, the label in a name column nameWidth wide (truncate-end) and 3
+    blanks, then the meta joined " · " in a facts column. A Local agents row
+    is {label: description, icon: rk(status), meta: [status, model/effort]}.
+    A label that already starts with an icon is painted as given (QA probes
+    lay rows out themselves)."""
+    def meta(r):
+        if r.get("kind", "agent") not in ("agent", "completed"):
+            return []
+        st = r.get("state", "running" if r.get("kind", "agent") == "agent"
+                   else "done")
+        return [x for x in r.get("meta", [st, "opus/medium"]) if x]
+
+    def icon(r):
+        if r.get("kind", "agent") not in ("agent", "completed"):
+            return ""
+        return ICONS.get(r.get("state", "running"), ICONS["running"])
+    items = [r for r in rows if r.get("kind") != "main"]
+    W = max([cw(icon(r)) for r in items] + [0])
+    B = [r for r in items if meta(r)]
+    H = min(50, max([cw(r["label"]) for r in B] + [0]))
+    G = max([cw(" \u00b7 ".join(meta(r))) for r in B] + [0])
+    x = width - (W + 1 if W > 0 else 0) - 3
+    S = x - min(H, max(-(-x // 2), x - G))
+    V = 0 if H + G > x and x < 12 else \
+        min(S, max([cw(facts(meta(r), S)) for r in B] + [0]))
+    h = min(H, x - V)
+    out = []
+    for r in rows:
+        lab = r["label"]
+        if r.get("kind") == "main" or lab[:1] in ICONS.values():
+            out.append(lab)
+            continue
+        box = (icon(r) + " " * W)[:W] + " " if W > 0 else ""
+        f = facts(meta(r), V) if V > 0 and meta(r) else None
+        if f is None:
+            out.append(box + cut_end(lab, max(x + 3, 1)))
+            continue
+        name = cut_end(lab, h)
+        # Ink moves over blank cells with CSI C instead of writing spaces
+        pad = "\033[C" * (h - cw(name) + 3)
+        out.append(box + name + pad + cut_end(f, V))
+    return out
+
+
 def tasks_paint():
     """The dialog in place of the composer: 2.1.322's row layout, a
     two-column glyph (the focused row's "❯", else blank) and a gap, then the
-    label; section headings "<Label> (<n>)" in the same column."""
+    row (row_cells); section headings "<Label> (<n>)" in the same column."""
     rows = drows()
     if dlg == "detail":
         r = rows[ddet] if ddet is not None and ddet < len(rows) else {}
@@ -268,6 +342,11 @@ def tasks_paint():
             "shell" if r.get("kind") == "shell" else "general-purpose",
             r.get("label", "?")), "  Running", "",
             " \u2190 to go back \u00b7 Space to close \u00b7 f to foreground"]
+    try:
+        width = os.get_terminal_size(0).columns - 2 - 3
+    except OSError:
+        width = 75
+    cells = row_cells(rows, width)
     out = ["─" * 60, " Background", " %d active" % len(rows), ""]
     heads = {"shell": "Shells", "agent": "Local agents",
              "completed": "Completed"}
@@ -280,7 +359,7 @@ def tasks_paint():
                 out.append("")
             out.append("   %s (%d)" % (heads[k], n))
         last = k
-        out.append(" %s %s" % ("\u276f" if i == dfocus else " ", r["label"]))
+        out.append(" %s %s" % ("\u276f" if i == dfocus else " ", cells[i]))
     out += ["", " \u2191/\u2193 to select \u00b7 Enter to vagent \u00b7 f to "
             "foreground \u00b7 x to stop \u00b7 Esc to close"]
     return out
