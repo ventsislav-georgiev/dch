@@ -368,6 +368,22 @@ def main():
               (rc, o, views(ev)))
         safe("X9e cut", ev)
 
+        # X9l (#746): two agents cut at the desc cap; only B shown whole
+        pre = "L" * 233
+        for tag, rows in (("mode 2", [row(pre + " beta", "m2")]),
+                          ("list", [row(pre + " beta", "m2"),
+                                    row("Other", "m3")])):
+            n = sess("xl" + tag[:2], {"version": V, "agents": [
+                ag("m1", pre + " alpha"), ag("m2", pre + " beta"),
+                ag("m3", "Other")][:3 if tag == "list" else 2],
+                "rows": rows}, size="300x30")
+            rc, o, ev = view(n, "m1")
+            check("X9l: %s, A cut at the cap, only B shown whole: "
+                  "ambiguous, no f" % tag, rc == 1 and
+                  is_(o, "refused", "ambiguous") and views(ev) == [],
+                  (rc, o, ev[-3:]))
+            safe("X9l " + tag, ev, escs=1 if tag == "list" else 0)
+
         # --- a busy Claude -------------------------------------------------
         n = sess("bz", {"version": V, "agents": [ag("i1", "Busy helper")],
                         "rows": [SHELL, row("Busy helper", "i1")]},

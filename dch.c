@@ -8036,6 +8036,8 @@ sub_type_is(const char *t, const char *w, size_t wl)
 struct sag { char id[64], type[64], tu[128], desc[201];
              long started, end; long long key; time_t mt, fin;
              int stop, state, row; };
+/* the stored desc was cut at its cap, so it matches only as a prefix */
+#define SAG_CUT(s) ((s) && strlen(s) + 4 >= sizeof ((struct sag *)0)->desc)
 
 static void
 sub_rows(struct sag *a, const int *ord, int no)
@@ -11244,7 +11246,7 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 	struct va_scr s, was;
 	int i, t, m, hit, o;
 	/* want cut by cut_text at the meta's cap (possibly a character short) */
-	int cut = want && strlen(want) + 4 >= sizeof ((struct sag *)0)->desc;
+	int cut = SAG_CUT(want);
 
 	switch (claude_gate_q(path, 1))
 	{
@@ -11293,7 +11295,8 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 			return (void)va_close(path, ver), -1;
 		}
 		for (o = 0; o < no; o++)
-			if (o != tk && va_title(s.det, sa[ord[o]].desc, 0))
+			if (o != tk && va_title(s.det, sa[ord[o]].desc,
+			    SAG_CUT(sa[ord[o]].desc)))
 			{
 				va_say("ambiguous", "the one task shown, \"%s\", "
 				       "reads as another agent too", s.det);
@@ -11321,7 +11324,8 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 		** it is another known agent's description too, it may be theirs */
 		for (o = 0; m == 1 && o < no; o++)
 			if (o != tk &&
-			    va_match(s.lab[hit], sa[ord[o]].desc, 0))
+			    va_match(s.lab[hit], sa[ord[o]].desc,
+				    SAG_CUT(sa[ord[o]].desc)))
 				m = 2;
 		if (!m)
 			va_say("not_listed", "no /tasks row reads \"%s\"", want);
