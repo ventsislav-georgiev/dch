@@ -342,6 +342,32 @@ def main():
               ["space"], (rc, o, ev[-3:]))
         safe("X9a", ev)
 
+        # X9e (#742): the title has no facts; "Fix   the bug" is one name
+        n = sess("xe", {"version": V, "agents": [ag("k1", "Fix   the bug"),
+                                                  ag("k2", "Fix")],
+                         "rows": [row("Fix   the bug", "k1")]})
+        rc, o, ev = view(n, "k1")
+        check("X9e: one-task pane 'Fix   the bug', other agent 'Fix': switched",
+              rc == 0 and is_(o, "switched") and views(ev) == ["k1"],
+              (rc, o, views(ev)))
+        safe("X9e", ev)
+        n = sess("xf", {"version": V, "agents": [ag("k1", "Fix   the bug"),
+                                                  ag("k2", "Fix")],
+                         "rows": [row("Fix   the bug", "k1")]})
+        rc, o, ev = view(n, "k2")
+        check("X9e: pane 'Fix   the bug', target 'Fix': no f, not switched",
+              rc == 1 and (is_(o, "refused", "not_listed") or
+               is_(o, "refused", "ambiguous")) and
+              views(ev) == [], (rc, o, ev[-3:]))
+        safe("X9e rev", ev)
+        n = sess("xg", {"version": V, "agents": [ag("k1", "Fix the bug now")],
+                         "rows": [row("Fix the\u2026", "k1")]})
+        rc, o, ev = view(n, "k1")
+        check("X9e: pane title cut with an ellipsis still matches its agent",
+              rc == 0 and is_(o, "switched") and views(ev) == ["k1"],
+              (rc, o, views(ev)))
+        safe("X9e cut", ev)
+
         # --- a busy Claude -------------------------------------------------
         n = sess("bz", {"version": V, "agents": [ag("i1", "Busy helper")],
                         "rows": [SHELL, row("Busy helper", "i1")]},

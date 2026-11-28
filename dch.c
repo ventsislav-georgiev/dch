@@ -11068,6 +11068,35 @@ va_match(const char *lab, const char *d, int cut)
 	return 0;
 }
 
+/* Is the one-task pane title det the description d? Whole, d cut at its
+** cap (cut) as a prefix of det, or det cut at the pane edge with "…". The
+** title has no facts: blanks inside it are text, unlike a row's. */
+static int
+va_title(const char *det, const char *d, int cut)
+{
+	size_t n, dn, tn;
+
+	while (*det == ' ')
+		det++;
+	while (*d == ' ')
+		d++;
+	for (tn = strlen(det); tn && det[tn - 1] == ' '; tn--)
+		;
+	for (dn = strlen(d); dn && d[dn - 1] == ' '; dn--)
+		;
+	if (tn == dn && !strncmp(det, d, dn))
+		return 1;
+	if (cut && !strncmp(det, d, dn))
+		return 1;
+	if (tn >= 3 && !strncmp(det + tn - 3, "\xe2\x80\xa6", 3))
+	{
+		for (n = tn - 3; n && det[n - 1] == ' '; n--)
+			;
+		return n && n <= dn && !strncmp(det, d, n);
+	}
+	return 0;
+}
+
 /* The screen at path parsed into s; -1 when it cannot be read. */
 static int
 va_read(const char *path, struct va_scr *s)
@@ -11258,13 +11287,13 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 	{
 		if (!want)
 			return va_main_close(path, ver);
-		if (!va_match(s.det, want, cut))
+		if (!va_title(s.det, want, cut))
 		{
 			va_say("not_listed", "the one task shown is \"%s\"", s.det);
 			return (void)va_close(path, ver), -1;
 		}
 		for (o = 0; o < no; o++)
-			if (o != tk && va_match(s.det, sa[ord[o]].desc, 0))
+			if (o != tk && va_title(s.det, sa[ord[o]].desc, 0))
 			{
 				va_say("ambiguous", "the one task shown, \"%s\", "
 				       "reads as another agent too", s.det);
