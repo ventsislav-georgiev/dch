@@ -45,7 +45,11 @@ in Claude Code's key order (before tool_use_id) and on a two-result line
 bound to its own block; meta stoppedByUser:true is failed; "ended" for
 ended ones; X Y X in one ms nulls both X; an agent with no end last
 written before its Claude started is left out; a panel cut at det_panel's
-4096 bytes gives null rows.
+4096 bytes gives null rows. #725: a Monitor task (a direct child in the
+wrapper whose command a Monitor tool_use names) in "shells" with its task
+id, output, description and "monitor":true, newest first beside a Bash
+shell; a child no call fits left out; two of one command paired by start
+order; an ambiguous one with id null; --stop-shell by a monitor's id.
 
 Run:  python3 tests/transcript_test.py        (uses ./dch)
 """
@@ -97,7 +101,7 @@ def main():
     for k in list(os.environ):
         if k.startswith("CLAUDE") or k.startswith("DCH_"):
             del os.environ[k]
-    os.environ.update(HOME=home, XDG_RUNTIME_DIR=tmp,
+    os.environ.update(HOME=home, XDG_RUNTIME_DIR=tmp, CLAUDE_CODE_TMPDIR=tmp,
                       XDG_STATE_HOME=os.path.join(tmp, "state"),
                       FAKE_CLAUDE_DIR=fc, DCH_LOGIN_ENV="0",
                       DCH_CONFIG=os.path.join(tmp, "config"),
@@ -671,6 +675,124 @@ def main():
             check("--stop-shell: nothing the shell started meanwhile "
                   "survives, ok (%r, left %r)" % (r.stdout, left),
                   '"result":"ok"' in r.stdout and not left)
+            # --- Monitor tasks (#725): direct children in the same wrapper,
+            # stdout not on a tasks file, named by a Monitor tool_use whose
+            # command is the eval'd one and whose result names the task id
+            mlog = os.path.join(tmp, "mon.log")
+
+            def mcall(tu, t, cmd, desc, ms=0):
+                return jl({"type": "assistant", "isSidechain": False,
+                           "timestamp": iso(t).replace(".000Z",
+                                                       ".%03dZ" % ms),
+                           "message": {"role": "assistant", "content": [
+                               {"type": "tool_use", "id": tu,
+                                "name": "Monitor", "input": {
+                                    "command": cmd, "description": desc,
+                                    "timeout_ms": 300000}}]}})
+
+            def mres(tu, t, task, arr=False):
+                txt = ("Monitor started (task %s, timeout 300000ms). You will "
+                       "be notified on each event." % task)
+                return jl({"type": "user", "isSidechain": False,
+                           "timestamp": iso(t), "message": {
+                               "role": "user", "content": [
+                                   {"type": "tool_result", "tool_use_id": tu,
+                                    "content": [{"type": "text", "text": txt}]
+                                    if arr else txt}]},
+                           "toolUseResult": {"taskId": task,
+                                             "timeoutMs": 300000,
+                                             "persistent": False}})
+
+            def mons(pids):
+                return {x.get("pid"): x for x in field(h, "shells") or []
+                        if x.get("pid") in pids}
+
+            c1 = "sleep 120.0725; echo 'm1'"
+            pm1 = shell("mon1", shlex.quote(c1), out=mlog)
+            tm1 = started(pm1)
+            open(outp("bmon1"), "w").close()	# Claude Code writes it
+            time.sleep(1.1)
+            pb30 = shell("bsh30bg", "'sleep 120'")
+            tb30 = started(pb30)
+            cf = "sleep 120.0725; echo fg"
+            pfg = shell("fgx", shlex.quote(cf), out=mlog)
+            tfg = started(pfg)
+            ctw = "sleep 120.0725; echo twin"
+            pta = shell("twinA", shlex.quote(ctw), out=mlog)
+            time.sleep(1.1)
+            ptb = shell("twinB", shlex.quote(ctw), out=mlog)
+            tta, ttb = started(pta), started(ptb)
+            cam = "sleep 120.0725; echo amb"
+            pam = shell("amb", shlex.quote(cam), out=mlog)
+            tam = started(pam)
+            with open(stp, "w") as f:
+                f.write(filler(tm1 - 3600, 200))
+                f.write(mcall("toolu_mon1", tm1, c1, "Watch\tm1"))
+                f.write(mres("toolu_mon1", tm1, "bmon1"))
+                f.write(call("toolu_b30", tb30, "Bg build"))
+                f.write(result("toolu_b30", "bsh30bg", tb30))
+                f.write(mcall("toolu_ta", tta, ctw, "Twin A"))
+                f.write(mres("toolu_ta", tta, "btwinA"))
+                f.write(mcall("toolu_tb", ttb, ctw, "Twin B"))
+                f.write(mres("toolu_tb", ttb, "btwinB", arr=True))
+                # two calls of one command, one child alive: no id guessed
+                f.write(mcall("toolu_am1", tam, cam, "Amb 1", 100))
+                f.write(mcall("toolu_am2", tam, cam, "Amb 2", 200))
+                f.write(mres("toolu_am1", tam, "bamb1"))
+                f.write(mres("toolu_am2", tam, "bamb2"))
+                # the fg child's command, called after it started: not it
+                f.write(mcall("toolu_fg", tfg + 2, cf, "Later"))
+                f.write(mres("toolu_fg", tfg + 2, "bfg"))
+                f.write(filler(tam + 30, 20))
+            allsh = field(h, "shells") or []
+            got = mons([pm1, pb30, pfg, pta, ptb, pam])
+            check("a monitor: id, command, output, pgid, description, "
+                  "monitor:true (%s)" % got.get(pm1), got.get(pm1) == {
+                      "id": "bmon1", "pid": pm1, "started": tm1,
+                      "command": c1, **ox("bmon1", pm1),
+                      "description": "Watch m1", "monitor": True})
+            keys = []
+            for r in json.loads(run("--ls-json").stdout,
+                                object_pairs_hook=lambda kv: kv):
+                for x in dict(r).get("shells", []):
+                    if dict(x).get("pid") == pm1:
+                        keys = [k for k, _ in x]
+            check("monitor keys in order (%s)" % keys, keys == [
+                "id", "pid", "started", "command", "output", "pgid",
+                "description", "monitor"])
+            order = [(x.get("started"), x.get("pid")) for x in allsh]
+            check("a monitor next to a newer background Bash shell: both "
+                  "listed, newest first (%s)" % got.get(pb30),
+                  pm1 in got and got.get(pb30, {}).get("background") is True
+                  and "monitor" not in got.get(pb30, {}) and
+                  order == sorted(order, reverse=True) and
+                  order.index((tb30, pb30)) < order.index((tm1, pm1)))
+            check("a direct child matching no Monitor call (one of its "
+                  "command made after it started): not listed",
+                  pfg not in got)
+            check("two monitors of one command: paired by start order (%s, "
+                  "%s)" % (got.get(pta), got.get(ptb)),
+                  got.get(pta, {}).get("id") == "btwinA" and
+                  got.get(ptb, {}).get("id") == "btwinB" and
+                  got.get(pta, {}).get("description") == "Twin A" and
+                  got.get(ptb, {}).get("description") == "Twin B" and
+                  "output" not in got.get(pta, {}))
+            check("ambiguous pairing: id null, monitor:true, no description "
+                  "(%s)" % got.get(pam), got.get(pam) == {
+                      "id": None, "pid": pam, "started": tam, "command": cam,
+                      "pgid": os.getpgid(pam), "monitor": True})
+            check("Bash shells carry no monitor key",
+                  all("monitor" not in x for x in allsh
+                      if x.get("pid") not in (pm1, pta, ptb, pam)))
+            km1 = [int(k) for k in subprocess.run(
+                ["/usr/bin/pgrep", "-P", str(pm1)], capture_output=True,
+                text=True).stdout.split()]
+            r = run("--stop-shell", h, "bmon1", "--json")
+            check("--stop-shell a monitor by its id: ok, it and its child "
+                  "gone, a sibling monitor live (%r)" % r.stdout,
+                  json.loads(r.stdout or "{}").get("result") == "ok" and
+                  until(lambda: not any(alive(q) for q in [pm1] + km1), 5)
+                  and alive(pta) and alive(hp))
             os.unlink(os.path.join(sessdir, "%d.json" % hp))
             check("its record gone: no shells key", field(h, "shells") ==
                   MISSING)
