@@ -11209,7 +11209,7 @@ va_main_close(const char *path, const char *ver)
 ** main, -1 refused (va_reason, va_detail). */
 static int
 va_drive(const char *path, const char *want, const char *ver, int busy,
-         const struct sag *sa, const int *ord, int no)
+         const struct sag *sa, const int *ord, int no, int tk)
 {
 	struct va_scr s, was;
 	int i, t, m, hit, o;
@@ -11283,7 +11283,7 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 		/* a no-facts row "Fix   the bug" also reads as "Fix" + facts: when
 		** it is another known agent's description too, it may be theirs */
 		for (o = 0; m == 1 && o < no; o++)
-			if (strcmp(sa[ord[o]].desc, want) &&
+			if (o != tk &&
 			    va_match(s.lab[hit], sa[ord[o]].desc, 0))
 				m = 2;
 		if (!m)
@@ -11482,7 +11482,7 @@ do_view_agent_verb(const char *name, const char *id, int json)
 	}
 	ty_codex = 0;
 	res = va_drive(path, want, ver, strcmp(r.status, "busy") == 0, a, ord,
-	               no);
+	               no, k);
 	return va_print(name, res, json);
 #endif
 }
