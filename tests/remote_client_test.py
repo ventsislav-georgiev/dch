@@ -457,6 +457,15 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
           % UNSUPPORTED_EXIT, r.returncode == UNSUPPORTED_EXIT
           and r.stderr == "dch: srv: does not support --spawn (needs dch "
           "serve --allow-create)\n", r)
+    # #723: a host with create but before create_group: nothing sent
+    pre = Fake("list", ops=["create", "ctl", "ctl-cancel", "watch", "xray"])
+    fakes.append(pre)
+    r = dch(cenv, "--hosts", "q=127.0.0.1:%d" % pre.port, "--spawn", "q:cg",
+            "--group", "Ops", "--", "/bin/cat")
+    check("#723: --spawn --group on a host whose hello lacks create_group: "
+          "exit %d" % UNSUPPORTED_EXIT, r.returncode == UNSUPPORTED_EXIT
+          and r.stderr == "dch: q: does not support --group (needs dch "
+          "serve 1.202.0+)\n" and not pre.bodies, r)
     old = Fake("list", proto="1.0")
     fakes.append(old)
     r = dch(cenv, "--hosts", "q=127.0.0.1:%d" % old.port, "--read", "q:x")

@@ -16,11 +16,69 @@ Checks:
   f-switch       f in the list switches to the agent (a function that sets
                  viewSelectionMode:"viewing-agent", then "Viewing agent")
   space-close    the detail pane closes on Space (onClose)
+  (#724, what va_parse reads off a row)
+  agent-item     a local_agent row item is {label: description, icon:
+                 <status glyph>, meta: [status...]}
+  row-columns    the row component takes {item, iconWidth, nameWidth,
+                 factsWidth} and draws an icon box (width iconWidth,
+                 marginRight 1), the label in a name column nameWidth wide
+                 with a margin of 3 (truncate-end), the meta joined " \xb7 "
+                 in a facts column; the name column is at most 50 wide
+  local-agents   the agents' section heading reads "Local agents"
+  dialog-title   the list's title is "Background", drawn on the line under
+                 the dialog's rule of "\u2500"
 
 Run:  python3 tests/claude_tasks_contract.py [path/to/claude]
 Exit: 0 all ok (or SKIP), 1 a check failed.
 """
 import glob, mmap, os, re, sys
+
+W = rb'[\w$]+'
+
+
+def row_columns(b):
+    m = re.search(rb'function ' + W + rb'\((?P<o>' + W + rb')\)\{let ' + W +
+                  rb'=' + W + rb'\(\d+\),\{item:' + W + rb',iconWidth:(?P<iw>' +
+                  W + rb'),nameWidth:(?P<nw>' + W + rb'),factsWidth:(?P<fw>' +
+                  W + rb'),rowLines:' + W + rb'\}=(?P=o),\{icon:' + W +
+                  rb',meta:' + W + rb',\.\.\.' + W + rb'\}=', b)
+    if not m:
+        return False
+    body = b[m.end():m.end() + 4000]
+    g = {k: re.escape(v) for k, v in m.groupdict().items()}
+    # the facts: so(meta, factsWidth), the meta's items joined " · "
+    so = re.search(rb'\?(' + W + rb')\(' + W + rb',' + g["fw"] + rb'\):void 0',
+                   body)
+    mg = re.search(rb'===void 0\?0:(?P<io>' + W + rb'),', body)
+    widths = re.search(rb'var ' + W + rb'=2,' + (re.escape(mg.group("io"))
+                       if mg else b"@") + rb'=3,(?P<cap>' + W + rb')=50,', b)
+    return bool(
+        re.search(rb'width:' + g["iw"] + rb',marginRight:1', body) and
+        re.search(rb'===void 0\?void 0:' + g["nw"] + rb',', body) and
+        re.search(rb'wrap:"truncate-end",children:', body) and
+        re.search(rb'maxWidth:' + g["fw"] + rb',', body) and
+        so and re.search(rb'function ' + re.escape(so.group(1)) +
+                         rb'\(' + W + rb',' + W + rb'\)\{return .{0,80}\.join\('
+                         rb'" \\xB7 "\)', b) and mg and widths and
+        re.search(rb'Math\.min\(' + re.escape(widths.group("cap")) +
+                  rb',Math\.max\(0,', b[widths.end():widths.end() + 3000]))
+
+
+def dialog_title(b):
+    if not re.search(rb'\(' + W + rb',\{title:"Background",subtitle:', b):
+        return False
+    # the rule: the dialog frame's paddingTop:1, its rule, then the column
+    # whose first child is the title; the rule's default char is U+2500
+    r = re.search(rb'function ' + W + rb'\(' + W + rb'\)\{let ' + W + rb'=' +
+                  W + rb'\(\d+\),\{width:' + W + rb',color:' + W +
+                  rb',char:(?P<c>' + W + rb'),padding:' + W + rb',title:' +
+                  W + rb',titleAlign:' + W + rb'\}=' + W + rb',' + W + rb'=(?P=c)'
+                  rb'===void 0\?(?P<d>' + W + rb'):', b)
+    return bool(
+        r and
+        re.search(rb'flexDirection:"column",paddingTop:1,children:\[', b) and
+        re.search(rb'[,\s]' + re.escape(r.group("d")) + rb'="\\u2500"', b))
+
 
 CHECKS = [
     ("confirm-no",
@@ -40,6 +98,15 @@ CHECKS = [
      [rb'function [\w$]+\(\{onClose:(?P<c>[\w$]+),onBack:[\w$]+,onKill:'
       rb'[\w$]+,onEnter:[\w$]+\}\)\{.{0,200}?if\([\w$]+\.key===" "\)'
       rb'[\w$]+\.preventDefault\(\),(?P=c)\(\)']),
+    ("agent-item",
+     [rb'case"local_agent":\{let .{0,300}?return\{label:(?P<h>[\w$]+)'
+      rb'\.description,icon:.{0,200}?[\w$]+\((?P=h)\.status\),meta:\['
+      rb'`\$\{(?P=h)\.status']),
+    ("row-columns", row_columns),
+    ("local-agents",
+     [rb'key:"local-agents",items:[\w$]+,heading:[\w$]+\([\w$]+,'
+      rb'\{label:"Local agents",size:']),
+    ("dialog-title", dialog_title),
 ]
 
 
@@ -65,6 +132,8 @@ def main():
     for name, pats in CHECKS:
         ok = True
         m = None
+        if callable(pats):
+            ok, pats = bool(pats(b)), []
         for p in pats:
             if p is None and name == "escape-kill":
                 te = re.escape(m.group("te"))

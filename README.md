@@ -321,7 +321,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.201.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.202.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -535,7 +535,7 @@ someone is watching is invisible to them.
 
 | Verb | Does | Exit codes |
 | --- | --- | --- |
-| `--spawn <n> [--size CxR] [--env K=V]... [--group <g>] [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--group <g>` sets the new session's manual group, as `--group-set <n> <g>` does (#714); a `<g>` no config `group` line names exits 1 with `dch: --group: no group <g> in the config (no_group)` on stderr before anything is spawned; local only (with `--host` it is a usage error, exit 2). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
+| `--spawn <n> [--size CxR] [--env K=V]... [--group <g>] [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--group <g>` sets the new session's manual group, as `--group-set <n> <g>` does (#714); a `<g>` no config `group` line names exits 1 with `dch: --group: no group <g> in the config (no_group)` on stderr before anything is spawned. On `host:<n>` (or with `--host`) it goes over ctl and the host's config decides (#723, needs `create_group` in the host's ops: dch serve 1.202.0+ with `--allow-create`, else exit 6). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
 | `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--schedules` its crons, `/loop` wake-up and Codex heartbeats; `--questions` lists your `questions_command`'s open questions; `--answer <qid> -` answers one through your `answer_command`, its text on standard input; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure (`--answer`: not answered), 5 `--answer`: the question is not open (answered or dropped elsewhere) or gone; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end (all of it when none had gone in yet) and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held); the text's start may still be in its input`. | 0 ok, 1 input dropped |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z, when that one is in front as `claude_foreground` defines it), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A Claude that is not in front with nothing in front of it that is — under a wrapper that does not read the keyboard (plain `unbuffer`), or a shell in front of it inside one — fails `not_foreground` and nothing is typed (dch-lite too): the text would wait there and the shell around it would run it once the wrapper exits. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `not_foreground` (see above); `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure / input dropped (plain burst, as `--send`) |
@@ -3878,7 +3878,7 @@ an address outside 100.64.0.0/10 is closed without a byte.
 | --- | --- |
 | `--bind <ipv4>` | Listen there instead. Relaxes nothing: the peer checks above still apply, so an address that is not on your tailnet admits nobody (it warns). A wildcard or non-unicast address is refused. |
 | `--port <n>` | Another port, 0 for any (tests). The phone always dials 8771. |
-| `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. It also gates the control verbs that start sessions, `--spawn` and `--revive`. |
+| `--allow-create` | Let the phone start a session with its own command (0x02), in a config group with `group` (`create_group` in ops). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. It also gates the control verbs that start sessions, `--spawn` and `--revive`. |
 | `--allow-user <u>` | On a tagged host, accept this user's nodes (numeric id or login). Repeatable. |
 | `--whois-optional` | Accept a tailnet peer while tailscaled is not answering (whois and status both fail), with a warning (see above). A whois timeout while status answers is still refused. The owner must still be known at startup. |
 | `--check-peer <ip>` | Print whether that peer would get in, and the refusal code in parentheses, then exit 0 (accept) or 1. |
@@ -3899,7 +3899,8 @@ code not in these tables may be added later; treat one you do not know as a
 refusal you cannot explain. A refusal never names the host's owner, a user,
 a node or the `--allow-user` list. A peer refused again within 30 s (the
 repeat-refusal cache) gets the same code. Other `0x13` frames (a failed
-attach, say) have no `code`, but for `taken`, below.
+attach, say) have no `code`, but for `taken`, below, and the create
+refusal `no_group`.
 
 | `code` | When | `message` |
 | --- | --- | --- |
@@ -3909,6 +3910,7 @@ attach, say) have no `code`, but for `taken`, below.
 | `whois_unavailable` | tailscaled is not answering (whois and `status` both fail, or whois timed out at 3 s while `status` answers), and no `--whois-optional` (it covers only the first case). | `this host could not verify you: tailscaled is not answering` |
 | `whois_failed` | whois failed while `status` works (a node tailscaled does not know), or its answer was unusable. | `this host could not verify you (tailscale whois failed)` |
 | `self` | The peer is this host itself: one of its addresses, or its own node. | `this host does not serve connections from itself` |
+| `no_group` | A create refusal (#723), not a gate one: a `0x02` whose `group` no config `group` line of this host names (ignoring case, as `dch --spawn --group`). Nothing is started; it is the last frame and the connection closes. | `no such group in the config` |
 
 Every code above means "refused": the same peer will be refused again, so
 do not retry. One code is transient and means "try again later":
@@ -3959,6 +3961,15 @@ not an integer means none. It is additive: a server that does not know it
 ignores it (an unknown key in a JSON object), so it needed no new protocol
 version. Commands run as argument vectors, never through a shell.
 
+A `0x02` also takes `"group": "<name>"` (#723, `create_group` in `ops`): a
+config group of this host, matched ignoring case as `dch --spawn --group`
+does, that the new session gets as its manual group (the `--group-set`
+`.group` file, stored in the config's spelling). Not a string: `malformed
+create request`. No such group: the coded `0x13` `no_group` (see the
+refusal codes), before any session starts, then the close. When the name
+attaches to a session that already runs, the group is ignored and nothing
+changes (an unknown group is still refused). `0x01` ignores the key.
+
 **Redraw.** On a `0x07`, dch serve resizes the program one row down and back
 120 ms later, so it repaints. A dch serve 1.58.0+ also re-attaches its
 client, and the attach stream then carries the session's DEC modes (mouse,
@@ -3979,7 +3990,9 @@ not know the type ignores it too, so it needed no new protocol version.
 Remote frames 1.1 adds one op, `ctl`: a client runs one of dch's own verbs
 on the host and gets its output and exit status, exactly as if it had run
 there. `0x18` says `"proto":"1.1"` and always lists `ctl`, `ctl-cancel` and
-`xray` in `ops` (`create` only with `--allow-create`). A client checks for
+`xray` in `ops` (`create` and `create_group` only with `--allow-create`;
+`create_group`, dch serve 1.202.0+, says `0x02` takes `group` and ctl
+`--spawn` takes `--group`). A client checks for
 the `ctl-cancel` token, not the proto, before it sends a `0x34` or a second
 `0x30`, and for the `xray` token before it sends an `--xray`. One request at
 a time:
@@ -4041,7 +4054,7 @@ for a local session named that way.
 | `--status` | `--status <n>` | 60 s |
 | `-k`, `-d` | `-k <n>`, `-d <n>` | 60 s |
 | `-m` | `-m <n> <alias>` | 60 s |
-| `--spawn` | `--spawn <n> [--size CxR] [--] <cmd...>`, with `cwd`; needs `--allow-create` | 60 s |
+| `--spawn` | `--spawn <n> [--size CxR] [--group <g>] [--] <cmd...>`, with `cwd`; needs `--allow-create`; `--group` (#723, `create_group` in `ops`) is checked by the host's dch against its config: no such group is that dch's own `dch: --group: no group <g> in the config (no_group)` on stderr and exit 1, nothing started | 60 s |
 | `--history` | `--history --json` | 60 s |
 | `--revive` | `--revive <n> [--as <new>] [--no-message] [--codex-drop-provider] [--codex-config K=V]... --json`; needs `--allow-create`; never `--env` or `--unset` (local only) | 660 s |
 | `--pin`, `--unpin`, `--forget` | `--pin <n>... --json`; `--forget --all --json` | 60 s |
@@ -4241,6 +4254,7 @@ dch --hosts mini,pi=100.64.1.2:8771 --ls --remote   # these hosts, not your tail
 dch --read mybox:api              # a control verb on mybox (dch serve 1.41+)
 dch --host mybox --send api -- make test
 dch --cwd /srv/app --spawn mybox:build -- make   # needs dch serve --allow-create
+dch --spawn mybox:build --group Ops -- make      # in mybox's group Ops (dch serve 1.202.0+)
 dch --xray mybox:api --json       # X-ray a session on mybox (dch serve 1.55.0+)
 ```
 
@@ -4420,7 +4434,7 @@ any connection (exit 2).
 | 0-3 | The remote dch's own exit status. 2 with `dch: <host>: <verb> stopped by the host (cap\|timeout)` on stderr: the host cut it short. |
 | 1 | Also: the host refused the request (`dch: <host>: <why>`), an unknown host, or a request dch would not send. |
 | 4 | Refused: the host's gate sent a coded `0x13` (`dch: <host> refused: <message>`). |
-| 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`, or `(needs dch serve 1.55.0+)` for `--xray` when the hello lacks `xray`; nothing is sent. |
+| 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`, or `(needs dch serve 1.55.0+)` for `--xray` when the hello lacks `xray`, or `dch: <host>: does not support --group (needs dch serve 1.202.0+)` for `--spawn --group` when the hello has `create` but not `create_group`; nothing is sent. |
 | 7 | Unreachable: `dch: <host>: unreachable: <why>` (down, `busy`, or the connection lost before the exit status). |
 | 128+N | The host's dch died of signal N: `dch: <host>: <verb> on the host ended by signal <N>`. |
 

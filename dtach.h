@@ -432,6 +432,9 @@ struct dch_agent
 };
 int dch_history_dir(char *out, size_t outsz, const char *sockdir,
                     int create);
+/* #723: the config group named g, ignoring case, into out as the config
+** spells it; 0, or -1 when there is none. */
+int dch_group_lookup(const char *g, char *out, size_t cap);
 int dch_dir_private(const char *dir);
 /* The shallowest Codex at or below child (X-ray 7.3/7.4); 0 none. */
 long dch_codex_below(long child);

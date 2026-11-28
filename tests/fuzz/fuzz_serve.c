@@ -229,8 +229,10 @@ ctl_inv(int ac, char **av, const unsigned char *kind, int fl)
 	if (ac < 2 || ac > CTL_ARGV_MAX ||
 	    (!ctl_known(av[0]) && strcmp(av[0], "--xray")) ||
 	    kind[0] != CK_VERB ||
-	    (fl & ~(CTL_CREATE | CTL_LONG | CTL_FOREVER | CTL_NOCAP)) ||
-	    (fl & CTL_NOCAP && strcmp(av[0], "--xray")))
+	    (fl & ~(CTL_CREATE | CTL_LONG | CTL_FOREVER | CTL_NOCAP |
+	            CTL_GROUP)) ||
+	    (fl & CTL_NOCAP && strcmp(av[0], "--xray")) ||
+	    (fl & CTL_GROUP && strcmp(av[0], "--spawn")))
 		abort();
 	if (!strcmp(av[0], "--xray"))
 		xray_inv(ac, av, kind, fl);

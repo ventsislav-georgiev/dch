@@ -722,9 +722,10 @@ def main():
               and info.get("proto") == "1.1" and info.get("hostname")
               and info.get("name") and info.get("os")
               and re.fullmatch(r"[0-9a-f]{64}", info.get("device_id", "")))
-        check("ops lists create (and ctl, ctl-cancel, xray) with "
-              "--allow-create", info.get("ops")
-              == ["create", "ctl", "ctl-cancel", "watch", "xray"])
+        check("ops lists create, create_group (and ctl, ctl-cancel, xray) "
+              "with --allow-create", info.get("ops")
+              == ["create", "create_group", "ctl", "ctl-cancel", "watch",
+                  "xray"])
         send(s, 0x08, {"proto": "2.0"})
         t, pl = frame(s)
         check("a newer proto major gets 0x13",
@@ -1140,6 +1141,122 @@ def main():
         subprocess.run([DCH, "-k", "svc-sh"], env=env, capture_output=True,
                        timeout=10)
 
+        # --- #723: create in a config group (Ops above) -------------------
+        def lsrow(nm):
+            r = subprocess.run([DCH, "--ls-json"], env=env,
+                               capture_output=True, text=True, timeout=10)
+            try:
+                return {x["name"]: x for x in json.loads(r.stdout)}.get(nm)
+            except ValueError:
+                return None
+
+        def until(f, n=50):
+            for _ in range(n):
+                v = f()
+                if v:
+                    return v
+                time.sleep(0.1)
+            return f()
+
+        def ctl_end(argv):
+            s = conn(port)
+            send(s, 0x30, {"argv": argv})
+            err = b""
+            try:
+                while True:
+                    t, pl = frame(s)
+                    if t == 0x32:
+                        err += pl
+                    elif t != 0x31:
+                        break
+            except EOFError:
+                t, pl = None, b""
+            s.close()
+            return t, pl, err
+
+        def gone_after(s):
+            try:
+                return s.recv(1) == b""
+            except OSError:
+                return True
+
+        s = conn(port)
+        send(s, 0x02, {"name": "svc-g1", "cols": 80, "rows": 24,
+                       "group": "ops", "command": ["sleep", "600"]})
+        row = until(lambda: lsrow("svc-g1"))
+        check("#723: 0x02 with a config group (any case) creates the "
+              "session in it: group and group_manual Ops",
+              row and row.get("group") == "Ops" and
+              row.get("group_manual") == "Ops", row)
+        s.close()
+        s = conn(port)
+        send(s, 0x02, {"name": "svc-g2", "cols": 80, "rows": 24,
+                       "group": "Nope", "command": ["sleep", "600"]})
+        t, pl = frame_not(s)
+        check("#723: 0x02 with no such group: a coded 0x13 no_group",
+              t == 0x13 and json.loads(pl) == {
+                  "code": "no_group",
+                  "message": "no such group in the config"}, (t, pl))
+        check("#723: then the connection closes", gone_after(s))
+        s.close()
+        time.sleep(0.5)
+        check("#723: and no session started", lsrow("svc-g2") is None)
+        for bad in (5, None, ["Ops"], {"n": "Ops"}, True):
+            s = conn(port)
+            send(s, 0x02, {"name": "svc-g3", "group": bad})
+            t, pl = frame_not(s)
+            check("#723: 0x02 group %r is a malformed request" % (bad,),
+                  t == 0x13 and "malformed create request" in
+                  json.loads(pl)["message"], (t, pl))
+            s.close()
+        r = subprocess.run([DCH, "--spawn", "svc-g4", "--size", "80x24",
+                            "sleep", "600"], env=env, capture_output=True,
+                           timeout=30)
+        s = conn(port)
+        send(s, 0x02, {"name": "svc-g4", "cols": 80, "rows": 24,
+                       "group": "Ops"})
+        time.sleep(1)
+        row = lsrow("svc-g4")
+        check("#723: 0x02 group on a name that attaches is ignored "
+              "(no manual group)", r.returncode == 0 and row and
+              row.get("group_manual") is None and row.get("group") is None,
+              row)
+        s.close()
+        t, pl, err = ctl_end(["--spawn", "svc-g5", "--group", "OPS",
+                              "--size", "20x2", "--", "sleep", "600"])
+        row = until(lambda: lsrow("svc-g5"))
+        check("#723: ctl --spawn --group: exit 0, session in Ops",
+              t == 0x33 and json.loads(pl).get("exit") == 0 and row and
+              row.get("group_manual") == "Ops", (t, pl, err, row))
+        t, pl, err = ctl_end(["--spawn", "svc-g6", "--group", "nope",
+                              "--", "sleep", "600"])
+        check("#723: ctl --spawn --group of no group: the child's "
+              "no_group line, exit 1, nothing started",
+              t == 0x33 and json.loads(pl).get("exit") == 1 and
+              err == b"dch: --group: no group nope in the config "
+              b"(no_group)\n" and lsrow("svc-g6") is None, (t, pl, err))
+        cenv = dict(env, DCH_NO_GITHUB="1")
+        r = subprocess.run([DCH, "--hosts", "gh=127.0.0.1:%d" % port,
+                            "--spawn", "gh:svc-g7", "--group", "Ops",
+                            "--size", "20x2", "--", "sleep", "600"],
+                           env=cenv, capture_output=True, text=True,
+                           timeout=30)
+        row = until(lambda: lsrow("svc-g7"))
+        check("#723: dch --spawn host:name --group sends it over ctl",
+              r.returncode == 0 and row and
+              row.get("group_manual") == "Ops", (r, row))
+        r = subprocess.run([DCH, "--hosts", "gh=127.0.0.1:%d" % port,
+                            "--spawn", "gh:svc-g8", "--group", "nope",
+                            "--", "sleep", "600"],
+                           env=cenv, capture_output=True, text=True,
+                           timeout=30)
+        check("#723: remote --spawn --group of no group: the host's "
+              "line and exit 1", r.returncode == 1 and
+              "(no_group)" in r.stderr, r)
+        for nm in ("svc-g1", "svc-g4", "svc-g5", "svc-g7"):
+            subprocess.run([DCH, "-k", nm], env=env, capture_output=True,
+                           timeout=10)
+
         # --- 0x09 from the VT mirror -------------------------------------
         send(b, 0x10, b"echo serve-snap-mark\n")
         time.sleep(0.6)
@@ -1216,7 +1333,8 @@ def main():
         s = conn(port)
         send(s, 0x08)
         info = json.loads(frame(s)[1])
-        check("no create in ops without --allow-create (ctl, xray are)",
+        check("no create, create_group in ops without --allow-create "
+              "(ctl, xray are)",
               info.get("ops") == ["ctl", "ctl-cancel", "watch", "xray"])
         check("device_id is stable across runs", info["device_id"] == dev1)
         send(s, 0x02, {"name": "svc-nope"})

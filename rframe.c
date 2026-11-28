@@ -479,7 +479,7 @@ static const struct ctl_verb
 	{ "-k",         CN_ONE,  CT_NONE,  0, "" },
 	{ "-m",         CN_ONE,  CT_ALIAS, 0, "" },
 	{ "-d",         CN_ONE,  CT_NONE,  0, "" },
-	{ "--spawn",    CN_ONE,  CT_TEXT,  CTL_CREATE, " --size " },
+	{ "--spawn",    CN_ONE,  CT_TEXT,  CTL_CREATE, " --size --group " },
 	{ "--history",  CN_NONE, CT_NONE,  CTL_JSON, "" },
 	{ "--revive",   CN_ONE,  CT_NONE,  CTL_CREATE | CTL_LONG | CTL_JSON,
 	                " --as --no-message --codex-drop-provider"
@@ -860,7 +860,7 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
           size_t cap)
 {
 	const struct ctl_verb *v;
-	int i = 1, names = 0, json = 0, all = 0, dd = 0, cxn = 0;
+	int i = 1, names = 0, json = 0, all = 0, dd = 0, cxn = 0, grp = 0;
 
 	if (argc < 2)
 		return ctl_no(why, cap, "a ctl request takes a verb and a "
@@ -942,6 +942,13 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
 				return ctl_no(why, cap, "--size wants COLSxROWS");
 			kind[i] = CK_VALUE;
 		}
+		else if (!strcmp(a, "--group"))
+		{
+			/* the host's dch checks it against its config (#723) */
+			if (++i >= argc || !argv[i][0] || grp++)
+				return ctl_no(why, cap, "--group wants one group name");
+			kind[i] = CK_TEXT;
+		}
 		else if (!strcmp(a, "--codex-config"))
 		{
 			if (++i >= argc || !ctl_codex_cfg_ok(argv[i]) || ++cxn > 16)
@@ -971,7 +978,8 @@ ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
 		              v->flags & CTL_ALL ? ", or --all" : "");
 	if (v->flags & CTL_JSON && !json)
 		return ctl_no(why, cap, "%s needs --json", v->verb);
-	return v->flags & (CTL_CREATE | CTL_LONG | CTL_FOREVER);
+	return (v->flags & (CTL_CREATE | CTL_LONG | CTL_FOREVER)) |
+	       (grp ? CTL_GROUP : 0);
 }
 
 /* ---- subprocesses ---------------------------------------------------- */
