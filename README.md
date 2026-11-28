@@ -321,7 +321,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.200.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.201.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -3940,7 +3940,7 @@ refused or busy peers wait for their close at once; past that, one is closed
 at once, and a reset may then lose its frame.
 
 **What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,
-alias, state, agent count, `agent` (`claude` or `codex`) when one runs, `cwd` when known, and only GitHub pull-request
+alias, state, agent count, `shells` (count of live background shells, omitted when 0, the same set `--ls-json`'s `shells` lists; #722), `agent` (`claude` or `codex`) when one runs, `cwd` when known, and only GitHub pull-request
 links from `--meta`),
 a live list for its home screen (polled every 2 s), attach with resize and
 redraw, kill, rename, and a screen snapshot from the terminal mirror (empty in

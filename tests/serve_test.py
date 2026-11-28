@@ -1091,6 +1091,55 @@ def main():
                                separators=(",", ":"),
                                ensure_ascii=False).encode())
 
+        # --- #722: "shells", the live background shells' count ------------
+        # A "Claude" (a python the sessions record names) with 2 shells
+        # whose stdout is <tmp>/claude-<uid>/<project>/<sid>/tasks/<id>.output
+        shsid = "72272272-2272-4272-8272-722722722722"
+        td = os.path.join(tmp, "claude-%d" % os.getuid(), "-tmp-proj", shsid,
+                          "tasks")
+        os.makedirs(td)
+        subprocess.run([DCH, "--spawn", "svc-sh", "--size", "80x24",
+                        sys.executable, "-c",
+                        "import subprocess as sp,time\n"
+                        "for i in (1, 2):\n"
+                        " sp.Popen(['sleep','40'],stdin=sp.DEVNULL,"
+                        "stdout=open('%s/s%%d.output'%%i,'ab'))\n"
+                        "time.sleep(40)" % td], env=env,
+                       capture_output=True, timeout=30)
+        cmdj = subprocess.run([DCH, "--cmd", "svc-sh"], env=env,
+                              capture_output=True, text=True, timeout=10)
+        shpid = json.loads(cmdj.stdout)["pid"]
+        st = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(shpid)],
+                            capture_output=True, text=True,
+                            env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+        sd = os.path.join(home, ".claude", "sessions")
+        os.makedirs(sd, exist_ok=True)
+        with open(os.path.join(sd, "%d.json" % shpid), "w") as f:
+            json.dump({"pid": shpid, "sessionId": shsid, "cwd": tmp,
+                       "procStart": st, "version": "2.1.0",
+                       "kind": "interactive", "status": "idle",
+                       "statusUpdatedAt": 1}, f)
+
+        def shrows(first):
+            c = conn(port)
+            send(c, *first)
+            t, pl = frame(c)
+            c.close()
+            return {x.get("name"): x for x in json.loads(pl)}
+        end = time.time() + 15
+        while time.time() < end and shrows((0x03,)).get(
+                "svc-sh", {}).get("shells") != 2:
+            time.sleep(0.2)
+        for what, first in (("0x11 list", (0x03,)),
+                            ("0x2e watch push", (0x2e, {"device_id": "t722"}))):
+            rows = shrows(first)
+            check("#722: %s: a session with 2 live shells has \"shells\":2"
+                  % what, rows.get("svc-sh", {}).get("shells") == 2, rows)
+            check("#722: %s: a session with none has no shells key" % what,
+                  "svc-ret" in rows and "shells" not in rows["svc-ret"], rows)
+        subprocess.run([DCH, "-k", "svc-sh"], env=env, capture_output=True,
+                       timeout=10)
+
         # --- 0x09 from the VT mirror -------------------------------------
         send(b, 0x10, b"echo serve-snap-mark\n")
         time.sleep(0.6)

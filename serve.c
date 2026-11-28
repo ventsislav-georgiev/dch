@@ -328,7 +328,8 @@ meta_wire(struct sb *b, size_t base, const struct json_parser *jp, int meta,
 }
 
 /* `dch --ls-json` as listResp's payload into *b: per row name; alias, else
-** the harness name; state when one of the four; agents when > 0; agent
+** the harness name; state when one of the four; agents when > 0; shells (the live
+** background shells' count) when > 0 (#722); agent
 ** when claude or codex (#677); meta; group and group_manual, each a
 ** string or null (#714); cwd
 ** when known (#115, a dch client's --ls-json --remote shows it). Keys
@@ -354,6 +355,7 @@ rows_wire(const char *ls, struct sb *b)
 		static const char *const gk[2] = { "group", "group_manual" };
 		int g;
 		long long agents = 0, ep = 0;
+		int sh, shells = 0;
 		struct sb r = {0};
 		size_t base;
 
@@ -370,6 +372,11 @@ rows_wire(const char *ls, struct sb *b)
 			state[0] = '\0';
 		if (jint(&jp, i, "agents", &agents) != 1)
 			agents = 0;
+		sh = jcont(&jp, i, "shells", JSON_ARRAY);
+		if (sh > 0)	/* the live background shells (#722) */
+			for (g = sh + 1; g < jp.tok[sh].next;
+			     g = jp.tok[g].next)
+				shells++;
 		if (jstr(&jp, i, "cwd", cwd, sizeof cwd) != 1)
 			cwd[0] = '\0';
 		if (jstr(&jp, i, "agent", agent, sizeof agent) != 1 ||
@@ -413,6 +420,11 @@ rows_wire(const char *ls, struct sb *b)
 		meta_wire(&r, base, &jp, jcont(&jp, i, "meta", JSON_OBJECT), ep);
 		sb_key(&r, base, "name");
 		sb_q(&r, name);
+		if (shells > 0)
+		{
+			sb_key(&r, base, "shells");
+			sb_ll(&r, shells);
+		}
 		if (state[0])
 		{
 			sb_key(&r, base, "state");
