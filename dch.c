@@ -2877,6 +2877,8 @@ usage(void)
 	    "                   --host <h> also works (--history needs it);\n"
 	    "                   exits 6 if the host lacks it, 7 if unreachable\n"
 	    "  dch --cwd <dir> --spawn ...  the spawned session's start dir\n"
+	    "  dch --spawn host:name --group <g> ...  in the host's group g\n"
+	    "                   (its dch serve 1.202.0+ --allow-create)\n"
 	    "  dch --scrollback <n>  with an attach: the last n lines of the\n"
 	    "                   session's scrollback first (DCH_REPLAY_SCROLLBACK)\n"
 	    "  dch --passive    with an attach: attach passive, a silent extra that\n"
@@ -3332,6 +3334,9 @@ static int attach_remote;	/* this attach is a host's: so is its chord's view */
 ** its name routes: 1 the host's, -1 local, 0 by the name. One attach. */
 static int attach_route;
 
+static int group_manual_put(const char *name, const char *g);
+static char attach_group[33];	/* -n --group's, as the config spells it */
+
 static int
 do_attach(char *exe, int forced_name, int force, char **inner_argv,
           int inner_argc)
@@ -3511,6 +3516,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		fprintf(stderr, "dch: failed to spawn session\n");
 		return 1;
 	}
+	/* #723: -n --group, only for a session this call created */
+	if (attach_group[0] && group_manual_put(session_name, attach_group) < 0)
+		fprintf(stderr, "dch: --group: %s\n", strerror(errno));
 	}
 	client_pidfile_create(sock_path);
 	return attach_main(0);
@@ -3535,6 +3543,7 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 		attach_end_back = picked;
 		rc = do_attach(exe, forced_name, force, inner_argv, inner_argc);
 		attach_end_back = 0;
+		attach_group[0] = '\0';	/* the first attach's only (#723) */
 		if (rc == ATTACH_TO)
 			snprintf(chosen, sizeof chosen, "%s", attach_to);
 		else if (rc == ATTACH_ENDED)
@@ -12034,6 +12043,24 @@ pk_group_named(const struct pkgrps *gs, const char *g)
 		if (strcasecmp(gs->g[k].name, g) == 0)
 			return k;
 	return -1;
+}
+
+/* #723: the config group named g, ignoring case, into out as the config
+** spells it: 0, or -1 for none. --spawn --group's and dch serve's lookup. */
+int
+dch_group_lookup(const char *g, char *out, size_t cap)
+{
+	struct pkgrps gs;
+	int k;
+
+	pk_groups(&gs);
+	for (k = 0; k < gs.n; k++)
+		if (gs.g[k].mode == 1)
+			regfree(&gs.g[k].re);
+	if ((k = pk_group_named(&gs, g)) < 0)
+		return -1;
+	snprintf(out, cap, "%s", gs.g[k].name);
+	return 0;
 }
 
 /* A session's effective group (#714): its manual one while that is still
@@ -21025,9 +21052,9 @@ main_run(int argc, char **argv)
 	char **inner_argv = argv + i;
 
 	if (opt_group && action != A_SPAWN && action != A_GROUPSET &&
-	    action != A_GROUPRENAME)
+	    action != A_GROUPRENAME && action != A_ATTACH)
 	{
-		fprintf(stderr, "dch: --group only works with --spawn\n");
+		fprintf(stderr, "dch: --group only works with --spawn or -n\n");
 		return 2;
 	}
 	if (opt_cwd && action != A_SPAWN)
@@ -21067,7 +21094,8 @@ main_run(int argc, char **argv)
 			        "local only\n");
 			return 2;
 		}
-		if (remote && opt_group)
+		/* --spawn's goes over ctl: remote.c checks create_group (#723) */
+		if (remote && opt_group && action != A_SPAWN)
 		{
 			fprintf(stderr, "dch: --group is local only\n");
 			return 2;
@@ -21923,14 +21951,10 @@ main_run(int argc, char **argv)
 		if (opt_group)
 		{
 			/* #714: an unknown group spawns nothing */
-			struct pkgrps gs;
-			int g, k;
+			char gn[sizeof ((struct pkgrp *)0)->name];
+			int k;
 
-			pk_groups(&gs);
-			for (k = 0; k < gs.n; k++)
-				if (gs.g[k].mode == 1)
-					regfree(&gs.g[k].re);
-			if ((g = pk_group_named(&gs, opt_group)) < 0)
+			if (dch_group_lookup(opt_group, gn, sizeof gn) < 0)
 			{
 				fprintf(stderr, "dch: --group: no group %s in the config "
 				        "(no_group)\n", opt_group);
@@ -21939,7 +21963,7 @@ main_run(int argc, char **argv)
 			if ((k = do_spawn_verb(exe, session_name, opt_cols, opt_rows,
 			                       inner_argv, inner_argc, 0)) != 0)
 				return k;
-			if (group_manual_put(session_name, gs.g[g].name) < 0)
+			if (group_manual_put(session_name, gn) < 0)
 			{
 				fprintf(stderr, "dch: --group: %s\n", strerror(errno));
 				return 1;
@@ -21950,6 +21974,19 @@ main_run(int argc, char **argv)
 		                     inner_argv, inner_argc, 0);
 	}
 	case A_ATTACH:
+		/* #723: dch serve's create; ignored when the name attaches */
+		if (opt_group && (remote_host || name_is_remote(session_name)))
+		{
+			fprintf(stderr, "dch: --group is local only\n");
+			return 2;
+		}
+		if (opt_group && dch_group_lookup(opt_group, attach_group,
+		                                  sizeof attach_group) < 0)
+		{
+			fprintf(stderr, "dch: --group: no group %s in the config "
+			        "(no_group)\n", opt_group);
+			return 1;
+		}
 		return attach_with_switch(exe, forced_name, force,
 		                          inner_argv, inner_argc, 0);
 	}

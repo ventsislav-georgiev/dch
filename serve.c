@@ -787,8 +787,8 @@ build_hello(void)
 	sb_s(&g_hello, ",\"name\":");
 	sb_q(&g_hello, host);
 	sb_s(&g_hello, g_allow_create
-	     ? ",\"ops\":[\"create\",\"ctl\",\"ctl-cancel\",\"watch\","
-	       "\"xray\"]"
+	     ? ",\"ops\":[\"create\",\"create_group\",\"ctl\",\"ctl-cancel\","
+	       "\"watch\",\"xray\"]"
 	     : ",\"ops\":[\"ctl\",\"ctl-cancel\",\"watch\",\"xray\"]");
 	sb_s(&g_hello, ",\"os\":");
 	sb_q(&g_hello, os);
@@ -883,17 +883,31 @@ out_frame(struct conn *c, unsigned int type, const void *p, size_t n)
 	return 0;
 }
 
+/* A 0x13 {"code"?,"message"}; code NULL for none. */
 static void
-out_err(struct conn *c, const char *msg)
+out_err_code(struct conn *c, const char *code, const char *msg)
 {
 	struct sb b = {0};
 
-	sb_s(&b, "{\"message\":");
+	sb_s(&b, "{");
+	if (code)
+	{
+		sb_s(&b, "\"code\":");
+		sb_q(&b, code);
+		sb_s(&b, ",");
+	}
+	sb_s(&b, "\"message\":");
 	sb_q(&b, msg);
 	sb_s(&b, "}");
 	if (!b.bad)
 		out_frame(c, 0x13, b.p, b.n);
 	free(b.p);
+}
+
+static void
+out_err(struct conn *c, const char *msg)
+{
+	out_err_code(c, NULL, msg);
 }
 
 /* Write what the socket takes now: 0, or -1 when the peer is gone. */
@@ -1023,8 +1037,8 @@ static void
 on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 {
 	struct json_parser jp;
-	char name[NAME_CAP + 2], msg[200], *av[8 + MAX_CMD + 1], **cmd = NULL;
-	char sbn[16];
+	char name[NAME_CAP + 2], msg[200], *av[10 + MAX_CMD + 1], **cmd = NULL;
+	char sbn[16], grp[256], gn[64];
 	int r, k = 0, ncmd = 0, t, m, sb;
 	struct winsize ws;
 	pid_t pid;
@@ -1084,6 +1098,23 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 		c->closing = 1;	/* the 0x13 is the last frame, as a failed spawn */
 		return;
 	}
+	/* #723: a config group for a new session; checked even when the name
+	** attaches (then the child ignores it) */
+	if (create && (r = jstr(&jp, 0, "group", grp, sizeof grp)) < 0)
+	{
+		dch_json_free(&jp);
+		out_err(c, "malformed create request: group must be a string");
+		return;
+	}
+	if (!create || r == 0)
+		grp[0] = gn[0] = '\0';
+	else if (dch_group_lookup(grp, gn, sizeof gn) < 0)
+	{
+		dch_json_free(&jp);
+		out_err_code(c, "no_group", "no such group in the config");
+		c->closing = 1;	/* the 0x13 is the last frame, as a failed spawn */
+		return;
+	}
 	rq_size(&jp, &c->cols, &c->rows);
 	sb = rq_scrollback(&jp);
 	if (create && (t = dch_json_field(&jp, 0, "command")) != -1)
@@ -1115,6 +1146,11 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 	{
 		av[k++] = "-n";
 		av[k++] = name;
+	}
+	if (gn[0])
+	{
+		av[k++] = "--group";
+		av[k++] = gn;
 	}
 	if (ncmd)
 	{
@@ -3122,7 +3158,7 @@ serve_main(int argc, char **argv)
 	nonblock(np[1]);
 	g_notify = np[1];
 	slog("listening on %s:%ld (dch %s, proto 1.1, ops: %s)", ipstr, port,
-	     DCH_VERSION, g_allow_create ? "create, ctl, ctl-cancel, watch, xray"
+	     DCH_VERSION, g_allow_create ? "create, create_group, ctl, ctl-cancel, watch, xray"
 	                                 : "ctl, ctl-cancel, watch, xray");
 	if (g_gate.self_uid >= 0)
 		slog("accepting nodes of user %lld%s", g_gate.self_uid,

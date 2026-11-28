@@ -106,6 +106,7 @@ int rf_run(char *const argv[], char **out, size_t *outn, size_t cap,
 				** silent host this long and RM_ATTACH_MS */
 #define CTL_FOREVER 4		/* no timeout (--follow) */
 #define CTL_NOCAP 32		/* no output cap (--xray --follow, 4.4) */
+#define CTL_GROUP 64		/* --spawn --group: needs "create_group" (#723) */
 #define CTL_ARGV_MAX 1024
 enum { CK_VERB = 1, CK_FLAG, CK_VALUE, CK_NAME, CK_TEXT };
 int ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,

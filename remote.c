@@ -3542,6 +3542,13 @@ dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd)
 		fprintf(stderr, "dch: %s: unreachable: %s\n", sh, p->why);
 		rc = DCH_EXIT_UNREACHABLE;
 	}
+	else if (fl & CTL_GROUP && hello_op(p->hello_js, "create") &&
+	         !hello_op(p->hello_js, "create_group"))
+	{
+		fprintf(stderr, "dch: %s: does not support --group (needs dch "
+		        "serve 1.202.0+)\n", sh);
+		rc = DCH_EXIT_UNSUPPORTED;
+	}
 	else if (!hello_op(p->hello_js, "ctl") ||
 	         (fl & CTL_CREATE && !hello_op(p->hello_js, "create")) ||
 	         (xray && !hello_op(p->hello_js, "xray")))
