@@ -9089,10 +9089,13 @@ ag_type(const char *path, const char *text, int paste)
 
 	if ((t = ty_push(path, text, paste)) < 0)
 		return t;
-	for (t = AG_ENTER_MS; ; t += AG_POLL_MS / 2)
+	/* no composer read (a torn repaint): retry soon, as below (#738) */
+	for (t = AG_ENTER_MS, h = 1; ;
+	     t += h == -1 ? AG_POLL_MS / 5 : AG_POLL_MS / 2)
 	{
-		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS : AG_POLL_MS / 2);
-		if (composer_holds(path, text))
+		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS
+		              : h == -1 ? AG_POLL_MS / 5 : AG_POLL_MS / 2);
+		if ((h = composer_holds_at(path, text)) == 1)
 			break;
 		/* a prompt the paste raised: nothing lands until a human
 		** answers it, so stop waiting */
