@@ -414,6 +414,47 @@ def main():
               views(ev) == ["x22"], (rc, o, views(ev)))
         safe("XI2 reply heading", ev)
 
+        # XI7: the dialog's shape (rule, title, a row, hints) in output
+        # above the composer is not the dialog dch opened
+        decoy = ["─" * 40, "Background", "", "   Local agents (1)",
+                 " ❯ ● Decoy   running", "", " Esc to close"]
+
+        def lone_esc(ev):
+            b = [e["text"] for e in ev if e["ev"] == "byte"]
+            return [k for k, t in enumerate(b) if t == "1b" and
+                    not (k + 1 < len(b) and b[k + 1] == "5b")]
+        n = sess("r1", {"version": V, "agents": [ag("r11", "Explore"),
+                                                 ag("r12", "Write it")],
+                        "rows": [row("Explore", "r11"),
+                                 row("Write it", "r12")]},
+                 above=decoy + ["✻ Thinking… (esc to interrupt)"])
+        rc, o, ev = view(n, "r12")
+        check("XI7 R1: the dialog's shape in a reply above the open dialog: "
+              "switched", rc == 0 and is_(o, "switched") and
+              views(ev) == ["r12"], (rc, o, views(ev)))
+        safe("XI7 R1", ev)
+        for tag, above in (("R2", decoy[1:]), ("R3", decoy)):
+            n = sess("r" + tag[1], {"version": V, "agents": [
+                ag("r31", "Explore")], "rows": [row("Explore", "r31")],
+                "view": "r31", "shut": True}, above=above, busy=True)
+            rc, o, ev = view(n, "main")
+            check("XI7 %s: no dialog opened, the shape%s above a busy "
+                  "composer while viewing an agent: timeout, no Esc, "
+                  "nothing stopped" % (tag, "" if tag == "R3" else
+                                       " without its rule"),
+                  rc == 1 and is_(o, "refused", "timeout") and
+                  "no /tasks dialog" in o["detail"] and not lone_esc(ev) and
+                  not [e for e in ev if e["ev"] in ("kill", "stop", "view")],
+                  (rc, o, lone_esc(ev), [e["ev"] for e in ev][-6:]))
+        n = sess("r4", {"version": V, "agents": [ag("r41", "Explore")],
+                        "rows": [SHELL, row("Explore", "r41")],
+                        "hints": False})
+        rc, o, ev = view(n, "r41")
+        check("XI7: a list with no 'Esc to close' hints row is not the "
+              "dialog: timeout, no key", rc == 1 and
+              is_(o, "refused", "timeout") and not views(ev) and
+              not lone_esc(ev), (rc, o, views(ev)))
+
         # XI3: only a transcript line's top-level "version" counts
         n = sess("x3", {"version": V, "agents": [ag("x31", "Write it")],
                         "rows": [row("Write it", "x31"), SHELL]})
