@@ -396,6 +396,9 @@ def main():
               "ambiguous, no f", rc == 1 and
               is_(o, "refused", "ambiguous") and views(ev) == [],
               (rc, o, ev[-3:]))
+        check("X10a: the detail quotes B's row, not the target's cut prefix",
+              ('"%s beta"' % pre) in o.get("detail", "") and
+              "reads as another agent too" in o.get("detail", ""), o)
         safe("X10a", ev, escs=1)
 
         # --- a busy Claude -------------------------------------------------
@@ -516,6 +519,9 @@ def main():
               "no f", rc == 1 and o.get("result") == "refused" and
               o.get("reason") in ("not_listed", "ambiguous") and
               views(ev) == [], (rc, o))
+        check("XI16: the forced detail quotes the /tasks row, not the target",
+              o.get("detail") == 'the /tasks row "Fix   the bug" reads as '
+              'another agent too', o)
         safe("XI16", ev, escs=1)
 
         # XI2: a reply heading "Background" above a busy line
