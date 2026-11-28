@@ -793,6 +793,43 @@ def main():
                   json.loads(r.stdout or "{}").get("result") == "ok" and
                   until(lambda: not any(alive(q) for q in [pm1] + km1), 5)
                   and alive(pta) and alive(hp))
+            # --- #730: Monitor calls of other commands take no slot. 70 of
+            # them in one second before the call of a monitor, then a monitor
+            # A, 70 more 2.7 KB apart, and a monitor B two seconds on
+            z7c = "sleep 120.0730; echo c"
+            x7c = shell("mon730c", shlex.quote(z7c), out=mlog)
+            y7c = started(x7c)
+            with open(stp, "w") as f:
+                f.write(filler(y7c - 3600, 20))
+                for i in range(70):
+                    f.write(mcall("toolu_o%d" % i, y7c, "sleep %d.0730" % i,
+                                  "Other", i))
+                f.write(mcall("toolu_c", y7c, z7c, "Watch c", 900))
+                f.write(mres("toolu_c", y7c, "b730c"))
+            got = mons([x7c])
+            check("a monitor after 70 other Monitor calls in its second: "
+                  "listed with its id (%s)" % got.get(x7c),
+                  got.get(x7c, {}).get("id") == "b730c")
+            x7a, x7b = "sleep 120.07301; echo a", "sleep 120.07302; echo b"
+            p7a = shell("mon730a", shlex.quote(x7a), out=mlog)
+            t7a = started(p7a)
+            time.sleep(2.1)
+            p7b = shell("mon730b", shlex.quote(x7b), out=mlog)
+            t7b = started(p7b)
+            with open(stp, "w") as f:
+                f.write(filler(t7a - 3600, 20))
+                f.write(mcall("toolu_a", t7a, x7a, "Watch a"))
+                f.write(mres("toolu_a", t7a, "b730a"))
+                for i in range(70):
+                    f.write(mcall("toolu_p%d" % i, t7a + 1,
+                                  "sleep %d.07301" % i, "x" * 2700, i))
+                f.write(mcall("toolu_b", t7b, x7b, "Watch b"))
+                f.write(mres("toolu_b", t7b, "b730b"))
+            got = mons([p7a, p7b])
+            check("a monitor after 70 other Monitor calls in an earlier "
+                  "window: both listed (%s)" % got,
+                  got.get(p7a, {}).get("id") == "b730a" and
+                  got.get(p7b, {}).get("id") == "b730b")
             os.unlink(os.path.join(sessdir, "%d.json" % hp))
             check("its record gone: no shells key", field(h, "shells") ==
                   MISSING)
