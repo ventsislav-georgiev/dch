@@ -11332,6 +11332,8 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 	}
 	for (i = 0; ; i++)
 	{
+		int forced = 0;
+
 		for (m = 0, hit = -1, t = 0; t < s.n; t++)
 			if (s.ag[t] && va_match(s.lab[t], want, cut))
 				m++, hit = t;
@@ -11341,9 +11343,12 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 			if (o != tk &&
 			    va_match(s.lab[hit], sa[ord[o]].desc,
 				    SAG_CUT(sa[ord[o]].desc)))
-				m = 2;
+				m = 2, forced = 1;
 		if (!m)
 			va_say("not_listed", "no /tasks row reads \"%s\"", want);
+		else if (forced)
+			va_say("ambiguous", "the /tasks row \"%s\" reads as another "
+			       "agent too", want);
 		else if (m > 1)
 			va_say("ambiguous", "%d /tasks rows read \"%s\"", m, want);
 		else if (s.focus < 0 || i == VA_ROWS)
