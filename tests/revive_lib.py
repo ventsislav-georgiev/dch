@@ -1274,11 +1274,12 @@ def main(part):
                     ("rtear2", 2, ("ok", ""), [120, 200]),
                     ("rtear3", 99, ("failed", "not_submitted"), [1500, 400]),
                     ("rtear4", 2, ("ok", ""), [1500, 400]),
-                    # rtear5 (#738, #740): a 750 ms cycle, torn 700 of
-                    # it: fixed-period reads alias onto the torn part and
-                    # miss the 50 ms clear past the 1.5 s land (QA: fails
-                    # 1.206 2 of 3, passes 1.207)
-                    ("rtear5", 2, ("ok", ""), [700, 50])):
+                    # rtear5 (#738): a 500 ms cycle, about 2 of dch's
+                    # AG_POLL_MS reads: fixed-period reads alias onto the
+                    # torn 400 and miss the whole 100 past the 1.5 s land.
+                    # [700, 50] base-fails 1.206 more often but its 50 ms
+                    # clear is under one read on a slow CI host (#740)
+                    ("rtear5", 2, ("ok", ""), [400, 100])):
                 if lite:
                     continue
                 sid = "60660660-0000-4000-8000-%012d" % len(names)
