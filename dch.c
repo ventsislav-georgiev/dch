@@ -8095,12 +8095,11 @@ sub_rows(struct sag *a, const int *ord, int no)
 ** agent-<id>.meta.json (agentType, description, toolUseId; an agent with
 ** no readable meta or toolUseId is left out) and agent-<id>.jsonl (its
 ** first line's timestamp starts it), its end from one window of the main
-** transcript (sub_state) or its meta's "finished":true. Every agent file
-** is stat'ed (700+ per session), the meta read only of those written in
-** the last SUB_MAX_RUN s. shortcut: a running agent silent that long is
-** missed, and a Claude Code too old to write "finished" shows an agent
-** that ended unseen by the window as running for up to that long; widen
-** SUB_MAX_RUN if day-long silent agents ever matter. An agent with no end
+** transcript (sub_state), else from BACK2 bytes at its last write when
+** that is before the window, or its meta's "finished":true. Every agent
+** file is stat'ed (700+ per session), the meta read only of those written
+** in the last SUB_MAX_RUN s. shortcut: a running agent silent that long is
+** missed; widen SUB_MAX_RUN if day-long silent agents ever matter. An agent with no end
 ** last written before its Claude started (cstart, -1 unknown) is a dead
 ** Claude's leftover: not listed. sub_collect fills a[] and ord[] (both
 ** SUB_CAND long) and returns how many are listed; put_subagents prints. */
@@ -8109,8 +8108,8 @@ static int
 sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 {
 	enum { SUB_WIN = 600, SUB_MAX_RUN = 86400, CAND = SUB_CAND,
-	       FWD = 4 << 20, BUDGET = 16 << 20 };
-	char dir[PATH_MAX], f[PATH_MAX + 100], *b = NULL;
+	       FWD = 4 << 20, BACK2 = 1 << 20, BUDGET = 16 << 20 };
+	char dir[PATH_MAX], f[PATH_MAX + 100], *b = NULL, *b2 = NULL;
 	struct dirent *e;
 	struct stat st;
 	time_t now = time(NULL), tmin = now;
@@ -8171,25 +8170,38 @@ sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 	** the last FWD bytes (a busy session writes ~1 MB in 10 min) */
 	if (tmin < now - SUB_WIN - 60)
 		tmin = now - SUB_WIN - 60;
-	if (na && (fd = open(tp, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) >= 0)
+	fd = na ? open(tp, O_RDONLY | O_CLOEXEC | O_NONBLOCK) : -1;
+	if (fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) &&
+	    (b = malloc(FWD + 1)))
 	{
-		if (!fstat(fd, &st) && S_ISREG(st.st_mode) &&
-		    (b = malloc(FWD + 1)))
-		{
-			at = ts_seek(fd, st.st_size, tmin);
-			if (st.st_size - at > FWD)
-				at = st.st_size - FWD;
-			if ((n = pread(fd, b, FWD, at)) < 0)
-				n = 0;
-			tx_read += (size_t)n;
-			b[n] = '\0';
-		}
-		close(fd);
+		at = ts_seek(fd, st.st_size, tmin);
+		if (st.st_size - at > FWD)
+			at = st.st_size - FWD;
+		if ((n = pread(fd, b, FWD, at)) < 0)
+			n = 0;
+		tx_read += (size_t)n;
+		b[n] = '\0';
 	}
 	for (i = 0; i < na; i++)
 	{
+		off_t at2;
+		ssize_t n2;
+
 		a[i].state = b ? sub_state(b, n, at, a[i].id, a[i].tu, a[i].mt,
 		                           &a[i].end) : 0;
+		/* no end in the window, which starts after its last write: its
+		** end line follows that write within seconds, so look there too
+		** (#748: a 10 h old agent stayed "running" for a day) */
+		if (!a[i].state && !a[i].fin && b && tx_read - r0 < BUDGET &&
+		    (at2 = ts_seek(fd, st.st_size, a[i].mt)) < at &&
+		    (b2 || (b2 = malloc(BACK2 + 1))) &&
+		    (n2 = pread(fd, b2, BACK2, at2)) > 0)
+		{
+			tx_read += (size_t)n2;
+			b2[n2] = '\0';
+			a[i].state = sub_state(b2, n2, at2, a[i].id, a[i].tu, a[i].mt,
+			                       &a[i].end);
+		}
 		if (!a[i].state && a[i].fin)	/* finished, no end line seen */
 			a[i].state = a[i].stop ? 2 : 1, a[i].end = (long)a[i].fin;
 		if (a[i].state ? a[i].end < (long)(now - SUB_WIN)
@@ -8199,7 +8211,10 @@ sub_collect(const char *tp, time_t cstart, struct sag *a, int *ord)
 			ord[j] = ord[j - 1];
 		ord[j] = i;
 	}
+	if (fd >= 0)
+		close(fd);
 	free(b);
+	free(b2);
 	return no;
 }
 
