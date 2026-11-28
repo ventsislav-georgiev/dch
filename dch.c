@@ -11046,8 +11046,8 @@ va_match(const char *lab, const char *d, int cut)
 		d++;
 	for (dn = strlen(d); dn && d[dn - 1] == ' '; dn--)
 		;
-	if (cut)
-		return !strncmp(lab, d, dn);
+	if (cut && !strncmp(lab, d, dn))
+		return 1;
 	if (!strncmp(lab, d, dn) && va_gap(lab + dn))
 		return 1;
 	for (e = lab; (e = strstr(e, "\xe2\x80\xa6")); e += 3)

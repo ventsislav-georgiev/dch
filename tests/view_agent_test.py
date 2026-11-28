@@ -571,6 +571,18 @@ def main():
               views(ev) == ["x71"], (rc, o, views(ev)))
         safe("XI4 CJK", ev)
 
+        # XI15: the same over-cap descriptions with facts shown: the name
+        # column is cut at 50 with "\u2026", the want itself at its cap
+        for tag, d in (("242 B ASCII", asc), ("216 B CJK", cjk)):
+            n = sess("x8" + tag[:2].strip(), {"version": V, "agents": [
+                ag("x81", d), ag("x82", "Other")],
+                "rows": [row(d.rstrip(), "x81"), row("Other", "x82")]})
+            rc, o, ev = view(n, "x81")
+            check("XI15: %s with facts, name cut with \u2026: switched" % tag,
+                  rc == 0 and is_(o, "switched") and views(ev) == ["x81"],
+                  (rc, o, views(ev)))
+            safe("XI15 " + tag, ev)
+
         # --- DCH_NO_DETECT, and the text shape -----------------------------
         n = sess("nd", {"version": V, "agents": [ag("l1", "Agent")],
                         "rows": [row("Agent", "l1")]})
