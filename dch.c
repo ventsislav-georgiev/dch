@@ -9090,6 +9090,7 @@ ag_type(const char *path, const char *text, int paste)
 	if ((t = ty_push(path, text, paste)) < 0)
 		return t;
 	/* no composer read (a torn repaint): retry soon, as below (#738) */
+	next = wall_ms();	/* land is wall-clock: reads cost time too */
 	for (t = AG_ENTER_MS, h = 1; ;
 	     t += h == -1 ? AG_POLL_MS / 5 : AG_POLL_MS / 2)
 	{
@@ -9099,7 +9100,7 @@ ag_type(const char *path, const char *text, int paste)
 			break;
 		/* a prompt the paste raised: nothing lands until a human
 		** answers it, so stop waiting */
-		if (t >= land || claude_gate(path) == CG_DIALOG)
+		if (wall_ms() >= next + land || claude_gate(path) == CG_DIALOG)
 			return ty_sig ? -6 : -2;	/* it may paint later */
 	}
 	for (n = 0; ; n++)
