@@ -10812,7 +10812,7 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 **
 ** `--view-agent <name> <id|main>` makes the Claude Code in a session show
 ** one subagent (or main again) in its main view, by driving the /tasks
-** dialog (2.1.322: immediate, so it opens mid-turn too). --say's gate
+** dialog (2.1.322: immediate, but refused on a busy turn). --say's gate
 ** first, the id looked up in the session's subagents (sub_collect) before
 ** any key, then "/tasks" and one key at a time, the screen re-read after
 ** each: Down/Up to the row whose label is the agent's description (a
@@ -10873,7 +10873,7 @@ va_cpy(char *out, const char *s, size_t n)
 ** title on the line under the dialog's "─" rule, the last such on screen
 ** and below va_floor, then rows under section headings like "Shells (1)",
 ** the focused one led by VA_PTR, down to the hints row, which must read
-** "Esc to close"), 2 one task's detail pane
+** "Esc to close", and no composer on screen), 2 one task's detail pane
 ** ("<type> › <description>" with no composer on screen; det = the
 ** description), 0 neither. A Local agents row (2.1.322's _o) is the icon
 ** box, a blank, the name column padded to its width, 3 blanks, then the
@@ -10976,7 +10976,8 @@ va_parse(char *txt, struct va_scr *s)
 		}
 		va_cpy(s->lab[s->n++], p, (size_t)(q - p));
 	}
-	if (in == 2)
+	/* idle turn: the real dialog hides the composer, a decoy streams above it */
+	if (in == 2 && !composer_find(txt, &end))
 		s->mode = 1;
 	else if (det && !composer_find(txt, &end))
 		s->mode = 2;
@@ -11171,7 +11172,7 @@ va_main_close(const char *path, const char *ver)
 /* Drive /tasks to description want (NULL: main): 0 switched, 1 already on
 ** main, -1 refused (va_reason, va_detail). */
 static int
-va_drive(const char *path, const char *want, const char *ver)
+va_drive(const char *path, const char *want, const char *ver, int busy)
 {
 	struct va_scr s, was;
 	int i, t, m, hit;
@@ -11190,6 +11191,10 @@ va_drive(const char *path, const char *want, const char *ver)
 		return va_say(say_code[SAY_NO_SCREEN], "%s",
 		              say_why[SAY_NO_SCREEN]), -1;
 	}
+	/* busy: the dialog keeps the composer then, so a streamed decoy cannot
+	** be told from it, and the Esc it draws would interrupt the turn */
+	if (busy)
+		return va_say("busy", "Claude is mid-turn; try when idle"), -1;
 	va_floor = -1;
 	if (va_read(path, &s) < 0)
 		return va_say(say_code[SAY_NO_SCREEN], "%s",
@@ -11433,7 +11438,7 @@ do_view_agent_verb(const char *name, const char *id, int json)
 		want = a[ord[k]].desc;
 	}
 	ty_codex = 0;
-	res = va_drive(path, want, ver);
+	res = va_drive(path, want, ver, strcmp(r.status, "busy") == 0);
 	return va_print(name, res, json);
 #endif
 }
