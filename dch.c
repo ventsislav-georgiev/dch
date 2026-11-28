@@ -11376,7 +11376,7 @@ va_drive(const char *path, const char *want, const char *ver, int busy,
 			va_say("not_listed", "no /tasks row reads \"%s\"", want);
 		else if (forced)
 			va_say("ambiguous", "the /tasks row \"%s\" reads as another "
-			       "agent too", want);
+			       "agent too", s.lab[hit]);
 		else if (m > 1)
 			va_say("ambiguous", "%d /tasks rows read \"%s\"", m, want);
 		else if (s.focus < 0 || i == VA_ROWS)
