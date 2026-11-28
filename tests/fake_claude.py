@@ -183,7 +183,9 @@ exit_up = []         # /exit's "Background work is running" prompt, its work
 # below the "main" leader row, which shows while viewing an agent or, with
 # "main_after_ms", that long after the dialog opened (agent rows painted as
 # row_cells: icon, name, facts; "meta" [] leaves the facts column out, so
-# the label shows whole), "view": the agent viewed at start}.
+# the label shows whole), "view": the agent viewed at start, "shut": /tasks
+# opens nothing (a busy turn queues it), "hints": false leaves the list's
+# "Esc to close" hints row out}.
 # /tasks (immediate: busy too) opens the list, focus on row 0, or with one row while on main that row's detail
 # pane ("<type> › <label>"). List: Up/Down move, f takes main or an agent
 # (the view switches) and closes, Enter opens a detail pane, Esc closes, x
@@ -360,8 +362,9 @@ def tasks_paint():
             out.append("   %s (%d)" % (heads[k], n))
         last = k
         out.append(" %s %s" % ("\u276f" if i == dfocus else " ", cells[i]))
-    out += ["", " \u2191/\u2193 to select \u00b7 Enter to vagent \u00b7 f to "
-            "foreground \u00b7 x to stop \u00b7 Esc to close"]
+    if (tasks() or {}).get("hints", True):
+        out += ["", " \u2191/\u2193 to select \u00b7 Enter to vagent \u00b7 f to "
+                "foreground \u00b7 x to stop \u00b7 Esc to close"]
     return out
 
 
@@ -609,7 +612,8 @@ def submit(text, c, confirmed=False):
     if text.startswith("!run "):
         run_cmd(text[5:])
         return
-    if text.strip() == "/tasks" and tasks() is not None:
+    if text.strip() == "/tasks" and tasks() is not None and \
+            not tasks().get("shut"):
         tasks_open()      # immediate: a busy turn does not queue it
         return
     if status == "busy":

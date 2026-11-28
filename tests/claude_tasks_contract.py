@@ -27,6 +27,10 @@ Checks:
   local-agents   the agents' section heading reads "Local agents"
   dialog-title   the list's title is "Background", drawn on the line under
                  the dialog's rule of "\u2500"
+  (XI7)
+  dialog-hints   the list's hints row ends with the escape key's hint,
+                 action "close" (outside the actions submenu), drawn
+                 "Esc to close" ("<key> to <action>", escape as "Esc")
 
 Run:  python3 tests/claude_tasks_contract.py [path/to/claude]
 Exit: 0 all ok (or SKIP), 1 a check failed.
@@ -80,6 +84,17 @@ def dialog_title(b):
         re.search(rb'[,\s]' + re.escape(r.group("d")) + rb'="\\u2500"', b))
 
 
+def dialog_hints(b):
+    a = re.search(rb'const (?P<a>' + W + rb')=' + W + rb'\.mode==="actions"'
+                  rb'\?"go back":"close"', b)
+    return bool(
+        a and re.search(rb'\(' + W + rb',\{chord:"escape",action:' +
+                        re.escape(a.group("a")) + rb',\.\.\.',
+                        b[a.end():a.end() + 300]) and
+        re.search(rb'=' + W + rb'\?" ":" to ";', b) and
+        re.search(rb'escape:\["Esc",', b))
+
+
 CHECKS = [
     ("confirm-no",
      [rb'context:"Confirmation",bindings:\{[^}]{0,200}escape:"confirm:no"']),
@@ -107,6 +122,7 @@ CHECKS = [
      [rb'key:"local-agents",items:[\w$]+,heading:[\w$]+\([\w$]+,'
       rb'\{label:"Local agents",size:']),
     ("dialog-title", dialog_title),
+    ("dialog-hints", dialog_hints),
 ]
 
 

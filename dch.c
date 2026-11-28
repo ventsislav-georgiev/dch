@@ -10833,9 +10833,14 @@ va_say(const char *code, const char *fmt, ...)
 ** 1023 ASCII columns are cut (and so never match), raise it for wider panes */
 #define VA_LAB 1024
 
-/* ag[i]: row i sits under "Local agents" (the only rows matched, #724) */
-struct va_scr { int mode, n, focus; char ag[VA_ROWS], lab[VA_ROWS][VA_LAB],
-	det[VA_LAB]; };
+/* ag[i]: row i sits under "Local agents" (the only rows matched, #724);
+** top: the screen line of the last rule + "Background" title, -1 none */
+struct va_scr { int mode, n, focus, top; char ag[VA_ROWS],
+	lab[VA_ROWS][VA_LAB], det[VA_LAB]; };
+
+/* XI7: the last title on screen before /tasks was typed; output only
+** scrolls up, so a title at or above it is not the dialog we opened */
+static int va_floor = -1;
 
 /* s[0..n) into out[VA_LAB], cut on a UTF-8 character boundary */
 static void
@@ -10848,9 +10853,10 @@ va_cpy(char *out, const char *s, size_t n)
 }
 
 /* The /tasks dialog on screen txt: mode 1 its list (the "Background"
-** title on the line under the dialog's "─" rule, the last such on screen,
-** then rows under section headings like "Shells (1)", the focused one led
-** by VA_PTR, down to the "Esc to …" hints), 2 one task's detail pane
+** title on the line under the dialog's "─" rule, the last such on screen
+** and below va_floor, then rows under section headings like "Shells (1)",
+** the focused one led by VA_PTR, down to the hints row, which must read
+** "Esc to close"), 2 one task's detail pane
 ** ("<type> › <description>" with no composer on screen; det = the
 ** description), 0 neither. A Local agents row (2.1.322's _o) is the icon
 ** box, a blank, the name column padded to its width, 3 blanks, then the
@@ -10863,10 +10869,10 @@ va_parse(char *txt, struct va_scr *s)
 	char *l, *nx, *e, *end, *det = NULL;
 	const char *p, *q, *r;
 	size_t w, k, h;
-	int in = 0, rows = 0, rule = 0, sec = 0;
+	int in = 0, rows = 0, rule = 0, sec = 0, at = -1;
 
 	s->mode = s->n = 0;
-	s->focus = -1;
+	s->focus = s->top = -1;
 	s->det[0] = '\0';
 	for (l = txt; l && *l; l = nx)
 	{
@@ -10874,6 +10880,7 @@ va_parse(char *txt, struct va_scr *s)
 		e = nx ? nx : l + strlen(l);
 		if (nx)
 			nx++;
+		at++;
 		/* the dialog's padding and border, both ends */
 		for (;;)
 			if (*l == ' ' || *l == '\t')
@@ -10896,7 +10903,10 @@ va_parse(char *txt, struct va_scr *s)
 		/* a reply's "Background" heading has no rule right above it */
 		if (rule && w == 10 && !strncmp(l, "Background", 10))
 		{
-			in = 1, rows = sec = rule = 0;
+			rule = 0;
+			if ((s->top = at) <= va_floor)
+				continue;	/* there before /tasks: not ours */
+			in = 1, rows = sec = 0;
 			s->n = 0;
 			s->focus = -1;
 			continue;
@@ -10911,9 +10921,7 @@ va_parse(char *txt, struct va_scr *s)
 				va_cpy(s->det, det + 5, (size_t)(l + w - det - 5));
 			continue;
 		}
-		for (k = 0; k + 6 <= w && strncasecmp(l + k, "esc to", 6); k++)
-			;
-		if (k + 6 <= w)
+		if (mem_find(l, l + w, "Esc to close", 12))
 		{
 			in = 2;	/* the hints row: the list is over */
 			continue;
@@ -10935,10 +10943,7 @@ va_parse(char *txt, struct va_scr *s)
 			continue;
 		rows = 1;
 		if (s->n == VA_ROWS)
-		{
-			in = 2;
 			continue;
-		}
 		if (k)
 			s->focus = s->n;
 		p = l + k;
@@ -10957,7 +10962,7 @@ va_parse(char *txt, struct va_scr *s)
 		}
 		va_cpy(s->lab[s->n++], p, (size_t)(q - p));
 	}
-	if (in)
+	if (in == 2)
 		s->mode = 1;
 	else if (det && !composer_find(txt, &end))
 		s->mode = 2;
@@ -10991,7 +10996,7 @@ va_read(const char *path, struct va_scr *s)
 	if (!(txt = screen_faint(path, &dim, &err)))
 	{
 		s->mode = s->n = 0;
-		s->focus = -1;
+		s->focus = s->top = -1;
 		return -1;
 	}
 	va_parse(txt, s);
@@ -11141,6 +11146,11 @@ va_drive(const char *path, const char *want, const char *ver)
 		return va_say(say_code[SAY_NO_SCREEN], "%s",
 		              say_why[SAY_NO_SCREEN]), -1;
 	}
+	va_floor = -1;
+	if (va_read(path, &s) < 0)
+		return va_say(say_code[SAY_NO_SCREEN], "%s",
+		              say_why[SAY_NO_SCREEN]), -1;
+	va_floor = s.top;
 	switch (ag_type(path, "/tasks", 0))
 	{
 	case 0:

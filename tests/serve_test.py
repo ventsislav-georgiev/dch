@@ -1209,6 +1209,69 @@ def main():
                   t == 0x13 and "malformed create request" in
                   json.loads(pl)["message"], (t, pl))
             s.close()
+        # NIT-XI9 (#729): a group over 255 B is no group's name; a NUL stays
+        # malformed
+        s = conn(port)
+        send(s, 0x02, {"name": "svc-g3", "group": "g" * 300})
+        t, pl = frame_not(s)
+        check("#729: 0x02 group over 255 B: the coded 0x13 no_group",
+              t == 0x13 and json.loads(pl).get("code") == "no_group", (t, pl))
+        s.close()
+        s = conn(port)
+        send(s, 0x02, {"name": "svc-g3", "group": "g" * 300 + "\u0000"})
+        t, pl = frame_not(s)
+        check("#729: 0x02 group with a NUL (long too): malformed",
+              t == 0x13 and "malformed create request" in
+              json.loads(pl)["message"], (t, pl))
+        s.close()
+        # the group goes between serve's check and the child's: a dch on
+        # serve's PATH drops the config's group lines before the real child
+        wd = os.path.join(tmp, "w729bin")
+        os.makedirs(wd)
+        with open(os.path.join(wd, "dch"), "w") as f:
+            f.write('#!/bin/sh\nif [ "$1" = -E ]; then grep -v "^group" '
+                    '"$DCH_CONFIG" > "$DCH_CONFIG.n"; '
+                    'mv "$DCH_CONFIG.n" "$DCH_CONFIG"; fi\nexec "%s" "$@"\n'
+                    % DCH)
+        os.chmod(os.path.join(wd, "dch"), 0o755)
+        with open(env["DCH_CONFIG"]) as f:
+            cfg0 = f.read()
+        wp, wport, _ = serve("--allow-create", argv0="dch",
+                             e=dict(benv, PATH=wd + ":" + env["PATH"]))
+        s = conn(wport)
+        send(s, 0x02, {"name": "svc-g6", "cols": 80, "rows": 24,
+                       "group": "Ops", "command": ["sleep", "600"]})
+        t, pl = frame_not(s)
+        check("#729: the group gone at the child's re-check: the coded "
+              "0x13 no_group, not a 0x12", t == 0x13 and json.loads(pl) == {
+                  "code": "no_group",
+                  "message": "no such group in the config"}, (t, pl))
+        check("#729: then the connection closes", gone_after(s))
+        s.close()
+        with open(env["DCH_CONFIG"], "w") as f:
+            f.write(cfg0)
+        stop(wp)
+        # a child exiting 1 after serve's 10 s window (a stand-in dch that
+        # sleeps; the group is gone by then) ends as a 0x12, not no_group
+        with open(os.path.join(wd, "dch"), "w") as f:
+            f.write('#!/bin/sh\nif [ "$1" = -E ]; then sleep 10.5; exit 1; '
+                    'fi\nexec "%s" "$@"\n' % DCH)
+        wp, wport, _ = serve("--allow-create", argv0="dch",
+                             e=dict(benv, **{"PATH": wd + ":" + env["PATH"]}))
+        s = conn(wport)
+        send(s, 0x02, {"name": "svc-g7", "cols": 80, "rows": 24,
+                       "group": "Ops", "command": ["sleep", "600"]})
+        time.sleep(0.5)
+        with open(env["DCH_CONFIG"], "w") as f:
+            f.write("")
+        s.settimeout(20)
+        t, pl = frame_not(s)
+        check("#729: a grouped child's exit 1 after the window is a 0x12, "
+              "no no_group", t == 0x12, (t, pl))
+        s.close()
+        stop(wp)
+        with open(env["DCH_CONFIG"], "w") as f:
+            f.write(cfg0)
         r = subprocess.run([DCH, "--spawn", "svc-g4", "--size", "80x24",
                             "sleep", "600"], env=env, capture_output=True,
                            timeout=30)
