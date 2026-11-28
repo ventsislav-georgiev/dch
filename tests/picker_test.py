@@ -546,15 +546,32 @@ def footshells():
     dch("--keys", "pkf2", "q")
     # a Claude with two background shells, as transcript_test fakes one: the
     # transcript's result line is what marks a shell background (#557)
-    def fake_claude(name, sid, shs, bg):
+    # mon: commands run as Monitor tasks (#725), the transcript naming each;
+    # fg: the same wrapper with no Monitor call (a foreground Bash call)
+    def fake_claude(name, sid, shs, bg, mon=(), fg=()):
         d = os.path.join(ROOT, "claude-%d" % os.getuid(), "-p", sid, "tasks")
         os.makedirs(d)
         pd = os.path.join(ENV["CLAUDE_CONFIG_DIR"], "projects", "-p")
         os.makedirs(pd, exist_ok=True)
+        iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
         with open(os.path.join(pd, sid + ".jsonl"), "w") as f:
             for k in bg:
                 f.write('{"type":"user","toolUseResult":{"backgroundTaskId":'
                         '"%s"}}\n' % k)
+            for k, c in enumerate(mon):
+                f.write(json.dumps({"type": "assistant", "timestamp": iso(
+                    time.time() - 1), "message": {"content": [{
+                        "type": "tool_use", "id": "toolu_m%d" % k,
+                        "name": "Monitor", "input": {"command": c}}]}},
+                    separators=(",", ":")) + "\n")
+                f.write(json.dumps({"type": "user", "timestamp": iso(
+                    time.time() + 5), "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": "toolu_m%d" % k,
+                        "content": "Monitor started (task bm%d, timeout "
+                                   "1000ms)." % k}]}},
+                    separators=(",", ":")) + "\n")
+        wrap = ["true && eval '%s' < /dev/null && pwd -P >| /dev/null" % c
+                for c in tuple(mon) + tuple(fg)]
         dch("--spawn", name, "--size", "80x24", sys.executable, "-c",
             "import json,os,subprocess as sp,time\n"
             "p=os.getpid()\n"
@@ -567,8 +584,12 @@ def footshells():
             "for k in %r:\n"
             "    sp.Popen(['sleep','600'],stdout=open(%r+'/'+k+'.output','ab'),"
             "stdin=sp.DEVNULL)\n"
+            "for w in %r:\n"
+            "    sp.Popen(['/bin/sh','-c',w],stdout=sp.DEVNULL,"
+            "stdin=sp.DEVNULL)\n"
             "time.sleep(600)\n" % (sid, os.path.join(
-                ENV["CLAUDE_CONFIG_DIR"], "sessions", "%d.json"), shs, d))
+                ENV["CLAUDE_CONFIG_DIR"], "sessions", "%d.json"), shs, d,
+                wrap))
     fake_claude("pkshell", "53353353-3533-4533-8533-533533533533",
                 ("b1", "b2"), ("b1", "b2"))
     fake_claude("pkfg", "53353353-3533-4533-8533-533533533534",
@@ -608,6 +629,15 @@ def footshells():
           "counted within 20 s (first draw %r, then %s)" %
           (first_draw, shells(s)[1]), not first_draw and
           shells(s)[1].get("pkrl") == "1", s)
+    # a Monitor task counts as a background shell; a foreground-style child
+    # of the same wrapper that no Monitor call names does not (#725)
+    fake_claude("pkmon", "53353353-3533-4533-8533-533533533536", ("b5",),
+                ("b5",), mon=("sleep 600.0725",), fg=("sleep 601.0725",))
+    s = wait_screen("pkf3", lambda s: shells(s)[1].get("pkmon") == "2")
+    check("#725: SHELLS counts a monitor beside a background shell, not a "
+          "foreground-style child: 2 (%s)" % shells(s)[1],
+          shells(s)[1].get("pkmon") == "2", s)
+    dch("-k", "pkmon")
     dch("-k", "pkrl")
     dch("-k", "pkshell")
     dch("-k", "pkfg")

@@ -3024,8 +3024,9 @@ usage(void)
 	    "                                             \"stopped\"; dch --revive\n"
 	    "                                             <name> wakes it resumed\n"
 	    "  dch --stop-shell <name> <id> [--json]      end one Claude Bash\n"
-	    "                                             tool shell (an --ls-json\n"
-	    "                                             shells id) and its tree\n"
+	    "                                             tool shell or Monitor\n"
+	    "                                             (an --ls-json shells id)\n"
+	    "                                             and its tree\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"; --remote\n"
 	    "                   adds remote rows, each with a \"host\";\n"
 	    "                   --follow: again, one line, on each change\n"
@@ -7056,19 +7057,18 @@ cut_text(const char *s, size_t n, char *out, size_t cap)
 
 /* A Bash tool shell's command (#481): the argument of the wrapper's
 ** `eval '…'` (zsh and bash alike), its quoting undone ('\'' and '"'"'),
-** else argv joined; cut by cut_text. */
-static void
-shell_command(char **v, char *out, size_t cap)
+** else argv joined (*ev 0 then); malloc'd, NULL out of memory. */
+static char *
+shell_eval(char **v, int *ev)
 {
 	size_t len = 0;
 	char *j, *s, *w;
 	int k;
 
-	out[0] = '\0';
 	for (k = 0; v[k]; k++)
 		len += strlen(v[k]) + 1;
 	if (!(j = malloc(len + 1)))
-		return;
+		return NULL;
 	for (s = j, k = 0; v[k]; k++)
 		s += sprintf(s, "%s%s", k ? " " : "", v[k]);
 	if ((s = strstr(j, "eval '")))
@@ -7089,7 +7089,20 @@ shell_command(char **v, char *out, size_t cap)
 	else
 		w = j + strlen(j);
 	*w = '\0';
-	cut_text(j, (size_t)(w - j), out, cap);
+	*ev = s != NULL;
+	return j;
+}
+
+/* shell_eval cut by cut_text into out[cap]. */
+static void
+shell_command(char **v, char *out, size_t cap)
+{
+	char *j;
+	int ev;
+
+	out[0] = '\0';
+	if ((j = shell_eval(v, &ev)))
+		cut_text(j, strlen(j), out, cap);
 	free(j);
 }
 
@@ -7457,11 +7470,293 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 ** alike (each a session leader with stdin /dev/null): owner, description
 ** and "background" come from the transcript at `tp` (#482), NULL none.
 ** claude_shells walks them into sh[64] (show: commands too), put_shells
-** prints them; --stop-shell signals one (#711). */
-struct shl { long pid, pgid; time_t t; char id[64], cmd[201], out[PATH_MAX]; };
+** prints them; --stop-shell signals one (#711).
+** Monitor tasks too (#725, "monitor":true): Claude Code starts one as its
+** direct child in the same wrapper, stdout a pipe it copies to the .output
+** itself, as a foreground Bash call looks. So only a child whose eval'd
+** command equals a Monitor tool_use's input.command, started from that
+** call's timestamp to 10 s past its result (which names the task id), is
+** one; see mon_shells. */
+struct shl { long pid, pgid; time_t t; int mon;
+             char id[64], cmd[201], out[PATH_MAX], desc[201]; };
+
+/* A Monitor tool_use of the main transcript (#725): tu its id, tsu its
+** line's timestamp (ms), tsr its result's (s, -1 none yet), task the id
+** that result names ("" none), cmd its input.command (malloc'd). */
+struct mtu { long long tsu; long tsr; char tu[128], task[64], desc[201];
+             char *cmd; };
+
+/* String token `tok` decoded into a malloc'd string, NULL none. */
+static char *
+json_dup(const struct json_parser *p, int tok)
+{
+	size_t n;
+	char *s;
+
+	if (tok < 0 || p->tok[tok].kind != JSON_STRING)
+		return NULL;
+	n = (size_t)(p->tok[tok].end - p->tok[tok].start) + 1;
+	if ((s = malloc(n)) && dch_json_decode(p, tok, s, n) != 0)
+		free(s), s = NULL;
+	return s;
+}
+
+/* The entry of mv[*nm] (cap 64) for tool_use id tu, added when new; NULL
+** when full. */
+static struct mtu *
+mtu_of(struct mtu *mv, int *nm, const char *tu)
+{
+	int i;
+
+	for (i = 0; i < *nm && strcmp(mv[i].tu, tu); i++)
+		;
+	if (i == *nm)
+	{
+		if (*nm >= 64)
+			return NULL;
+		memset(&mv[i], 0, sizeof mv[i]);
+		mv[i].tsr = -1;
+		snprintf(mv[i].tu, sizeof mv[i].tu, "%s", tu);
+		(*nm)++;
+	}
+	return &mv[i];
+}
+
+/* The Monitor tool_uses and their results in the window of transcript tp
+** around t (tx_shell's: 64 KB before 10 s ahead of t, then 1 MB), added
+** to mv[*nm] once each. Only complete lines count. */
+static void
+tx_monitors(const char *tp, time_t t, struct mtu *mv, int *nm)
+{
+	enum { BACK = 64 << 10, FWD = 1 << 20 };
+	static char *b;	/* one window for every call, kept to the exit */
+	struct json_parser p;
+	struct stat st;
+	struct mtu *m;
+	char tu[128], ts[40], *ls, *le, *x, *y;
+	long long tsu;
+	off_t at;
+	ssize_t n = 0, k;
+	int fd, a, i, use, res;
+
+	if ((fd = open(tp, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
+		return;
+	if (fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+	    (!b && !(b = malloc(BACK + FWD + 1))))
+		goto out;
+	at = ts_seek(fd, st.st_size, t);
+	at = at > BACK ? at - BACK : 0;
+	while (n < BACK + FWD && (k = pread(fd, b + n, (size_t)(BACK + FWD - n),
+	                                    at + n)) > 0)
+		n += k;
+	tx_read += (size_t)n;
+	b[n] = '\0';
+	ls = b;
+	if (at > 0 && (ls = memchr(b, '\n', (size_t)n)))	/* a cut first line */
+		ls++;
+	for (; ls && (le = memchr(ls, '\n', (size_t)(b + n - ls))); ls = le + 1)
+	{
+		use = mem_find(ls, le, "\"name\":\"Monitor\"", 16) != NULL;
+		res = mem_find(ls, le, "Monitor started (task ", 22) != NULL;
+		if (!use && !res)
+			continue;
+		*le = '\0';
+		if (dch_json_parse(&p, ls) == 0 &&
+		    dch_json_decode(&p, jfield(&p, 0, "timestamp"), ts, sizeof ts)
+		    == 0 && (tsu = iso_epoch(ts)) >= 0 &&
+		    (a = jfield(&p, jfield(&p, 0, "message"), "content")) >= 0 &&
+		    p.tok[a].kind == JSON_ARRAY)
+			for (tsu = tsu * 1000 + iso_ms, i = a + 1; i < p.tok[a].next;
+			     i = p.tok[i].next)
+			{
+				if (dch_json_decode(&p, jfield(&p, i, "type"), tu, sizeof tu))
+					continue;
+				if (use && !strcmp(tu, "tool_use") &&
+				    !dch_json_decode(&p, jfield(&p, i, "name"), tu, sizeof tu) &&
+				    !strcmp(tu, "Monitor") &&
+				    !dch_json_decode(&p, jfield(&p, i, "id"), tu, sizeof tu) &&
+				    (m = mtu_of(mv, nm, tu)) && !m->cmd)
+				{
+					m->tsu = tsu;
+					m->cmd = json_dup(&p, jfield(&p, jfield(&p, i, "input"),
+					                             "command"));
+					(void)json_cut(&p, jfield(&p, jfield(&p, i, "input"),
+					               "description"), m->desc, sizeof m->desc);
+				}
+				else if (res && !strcmp(tu, "tool_result") &&
+				         !dch_json_decode(&p, jfield(&p, i, "tool_use_id"), tu,
+				                          sizeof tu) &&
+				         (m = mtu_of(mv, nm, tu)) && !*m->task)
+				{
+					/* content: a string, or [{"type":"text","text":…}] */
+					int c = jfield(&p, i, "content");
+
+					if (c >= 0 && p.tok[c].kind == JSON_ARRAY)
+						c = jfield(&p, c + 1 < p.tok[c].next ? c + 1 : -1,
+						           "text");
+					if ((x = json_dup(&p, c)) &&
+					    !strncmp(x, "Monitor started (task ", 22))
+					{
+						y = x + 22 + strcspn(x + 22, ",) ");
+						if (*y && y > x + 22 && y - x - 22 < (long)sizeof m->task)
+						{
+							snprintf(m->task, sizeof m->task, "%.*s",
+							         (int)(y - x - 22), x + 22);
+							m->tsr = (long)(tsu / 1000);
+						}
+					}
+					free(x);
+				}
+			}
+		dch_json_free(&p);
+		*le = '\n';
+	}
+out:
+	close(fd);
+}
+
+/* Add the Monitor tasks among the direct children of the Claude at `pid`
+** (tree[n] its proc_tree) to sh[*ns] (newest first; transcript tp, NULL
+** none). A child in the Bash tool's wrapper (an `eval '…'` after `-c`)
+** whose eval'd command equals the input.command of a Monitor tool_use
+** whose result names a task id, started at or after that tool_use's
+** timestamp and at most 10 s after its result, is that task; a child
+** matching none is left out (a foreground Bash call). Several tool_uses of
+** one command pair with its children by start order (tool_use timestamp,
+** child start then pid) when those children and the tool_uses they could
+** be are as many and each k-th fits the k-th; else a child that fits only
+** one tool_use no other child fits gets its id, the rest "" (null).
+** shortcut: the main transcript only, a subagent's Monitor is left out;
+** walk subagents/ as shell_owner does if they ever matter. */
+static void
+mon_shells(long pid, const char *sid, const char *tp, const long *tree, int n,
+           struct shl *sh, int *ns, int show)
+{
+	static struct shl x;
+	struct mtu mv[64];
+	struct { long pid; time_t t; char *cmd; int u, fit; unsigned long long e; }
+	    c[64];
+	char root[PATH_MAX], f[PATH_MAX], rp[PATH_MAX], **v;
+	const char *sl, *se;
+	int nc = 0, nm = 0, i, j, k, q, w, ev, ok;
+
+	for (i = 1; tp && i < n && nc < 64; i++)
+	{
+		if (proc_ppid(tree[i]) != pid)
+			continue;
+		for (j = 0; j < *ns && sh[j].pid != tree[i]; j++)
+			;
+		if (j < *ns || (c[nc].t = proc_started(tree[i])) < 0 ||
+		    !(v = proc_argv(tree[i])))
+			continue;	/* a Bash shell, or gone */
+		c[nc].cmd = v[0] && v[1] && !strcmp(v[1], "-c") && v[2] && !v[3]
+		            ? shell_eval(v, &ev) : NULL;
+		free(v);
+		if (c[nc].cmd && ev)
+			c[nc].pid = tree[i], c[nc].u = -1, c[nc++].fit = 0;
+		else
+			free(c[nc].cmd);
+	}
+	for (i = 0; i < nc; i++)	/* one window per distinct start */
+	{
+		for (j = 0; j < i && c[j].t != c[i].t; j++)
+			;
+		if (j == i)
+			tx_monitors(tp, c[i].t, mv, &nm);
+	}
+	/* the tool_uses each child fits: bit k for mv[k] */
+	for (i = 0; i < nc; i++)
+		for (c[i].e = 0, k = 0; k < nm; k++)
+			if (mv[k].cmd && *mv[k].task && !strcmp(mv[k].cmd, c[i].cmd) &&
+			    (long long)c[i].t >= mv[k].tsu / 1000 &&
+			    (long)c[i].t <= mv[k].tsr + 10)
+				c[i].e |= 1ULL << k, c[i].fit++;
+	for (i = 0; i < nc; i++)
+	{
+		unsigned long long all = 0;
+		int cp[64], ncp = 0, uk[64], nu = 0;
+
+		if (!c[i].fit || c[i].u != -1)
+			continue;
+		/* its group: the children of the same command that fit any */
+		for (j = i; j < nc; j++)
+			if (c[j].fit && !strcmp(c[j].cmd, c[i].cmd))
+			{
+				for (q = ncp++; q > 0 && (c[cp[q - 1]].t > c[j].t ||
+				     (c[cp[q - 1]].t == c[j].t && c[cp[q - 1]].pid > c[j].pid));
+				     q--)
+					cp[q] = cp[q - 1];
+				cp[q] = j;
+				all |= c[j].e;
+			}
+		for (k = 0; k < nm; k++)
+			if (all >> k & 1)
+			{
+				for (q = nu++; q > 0 && mv[uk[q - 1]].tsu > mv[k].tsu; q--)
+					uk[q] = uk[q - 1];
+				uk[q] = k;
+			}
+		for (ok = nu == ncp, q = 0; ok && q < ncp; q++)
+			ok = c[cp[q]].e >> uk[q] & 1;
+		for (q = 0; q < ncp; q++)
+		{
+			j = cp[q];
+			c[j].u = -2;	/* null */
+			if (ok)
+				c[j].u = uk[q];
+			else if (c[j].fit == 1)
+			{
+				for (k = 0; !(c[j].e >> k & 1); k++)
+					;
+				for (w = 0; w < ncp && (w == q || !(c[cp[w]].e >> k & 1)); w++)
+					;
+				if (w == ncp)
+					c[j].u = k;
+			}
+		}
+	}
+	/* the .output: <CLAUDE_CODE_TMPDIR or /tmp>/claude-<uid>/<the
+	** transcript's project dir>/<sid>/tasks/<id>.output, as Claude Code
+	** names it, when it exists */
+	if (nc && proc_env_value(pid, "CLAUDE_CODE_TMPDIR", root, sizeof root))
+		snprintf(root, sizeof root, "/tmp");
+	for (se = tp ? strrchr(tp, '/') : NULL, sl = se; sl && sl > tp &&
+	     sl[-1] != '/'; sl--)
+		;
+	for (i = 0; i < nc; i++)
+	{
+		if (c[i].u != -1 && *ns < 64)
+		{
+			memset(&x, 0, sizeof x);
+			x.pid = c[i].pid;
+			x.t = c[i].t;
+			x.mon = 1;
+			x.pgid = (long)getpgid((pid_t)x.pid);
+			if (c[i].u >= 0)
+			{
+				snprintf(x.id, sizeof x.id, "%s", mv[c[i].u].task);
+				snprintf(x.desc, sizeof x.desc, "%s", mv[c[i].u].desc);
+				if (show && sl && snprintf(f, sizeof f, "%s/claude-%ld/%.*s/%s"
+				    "/tasks/%s.output", root, (long)getuid(), (int)(se - sl),
+				    sl, sid, x.id) < (int)sizeof f && realpath(f, rp))
+					snprintf(x.out, sizeof x.out, "%s", rp);
+			}
+			if (show)
+				cut_text(c[i].cmd, strlen(c[i].cmd), x.cmd, sizeof x.cmd);
+			for (j = (*ns)++; j > 0 && (sh[j - 1].t < x.t ||
+			     (sh[j - 1].t == x.t && sh[j - 1].pid < x.pid)); j--)
+				sh[j] = sh[j - 1];
+			sh[j] = x;
+		}
+		free(c[i].cmd);
+	}
+	for (k = 0; k < nm; k++)
+		free(mv[k].cmd);
+}
 
 static int
-claude_shells(long pid, const char *sid, struct shl *sh, int show)
+claude_shells(long pid, const char *sid, const char *tp, struct shl *sh,
+              int show)
 {
 	struct shl x;
 	long tree[PROC_TREE_MAX], pp;
@@ -7508,7 +7803,8 @@ claude_shells(long pid, const char *sid, struct shl *sh, int show)
 			continue;	/* a shell's child, or gone */
 		x.pgid = (long)getpgid((pid_t)x.pid);
 		snprintf(x.out, sizeof x.out, "%s", path);
-		x.cmd[0] = '\0';
+		x.cmd[0] = x.desc[0] = '\0';
+		x.mon = 0;
 		if (show && (v = proc_argv(x.pid)))	/* the count needs no argv */
 		{
 			shell_command(v, x.cmd, sizeof x.cmd);
@@ -7520,6 +7816,7 @@ claude_shells(long pid, const char *sid, struct shl *sh, int show)
 			sh[j] = sh[j - 1];
 		sh[j] = x;
 	}
+	mon_shells(pid, sid, tp, tree, n, sh, &ns, show);
 	return ns;
 }
 
@@ -7529,10 +7826,12 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 	static struct shl sh[64];	/* 64 x PATH_MAX: off the stack */
 	char agent[64], adesc[201], desc[201];
 	struct sub sv[256];
-	int own, nsv = -1, ns = claude_shells(pid, sid, sh, show), i, j;
-	time_t tmin;
+	int own, nsv = -1, ns = claude_shells(pid, sid, tp, sh, show), i, j;
+	time_t tmin = 0;
 
-	tmin = ns ? sh[ns - 1].t : 0;	/* newest first: the last is oldest */
+	for (i = 0; i < ns; i++)	/* newest first: the last Bash one is oldest */
+		if (!sh[i].mon)
+			tmin = sh[i].t;
 	if (!show)	/* the picker's SHELLS count: the background ones (#557) */
 	{
 		/* a shell's background flag never changes: kept per id, oldest
@@ -7544,6 +7843,11 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 
 		for (i = j = 0; tp && i < ns; i++)
 		{
+			if (sh[i].mon)	/* a monitor runs in the background */
+			{
+				j += *sh[i].id != '\0';
+				continue;
+			}
 			for (h = 0; h < bn && (strcmp(bc[h].id, sh[i].id) ||
 			     bc[h].t != sh[i].t); h++)
 				;
@@ -7566,13 +7870,23 @@ put_shells(long pid, const char *sid, const char *tp, int show)
 	for (i = 0; i < ns; i++)
 	{
 		printf("%s{\"id\":", i ? "," : "");
-		put_json_str(sh[i].id);
+		if (sh[i].mon && !*sh[i].id)
+			fputs("null", stdout);
+		else
+			put_json_str(sh[i].id);
 		printf(",\"pid\":%ld,\"started\":%ld,\"command\":", sh[i].pid,
 		       (long)sh[i].t);
 		put_json_str(sh[i].cmd);
-		fputs(",\"output\":", stdout);
-		put_json_str(sh[i].out);
+		if (!sh[i].mon || *sh[i].out)
+			fputs(",\"output\":", stdout), put_json_str(sh[i].out);
 		printf(",\"pgid\":%ld", sh[i].pgid);
+		if (sh[i].mon)
+		{
+			if (*sh[i].desc)
+				fputs(",\"description\":", stdout), put_json_str(sh[i].desc);
+			fputs(",\"monitor\":true}", stdout);
+			continue;
+		}
 		/* every key left out when unknown: no result line, no false */
 		if (tp && (own = shell_owner(tp, sh[i].id, sh[i].t, tmin, sv, &nsv,
 		    agent, adesc, sizeof adesc, desc, sizeof desc)))
@@ -12217,7 +12531,7 @@ ss_alive(long pid, time_t t)
 }
 
 /* `--stop-shell <session> <id> [--json]` (#711): SIGTERM the tree of the
-** shell --ls-json lists as <id> (the shell and every descendant, taken
+** shell or monitor (#725) --ls-json lists as <id> (the shell and every descendant, taken
 ** before any signal), then SIGKILL what of it is left after 2 s. Each pid
 ** is signalled only while its start time is the one first read (pid
 ** reuse); the Claude and the session's program never. Local only. */
@@ -12227,7 +12541,7 @@ stop_shell_main(int argc, char **argv)
 	static struct shl sh[64];
 	struct cmd_info ci;
 	struct crec c;
-	char sp[1100];
+	char sp[1100], tp[2000];
 	long tree[PROC_TREE_MAX];
 	time_t ts[PROC_TREE_MAX];
 	const char *a[2] = {NULL, NULL}, *why = NULL;
@@ -12261,7 +12575,9 @@ stop_shell_main(int argc, char **argv)
 			why = "not_claude";
 		else
 		{
-			ns = claude_shells(c.pid, c.sid, sh, 0);
+			/* a monitor by its id too (#725); one with a null id never */
+			ns = claude_shells(c.pid, c.sid, claude_transcript(&c, tp,
+			                   sizeof tp) ? NULL : tp, sh, 0);
 			for (i = 0; i < ns && strcmp(sh[i].id, a[1]); i++)
 				;
 			if (i == ns)
